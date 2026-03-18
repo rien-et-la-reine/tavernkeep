@@ -1,0 +1,4 @@
+[submodule "bartap"]
+	path = bartap
+	url = https://github.com/rien-et-la-reine/bartap
+	branch = main
