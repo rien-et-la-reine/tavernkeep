@@ -34,7 +34,6 @@ project(tavernkeep C CXX ASM)
 pico_sdk_init()
 
 # Add FatFs and driver
-add_subdirectory(ff16/source)
 add_subdirectory(bartap)
 
 # Add executable. Default name is the project name, version 0.1
@@ -57,13 +56,8 @@ target_include_directories(tavernkeep PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}
 )
 
-target_link_libraries(bartap
-    ff16
-)
-
 # Add any user requested libraries
 target_link_libraries(tavernkeep 
-        ff16
         bartap
         )
 
