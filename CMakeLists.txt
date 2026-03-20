@@ -58,6 +58,7 @@ target_include_directories(tavernkeep PRIVATE
 
 # Add any user requested libraries
 target_link_libraries(tavernkeep 
+        hardware_spi
         bartap
         )
 

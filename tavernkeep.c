@@ -5,15 +5,9 @@
 #include "hardware/pio.h"
 
 #include "ff.h"
+#include "tavernkeep.h"
+#include "bartap/bartap.c"
 
-// SPI Defines
-// We are going to use SPI 0, and allocate it to the following GPIO pins
-// Pins can be changed, see the GPIO function select table in the datasheet for information on GPIO assignments
-#define SPI_PORT spi1
-#define PIN_MISO 12
-#define PIN_CS   13
-#define PIN_SCK  14
-#define PIN_MOSI 11
 
 /* example code 
 // Data will be copied from src to dst
@@ -34,22 +28,113 @@ void blink_pin_forever(PIO pio, uint sm, uint offset, uint pin, uint freq) {
 }
 */
 
+// initialize spi and associated gpio pins
+void init_sd_connection() {
+    //reset spi peripheral
+    REG(RESETS_BASE + REG_ALIAS_SET_BITS) = SPI_RESET_BITS;
+
+    //unreset spi
+    REG(RESETS_BASE + REG_ALIAS_CLR_BITS) = SPI_RESET_BITS;
+    while ((~REG(RESETS_BASE + 0x8)) & (SPI_RESET_BITS));
+
+    //set prescaler value to 2
+    REG(SPI_BASE + SPI_SSPCPSR_OFFSET + REG_ALIAS_SET_BITS) = 2;
+
+    //set SSPCR0 bits, SCR value 255, SPH and SPO to 0, FRF to 0, DSS to 7
+    REG(SPI_BASE + SPI_SSPCR0_OFFSET + REG_ALIAS_SET_BITS) = 0x0000FF07;
+
+    //enable DMA
+    REG(SPI_BASE + SPI_SSPDMACR_OFFSET + REG_ALIAS_SET_BITS) = 3;
+
+    //enable SPI
+    REG(SPI_BASE + SPI_SSPCR1_OFFSET + REG_ALIAS_SET_BITS) = 2;
+
+    //initialize and set functions to gpio pins to be used
+    //reset gpio banks
+    REG(RESETS_BASE + REG_ALIAS_SET_BITS) = (1 << RESET_IO_BANK0) | (1 << RESET_PADS_BANK0);
+    REG(RESETS_BASE + REG_ALIAS_CLR_BITS) = (1 << RESET_IO_BANK0) | (1 << RESET_PADS_BANK0);
+    while ((~REG(RESETS_BASE + 0x8)) & ((1 << RESET_IO_BANK0) | (1 << RESET_PADS_BANK0)));
+    
+    //turn on input enable, turn off output disable
+    REG(PADS_WP_REGISTER) |= 0x40;
+    REG(PADS_MOSI_REGISTER) |= 0x40;
+    REG(PADS_MISO_REGISTER) |= 0x40;
+    REG(PADS_CS_REGISTER) |= 0x40;
+    REG(PADS_SCK_REGISTER) |= 0x40;
+    
+    //set pin functions
+    REG(IO_WP_REGISTER) = GPIO_FUNC_SIO;
+    REG(IO_MOSI_REGISTER) = GPIO_FUNC_SPI;
+    REG(IO_MISO_REGISTER) = GPIO_FUNC_SPI;
+    REG(IO_CS_REGISTER) = GPIO_FUNC_SIO;
+    REG(IO_SCK_REGISTER) = GPIO_FUNC_SPI;
+    
+    //clear ISO bits
+    REG(PADS_WP_REGISTER) &= 0xFFFFFEFF;
+    REG(PADS_MOSI_REGISTER) &= 0xFFFFFEFF;
+    REG(PADS_MISO_REGISTER) &= 0xFFFFFEFF;
+    REG(PADS_CS_REGISTER) &= 0xFFFFFEFF;
+    REG(PADS_SCK_REGISTER) &= 0xFFFFFEFF;
+    
+    //drive chip select high (active low)
+    CS_DISABLE();
+}
+
+//deinitialize spi and asociated gpio pins
+void deinit_sd_connection() {
+    //disable SPI
+    REG(SPI_BASE + SPI_SSPCR1_OFFSET + REG_ALIAS_CLR_BITS) = 2;
+    //disable DMA
+    REG(SPI_BASE + SPI_SSPDMACR_OFFSET + REG_ALIAS_CLR_BITS) = 3;
+    //reset spi peripheral
+    REG(RESETS_BASE + REG_ALIAS_SET_BITS) = SPI_RESET_BITS;
+    //TODO deinitialize gpio pins used
+    REG(RESETS_BASE + REG_ALIAS_SET_BITS) = (1 << RESET_IO_BANK0) | (1 << RESET_PADS_BANK0);
+}
+
+//increase clock speed, call post card initialization
+void speed_high() {
+    //disable SPI
+    REG(SPI_BASE + SPI_SSPCR1_OFFSET + REG_ALIAS_CLR_BITS) = 2;
+    //SCR to 3
+    REG(SPI_BASE + SPI_SSPCR0_OFFSET + REG_ALIAS_CLR_BITS) = 0x0000FC00;
+    //enable SPI
+    REG(SPI_BASE + SPI_SSPCR1_OFFSET + REG_ALIAS_SET_BITS) = 2;
+}
+
+//decrease clock speed down to initialization level
+void speed_low() {
+    //disable SPI
+    REG(SPI_BASE + SPI_SSPCR1_OFFSET + REG_ALIAS_CLR_BITS) = 2;
+    //SCR to 255
+    REG(SPI_BASE + SPI_SSPCR0_OFFSET + REG_ALIAS_SET_BITS) = 0x0000FF00;
+    //enable SPI
+    REG(SPI_BASE + SPI_SSPCR1_OFFSET + REG_ALIAS_SET_BITS) = 2;
+}
 
 int main()
 {
     stdio_init_all();
 
-    // SPI initialisation. This example will use SPI at 1MHz.
-    spi_init(SPI_PORT, 1000*1000);
-    gpio_set_function(PIN_MISO, GPIO_FUNC_SPI);
-    gpio_set_function(PIN_CS,   GPIO_FUNC_SIO);
-    gpio_set_function(PIN_SCK,  GPIO_FUNC_SPI);
-    gpio_set_function(PIN_MOSI, GPIO_FUNC_SPI);
+    //enable spi peripheral, configure pins
+    init_sd_connection();
+    //enable peripheral power (must do this before interacting with the card at all...duh)
+    //TODO
+    //check write protect pin (doubles as card detect), if wp/no card detected, notify user to check card, do not proceed with init sequence
+    //TODO
+    //small delay to give card time to power up
+    busy_wait_ms(1); //TODO replace with non sdk method
+    //80 clock cycles for synchro
+    for(uint8_t i = 0; i < 10; i++) { spi_transfer(0xFF); }
+    //deassert chip select again
+    CS_DISABLE();
+    spi_transfer(0xFF);
     
-    // Chip select is active-low, so we'll initialise it to a driven-high state
-    gpio_set_dir(PIN_CS, GPIO_OUT);
-    gpio_put(PIN_CS, 1);
-    // For more examples of SPI use see https://github.com/raspberrypi/pico-examples/tree/master/spi
+    //fatfs disk initialize
+    disk_initialize(0);
+
+    //increase spi clock speed once card is initialized
+    speed_high();
 
 /* example code 
     // Get a free channel, panic() if there are none
@@ -95,8 +180,20 @@ int main()
     // For more pio examples see https://github.com/raspberrypi/pico-examples/tree/master/pio
 */
 
+    REG(RESETS_BASE + REG_ALIAS_CLR_BITS) = (1 << RESET_IO_BANK0) | (1 << RESET_PADS_BANK0);
+    while ((~REG(RESETS_BASE + 0x8)) & ((1 << RESET_IO_BANK0) | (1 << RESET_PADS_BANK0)));
+
+    REG(IO_BANK0_BASE + IO_BANK0_GPIO25_CTRL_OFFSET) = GPIO_FUNC_SIO;
+
+    REG(PADS_BANK0_BASE + PADS_BANK0_GPIO25_OFFSET + REG_ALIAS_CLR_BITS) = PADS_BANK0_GPIO0_ISO_BITS;
+    REG(SIO_BASE + SIO_GPIO_OE_SET_OFFSET) = 1 << 25;
+
+    for (;;) {
+        REG(SIO_BASE + SIO_GPIO_OUT_XOR_OFFSET) = 1 << 25;
+        for (unsigned int i = 0; i != 1000000; i++);
+    }
+
     while (true) {
-        printf("Hello, world!\n");
-        sleep_ms(1000);
+
     }
 }
