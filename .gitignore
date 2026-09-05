@@ -22,3 +22,6 @@ Thumbs.db
 .idea/
 .vscode/*.log
 
+# Agent instructions
+AGENTS.md
+CLAUDE.md

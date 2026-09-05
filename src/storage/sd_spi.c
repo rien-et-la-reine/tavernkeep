@@ -542,7 +542,7 @@ static block_device_result_t sd_spi_device_get_info(
     sd_spi_t *const sd = context;
     (void)info;
 
-    if (sd == NULL || !sd->configured) {
+    if (sd == NULL || !sd->configured || info == NULL) {
         return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
     }
     const block_device_result_t usability = sd_spi_require_usable(sd);
@@ -550,9 +550,11 @@ static block_device_result_t sd_spi_device_get_info(
         return usability;
     }
 
-    /* TODO(owner): Report capacity parsed from the card CSD register,
-     * preserving the sd_spi_require_usable() check at each operation entry. */
-    return BLOCK_DEVICE_RESULT_NOT_IMPLEMENTED;
+    info->block_count = sd->block_count;
+    info->block_size_bytes = 512;
+    info->writable = true;
+
+    return BLOCK_DEVICE_RESULT_OK;
 }
 
 // The caller owns the captured bus and remains responsible for releasing it.
