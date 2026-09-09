@@ -212,7 +212,24 @@ static void test_bad_cmd0_crc_is_rejected_by_the_card(void)
     /* Proves the previous test has teeth: if the driver's CMD0 CRC were
      * wrong, the card refuses and initialisation fails. This is the assertion
      * that turns the CRC constants into tested behaviour rather than
-     * decoration. */
+     * decoration.
+     *
+     * PINS A LIMITATION, NOT A REQUIREMENT. The failure asserted below is the
+     * driver's placeholder CRC being refused, and it is expected to become
+     * wrong: the moment crc_helper_7() is wired into sd_spi_command(), a
+     * strict card accepts every frame and this initialisation succeeds.
+     *
+     * When that happens, delete this case rather than adjusting it - the
+     * behaviour it describes will no longer exist. Its replacement is already
+     * written: gap_every_command_frame_carries_a_valid_crc7() in
+     * test_sd_gaps.c (KNOWN_GAPS.md SD-006), which asserts the opposite and
+     * fails today. Enable it with:
+     *
+     *   ctest --test-dir tests/build -R sd_gap_command-crc --output-on-failure
+     *
+     * test_command_framing_and_crc above is unaffected either way: the wire
+     * bytes it checks, 0x95 and 0x87, are what the real polynomial produces
+     * for those two frames. */
     sd_fixture_t fx;
     sd_card_desc_t desc = sd_fx_card_sdhc();
     desc.crc_check_enabled = true; /* strict card: every frame is checked */
@@ -994,30 +1011,105 @@ static void test_bus_is_released_after_every_outcome(void)
 
 static void test_unimplemented_operations_do_not_touch_the_bus(void)
 {
-    /* write_blocks and get_info are declared but unimplemented. Pin what they
-     * promise today so a future implementation has to change the test
-     * deliberately, and prove they leave their outputs alone. */
+    /* write_blocks is still declared but unimplemented. Pin what it promises
+     * today so a future implementation has to change the test deliberately,
+     * and prove it refuses before it reaches the bus. */
     sd_fixture_t fx;
     sd_card_desc_t desc = sd_fx_card_sdhc();
     T_CHECK(sd_fx_require_init(&fx, &desc));
 
     uint8_t payload[SD_FX_BLOCK];
     memset(payload, 0x5AU, sizeof(payload));
-    block_device_info_t info;
-    memset(&info, 0xEEU, sizeof(info));
-    block_device_info_t untouched;
-    memset(&untouched, 0xEEU, sizeof(untouched));
 
     const size_t bytes_before = pico_mock_spi_transfer_count();
     T_EQ_RESULT(BLOCK_DEVICE_RESULT_NOT_IMPLEMENTED,
         block_device_write_blocks(fx.device, 0U, payload, 1U));
-    T_EQ_RESULT(BLOCK_DEVICE_RESULT_NOT_IMPLEMENTED,
+    T_EQ_U(bytes_before, pico_mock_spi_transfer_count());
+    /* The stub must not have disturbed the device either. */
+    T_CHECK(sd_fx_check_recovers(&fx, 11U) == NULL);
+}
+
+/* ---------------------------------------------------- reported geometry */
+
+/*
+ * get_info must report what the card actually is. The oracle here is the card
+ * model's own block count rather than fx.sd.block_count, so this cannot pass
+ * by comparing the driver against another copy of its own decode. Reporting
+ * geometry is answered from state cached at initialization, so it must also
+ * cost no bus traffic, and the capacity it advertises has to agree with the
+ * range read_blocks enforces.
+ */
+static void test_get_info_matches_the_card_model(void)
+{
+    static const struct {
+        const char *name;
+        sd_card_desc_t (*make)(void);
+    } rows[] = {
+        { "SDHC 8 GB, CSD v2", sd_fx_card_sdhc },
+        { "SDXC 64 GB, CSD v2", sd_fx_card_sdxc },
+        { "v1 SDSC 1 GB, CSD v1", sd_fx_card_v1_sdsc },
+        { "v2 SDSC 2 GB, CSD v1 with READ_BL_LEN 10", sd_fx_card_v2_sdsc },
+    };
+
+    for (size_t i = 0U; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+        sd_fixture_t fx;
+        sd_card_desc_t desc = rows[i].make();
+        t_context("%s", rows[i].name);
+        T_CHECK(sd_fx_require_init(&fx, &desc));
+
+        block_device_info_t info;
+        memset(&info, 0xEEU, sizeof(info));
+
+        size_t bytes_before = pico_mock_spi_transfer_count();
+        T_EQ_RESULT(BLOCK_DEVICE_RESULT_OK,
+            block_device_get_info(fx.device, &info));
+        T_EQ_U(bytes_before, pico_mock_spi_transfer_count());
+
+        /* The driver normalises every card to 512-byte logical blocks, CMD16
+         * forcing it where READ_BL_LEN says otherwise. */
+        T_EQ_U(SD_FX_BLOCK, info.block_size_bytes);
+        T_EQ_U(sd_card_block_count(), info.block_count);
+        /* Pins today's behaviour: writable is hardcoded true even though
+         * write_blocks is still NOT_IMPLEMENTED. */
+        T_CHECK(info.writable);
+
+        /* One past the advertised end is out of range, and rejected without
+         * bus traffic. */
+        uint8_t block[SD_FX_BLOCK];
+        bytes_before = pico_mock_spi_transfer_count();
+        T_EQ_RESULT(BLOCK_DEVICE_RESULT_OUT_OF_RANGE,
+            block_device_read_blocks(fx.device, info.block_count, block, 1U));
+        T_EQ_U(bytes_before, pico_mock_spi_transfer_count());
+    }
+    t_clear_context();
+}
+
+/*
+ * A card that was removed after a successful bring-up must not keep answering
+ * geometry questions from stale cached state.
+ */
+static void test_get_info_after_removal_is_rejected(void)
+{
+    sd_fixture_t fx;
+    sd_card_desc_t desc = sd_fx_card_sdhc();
+    T_CHECK(sd_fx_require_init(&fx, &desc));
+
+    block_device_info_t info;
+    block_device_info_t untouched;
+    memset(&info, 0xEEU, sizeof(info));
+    memset(&untouched, 0xEEU, sizeof(untouched));
+
+    /* Card-detect is active low: the line going high is the removal edge. */
+    pico_mock_gpio_set_input(SD_FX_PIN_CARD_DETECT, true);
+    T_CHECK(pico_mock_gpio_irq_fire(SD_FX_PIN_CARD_DETECT,
+        GPIO_IRQ_EDGE_RISE));
+
+    const size_t bytes_before = pico_mock_spi_transfer_count();
+    T_EQ_RESULT(BLOCK_DEVICE_RESULT_INVALID_DEVICE,
         block_device_get_info(fx.device, &info));
     T_EQ_U(bytes_before, pico_mock_spi_transfer_count());
-    /* An unimplemented getter must not half-fill its output. */
+    /* A rejected getter must not half-fill its output. */
     T_CHECK(memcmp(&info, &untouched, sizeof(info)) == 0);
-    /* The stubs must not have disturbed the device either. */
-    T_CHECK(sd_fx_check_recovers(&fx, 11U) == NULL);
 }
 
 /* --------------------------------------------------------------- main */
@@ -1027,7 +1119,8 @@ int main(void)
     t_run(test_card_variant_initialization, "card variant initialization matrix");
     t_run(test_initialization_command_order, "initialization command order");
     t_run(test_command_framing_and_crc, "command framing and CMD0/CMD8 CRC7");
-    t_run(test_bad_cmd0_crc_is_rejected_by_the_card, "strict card rejects placeholder CRC");
+    t_run(test_bad_cmd0_crc_is_rejected_by_the_card,
+        "strict card rejects placeholder CRC (pins today's limitation, see SD-006)");
     t_run(test_acmd41_is_always_prefixed_by_cmd55, "ACMD41 requires CMD55 and carries HCS");
     t_run(test_cmd8_response_is_matched_exactly, "CMD8 R1 sweep: only 0x01 and 0x05 are meaningful");
     t_run(test_legacy_card_omits_the_hcs_bit, "legacy card ACMD41 omits HCS");
@@ -1046,5 +1139,7 @@ int main(void)
     t_run(test_idle_clocks_precede_the_first_command, "74-clock bring-up requirement");
     t_run(test_bus_is_released_after_every_outcome, "bus released after every outcome");
     t_run(test_unimplemented_operations_do_not_touch_the_bus, "unimplemented operation contracts");
+    t_run(test_get_info_matches_the_card_model, "get_info matches the card model across variants");
+    t_run(test_get_info_after_removal_is_rejected, "get_info after removal reports INVALID_DEVICE");
     return t_summary("sd_protocol");
 }

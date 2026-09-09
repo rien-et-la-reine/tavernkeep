@@ -55,6 +55,7 @@ set(TAVERNKEEP_SOURCES
     src/platform/gpio_irq.c
     src/storage/filesystem.c
     src/storage/sd_spi.c
+    src/storage/sd_crc.c
 )
 
 add_executable(tavernkeep ${TAVERNKEEP_SOURCES})

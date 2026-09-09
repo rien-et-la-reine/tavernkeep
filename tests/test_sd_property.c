@@ -55,7 +55,12 @@ static void encode_csd_v2(uint8_t csd[16], uint32_t c_size)
     csd[15] = (uint8_t)(((unsigned)sd_crc7(csd, 15U) << 1U) | 1U);
 }
 
-static bool check_csd_v1_case(
+/*
+ * Returns NULL when the case holds, or a description of what went wrong.
+ * A bare bool would report only "the case failed", leaving the reader to work
+ * out whether it was the result, the capacity or the address bound.
+ */
+static const char *check_csd_v1_case(
     uint32_t c_size,
     uint8_t c_size_mult,
     uint8_t read_bl_len)
@@ -63,8 +68,18 @@ static bool check_csd_v1_case(
     const uint64_t capacity = ((uint64_t)c_size + 1U)
         * (UINT64_C(1) << (c_size_mult + 2U))
         * (UINT64_C(1) << read_bl_len);
-    const bool encodable = capacity != 0U && (capacity % 512U) == 0U;
     const uint64_t expected_blocks = capacity / 512U;
+
+    /* Callers only pass READ_BL_LEN 9..11, the range CSD v1 permits, so the
+     * capacity is always a whole number of 512-byte blocks and always
+     * non-zero. Encodings outside that range are a rejection case rather than
+     * a capacity case, and belong to test_csd_structure_and_field_rejection
+     * in the protocol suite. Asserted rather than branched on, because a
+     * branch here would be unreachable and would read as though the
+     * unencodable case were covered. */
+    if (read_bl_len < 9U || read_bl_len > 11U) {
+        return "test bug: READ_BL_LEN outside the CSD v1 range";
+    }
 
     sd_fixture_t fx;
     sd_card_desc_t desc = sd_fx_card_v2_sdsc();
@@ -78,14 +93,11 @@ static bool check_csd_v1_case(
         (unsigned)c_size, (unsigned)c_size_mult, (unsigned)read_bl_len,
         capacity);
 
-    if (!encodable) {
-        return result != BLOCK_DEVICE_RESULT_OK;
-    }
     if (result != BLOCK_DEVICE_RESULT_OK) {
-        return false;
+        return "a legal CSD v1 encoding was refused";
     }
     if (fx.sd.block_count != expected_blocks) {
-        return false;
+        return "block count does not match the capacity formula";
     }
 
     /* The property that keeps the driver's uint32_t command argument honest:
@@ -93,7 +105,10 @@ static bool check_csd_v1_case(
      * 32 bits. The largest legal encoding lands 512 bytes below the limit, so
      * this holds by exactly one block. */
     const uint64_t last_byte_address = (expected_blocks - 1U) * 512U;
-    return last_byte_address <= UINT32_MAX;
+    if (last_byte_address > UINT32_MAX) {
+        return "the last block's byte address overflows 32 bits";
+    }
+    return NULL;
 }
 
 static void test_csd_v1_capacity_property(void)
@@ -110,11 +125,25 @@ static void test_csd_v1_capacity_property(void)
         for (uint8_t mult = 0U; mult <= 7U; ++mult) {
             for (size_t i = 0U;
                     i < sizeof(interesting) / sizeof(interesting[0]); ++i) {
-                T_CHECK(check_csd_v1_case(interesting[i], mult, read_bl_len));
+                const char *problem =
+                    check_csd_v1_case(interesting[i], mult, read_bl_len);
+                if (problem != NULL) {
+                    t_context("C_SIZE=%u MULT=%u RBL=%u: %s",
+                        (unsigned)interesting[i], (unsigned)mult,
+                        (unsigned)read_bl_len, problem);
+                }
+                T_CHECK(problem == NULL);
             }
             for (unsigned int sample = 0U; sample < 4U; ++sample) {
                 const uint32_t c_size = (uint32_t)t_rand_below(&rng, 4096U);
-                T_CHECK(check_csd_v1_case(c_size, mult, read_bl_len));
+                const char *problem =
+                    check_csd_v1_case(c_size, mult, read_bl_len);
+                if (problem != NULL) {
+                    t_context("C_SIZE=%u MULT=%u RBL=%u (seed %" PRIu64
+                        "): %s", (unsigned)c_size, (unsigned)mult,
+                        (unsigned)read_bl_len, suite_seed, problem);
+                }
+                T_CHECK(problem == NULL);
             }
         }
     }
@@ -197,6 +226,12 @@ static void test_address_conversion_property(void)
     t_rand_t rng;
     t_rand_seed(&rng, suite_seed + 2U);
 
+    /* Every iteration whose card the CSD cannot express is skipped below. If
+     * bring-up were to break entirely, every iteration would skip and this
+     * case would pass having asserted nothing, so the number that actually
+     * ran is itself asserted. */
+    unsigned int exercised = 0U;
+
     for (unsigned int iteration = 0U; iteration < 200U; ++iteration) {
         const bool high_capacity = (t_rand_next(&rng) & 1U) != 0U;
         sd_fixture_t fx;
@@ -239,6 +274,7 @@ static void test_address_conversion_property(void)
         if (sd_fx_init(&fx) != BLOCK_DEVICE_RESULT_OK) {
             continue; /* capacity the CSD cannot express; covered elsewhere */
         }
+        exercised++;
         T_CHECK(fx.sd.block_count > 0U);
 
         for (unsigned int probe = 0U; probe < 4U; ++probe) {
@@ -259,23 +295,60 @@ static void test_address_conversion_property(void)
             T_EQ_U(0U, sd_card_protocol_errors());
         }
     }
+    t_context("%u of 200 iterations produced an encodable card", exercised);
+    /* Comfortably below what a healthy run reaches, but far above zero: this
+     * fails loudly if bring-up regresses into skipping every iteration. */
+    T_CHECK(exercised >= 150U);
     t_clear_context();
 }
 
 /* ------------------------------------------------------- response fuzz */
 
-static bool result_is_legal(block_device_result_t result)
+/*
+ * Two predicates rather than one, because the two fuzzes call reads under
+ * different preconditions and a single permissive set would be unfailable.
+ *
+ * Three results are a driver logic error in *both* fuzzes, because the
+ * corresponding situation never holds: the arguments are always valid
+ * (INVALID_ARGUMENT), the LBA is always inside the card's capacity
+ * (OUT_OF_RANGE), and reads are implemented (NOT_IMPLEMENTED). Excluding them
+ * is what gives these checks teeth.
+ */
+static bool read_result_is_legal_on_ready_device(block_device_result_t result)
 {
+    /* The device is initialised and the media is present; only the card's
+     * byte stream is random. NOT_INITIALIZED would therefore be wrong too. */
     switch (result) {
     case BLOCK_DEVICE_RESULT_OK:
-    case BLOCK_DEVICE_RESULT_INVALID_ARGUMENT:
-    case BLOCK_DEVICE_RESULT_NOT_INITIALIZED:
-    case BLOCK_DEVICE_RESULT_OUT_OF_RANGE:
     case BLOCK_DEVICE_RESULT_IO_ERROR:
     case BLOCK_DEVICE_RESULT_BUSY_TIMEOUT:
     case BLOCK_DEVICE_RESULT_INVALID_DEVICE:
-    case BLOCK_DEVICE_RESULT_NOT_IMPLEMENTED:
         return true;
+    case BLOCK_DEVICE_RESULT_INVALID_ARGUMENT:
+    case BLOCK_DEVICE_RESULT_NOT_INITIALIZED:
+    case BLOCK_DEVICE_RESULT_OUT_OF_RANGE:
+    case BLOCK_DEVICE_RESULT_NOT_IMPLEMENTED:
+    default:
+        return false;
+    }
+}
+
+static bool read_result_is_legal_in_any_state(block_device_result_t result)
+{
+    /* The lifecycle fuzz reads at arbitrary points, so an uninitialised or
+     * removed device is a legitimate state to be in. The exact result is
+     * still asserted per state by the branches at the call site; this is the
+     * coarse net that catches a result no state could justify. */
+    switch (result) {
+    case BLOCK_DEVICE_RESULT_OK:
+    case BLOCK_DEVICE_RESULT_IO_ERROR:
+    case BLOCK_DEVICE_RESULT_BUSY_TIMEOUT:
+    case BLOCK_DEVICE_RESULT_INVALID_DEVICE:
+    case BLOCK_DEVICE_RESULT_NOT_INITIALIZED:
+        return true;
+    case BLOCK_DEVICE_RESULT_INVALID_ARGUMENT:
+    case BLOCK_DEVICE_RESULT_OUT_OF_RANGE:
+    case BLOCK_DEVICE_RESULT_NOT_IMPLEMENTED:
     default:
         return false;
     }
@@ -330,7 +403,7 @@ static void test_random_response_stream(void)
             fx.device, 64U, sd_fx_guard_data(&buffer), blocks);
         const uint64_t elapsed_us = pico_mock_now_us() - start_us;
 
-        T_CHECK(result_is_legal(result));
+        T_CHECK(read_result_is_legal_on_ready_device(result));
         /* Termination inside the budgets the driver declares for itself. */
         T_CHECK(elapsed_us <= UINT64_C(3000000)
             + (UINT64_C(100000) * (blocks + 1U)));
@@ -419,7 +492,7 @@ static void test_random_operation_sequences(void)
                     ? t_rand_below(&rng, fx.sd.block_count - blocks) : 0U;
                 const block_device_result_t result = block_device_read_blocks(
                     fx.device, lba, sd_fx_guard_data(&buffer), blocks);
-                T_CHECK(result_is_legal(result));
+                T_CHECK(read_result_is_legal_in_any_state(result));
                 T_CHECK(sd_fx_guard_intact(&buffer));
                 if (latched) {
                     /* The latch outranks everything: it is checked before the

@@ -69,9 +69,16 @@ int main(void)
     block_device_t partial = { &context, &empty };
     REQUIRE(block_device_is_valid(&partial));
     rejects_all(&partial);
-    /* Every optional operation is checked separately; other callbacks survive. */
+    /* One missing callback must reject only its own operation. The second half
+     * of that claim needs asserting too: a NULL `init` must not stop `read`
+     * from dispatching, or a partially populated table would silently disable
+     * more than it should. Each iteration nulls one entry, checks that call is
+     * rejected without dispatching, then checks the other four still reach the
+     * backend. */
+    spy.result = BLOCK_DEVICE_RESULT_OK;
     for (unsigned int i = 0; i < 5; ++i) {
         empty = operations;
+        size_t before = spy.calls;
         switch (i) {
         case 0: empty.init = NULL; REQUIRE(block_device_init(&partial) == BLOCK_DEVICE_RESULT_INVALID_ARGUMENT); break;
         case 1: empty.deinit = NULL; REQUIRE(block_device_deinit(&partial) == BLOCK_DEVICE_RESULT_INVALID_ARGUMENT); break;
@@ -79,8 +86,18 @@ int main(void)
         case 3: empty.write_blocks = NULL; REQUIRE(block_device_write_blocks(&partial, 0, &context, 1) == BLOCK_DEVICE_RESULT_INVALID_ARGUMENT); break;
         default: empty.get_info = NULL; REQUIRE(block_device_get_info(&partial, &missing_info) == BLOCK_DEVICE_RESULT_INVALID_ARGUMENT); break;
         }
+        /* The rejected call never reached the backend. */
+        REQUIRE(spy.calls == before);
+        /* Every other operation still does. */
+        if (i != 0) { REQUIRE(block_device_init(&partial) == BLOCK_DEVICE_RESULT_OK); }
+        if (i != 1) { REQUIRE(block_device_deinit(&partial) == BLOCK_DEVICE_RESULT_OK); }
+        if (i != 2) { REQUIRE(block_device_read_blocks(&partial, 0, &context, 1) == BLOCK_DEVICE_RESULT_OK); }
+        if (i != 3) { REQUIRE(block_device_write_blocks(&partial, 0, &context, 1) == BLOCK_DEVICE_RESULT_OK); }
+        if (i != 4) { REQUIRE(block_device_get_info(&partial, &missing_info) == BLOCK_DEVICE_RESULT_OK); }
+        REQUIRE(spy.calls == before + 4);
     }
-    REQUIRE(spy.calls == 0);
+    REQUIRE(spy.calls == 20);
+    spy.calls = 0;
     REQUIRE(block_device_read_blocks(&device, 0, NULL, 1) == BLOCK_DEVICE_RESULT_INVALID_ARGUMENT);
     REQUIRE(block_device_read_blocks(&device, 0, &context, 0) == BLOCK_DEVICE_RESULT_INVALID_ARGUMENT);
     REQUIRE(block_device_write_blocks(&device, 0, NULL, 1) == BLOCK_DEVICE_RESULT_INVALID_ARGUMENT);

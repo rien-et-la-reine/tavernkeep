@@ -23,8 +23,8 @@ cmake --build tests/build -j 4
 ctest --test-dir tests/build --output-on-failure
 ```
 
-Generated files stay inside `tests`. There are **22 enabled CTest cases** and
-three disabled ones for gaps that are still open. Checks remain active under
+Generated files stay inside `tests`. There are **24 enabled CTest cases** and
+five disabled ones for gaps that are still open. Checks remain active under
 `NDEBUG`; every case has a real-time timeout.
 
 ## Where to look
@@ -47,6 +47,8 @@ three disabled ones for gaps that are still open. Checks remain active under
 | `sd_spi_host_tests` | 60 groups: SDHC/legacy/v2 SDSC, ACMD41 retries, CSD capacities and rejection, SPI framing, R1 byte limits, all error tokens, reads, canaries, address limits, cleanup, IRQ races, removal sweeps, explicit write/info stubs. Run twice, once under each clock model |
 | `sd_protocol_host_tests` | card variant matrix, command ordering, CRC7, application commands, HCS, the R1 poll boundary, all 128 R1 values, all error tokens, long multiple-block reads, addressing per card type, capacity boundaries, CSD registers from real cards, 74-clock bring-up, bus release after every outcome |
 | `sd_faults_host_tests` | fault injection across every read phase, error after partial success, CMD12 failure after good data, bounded busy periods, removal at each phase and during the release clock, OCR power-up status, reinsertion, the data-CRC gap |
+| `sd_crc_host_tests` | `crc_helper_7()` against the specification's CMD0/CMD17 vectors and, differentially, against the card model's independent CRC7. No bus |
+| `sd_crc16_host_tests` | `crc_helper_16()` against the CRC-16/XMODEM catalogue check value and hand-derivable vectors, differentially against the card model, every single-bit error in a 512-byte block, and the zero-residue property a receiver validates with. No bus |
 | `sd_property_host_tests` | CSD arithmetic across all field encodings, the largest addressable card, address conversion on random cards, random card responses, random operation and removal sequences. Seeded; prints its seed and takes `--seed N` |
 | `sd_removal_*_host_tests` | regressions for the two production defects fixed during the test overhaul |
 | `gpio_irq_host_tests` | ownership and core rules, validation, routing and masking, multiple GPIO users, callback retention, nested interrupt state, self-unregistration, out-of-range dispatch indexes |
@@ -95,5 +97,12 @@ Mutation testing is the stronger signal: see [MUTATION.md](MUTATION.md).
 - Logging is intercepted in a test-only compilation wrapper, and the main
   wrapper renames the entry point and leaves the real infinite loop with
   `longjmp` from the fake sleep. Neither replaces production behaviour.
-- Production discards the read and CSD data CRC. Passing tests do not
-  demonstrate CRC validation, working writes, FatFs, PIO/DMA or USB storage.
+- The card model validates the CRC16 the host appends to a written block and
+  rejects a mismatch with data-response token `0x0B`. It does **not** validate
+  the CRC7 on command frames unless the card description asks for it
+  (`crc_check_enabled`), which mirrors the SPI-mode default.
+- Production discards the read and CSD data CRC, and sends a real CRC7 only on
+  CMD0 and CMD8. Passing tests do not demonstrate CRC validation, per-frame
+  command CRC, working writes, FatFs, PIO/DMA or USB storage. The acceptance
+  tests for the first three are written and failing: see
+  [KNOWN_GAPS.md](KNOWN_GAPS.md) SD-003, SD-006 and SD-007.

@@ -14,6 +14,7 @@
 #include <inttypes.h>
 #include <string.h>
 
+#include "pico_mock.h"
 #include "sd_card_model.h"
 #include "sd_fixture.h"
 #include "test_harness.h"
@@ -113,13 +114,167 @@ static void gap_r1_poll_tolerance(void)
     t_clear_context();
 }
 
+/* ------------------------------------------------------------- SD-006 */
+
+static void gap_every_command_frame_carries_a_valid_crc7(void)
+{
+    /* sd_spi_command() hardcodes the CRC7 byte for CMD0 and CMD8 and sends a
+     * placeholder (stop bit only) for every other frame. A card with CRC
+     * checking enabled therefore rejects the first frame after CMD8 and
+     * bring-up fails. CMD59 can turn that checking on, and a card is entitled
+     * to have it on already, so this is a real compatibility limit rather
+     * than a theoretical one.
+     *
+     * With crc_helper_7() wired into the frame builder, a strict card must be
+     * indistinguishable from a permissive one: full bring-up, a single-block
+     * read and a multiple-block read all succeed, and the card records no
+     * protocol error at any point.
+     *
+     * When this passes, test_bad_cmd0_crc_is_rejected_by_the_card in
+     * test_sd_protocol.c is asserting the opposite and must be replaced. */
+    static const struct {
+        const char *name;
+        sd_card_desc_t (*make)(void);
+    } rows[] = {
+        { "SDHC, CSD v2", sd_fx_card_sdhc },
+        { "v1 SDSC, CMD8 illegal", sd_fx_card_v1_sdsc },
+        { "v2 SDSC, CMD16 required", sd_fx_card_v2_sdsc },
+    };
+
+    for (size_t i = 0U; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+        sd_fixture_t fx;
+        sd_card_desc_t desc = rows[i].make();
+        desc.crc_check_enabled = true; /* every frame is checked */
+        t_context("%s, strict CRC checking", rows[i].name);
+        sd_fx_begin(&fx, &desc);
+
+        T_EQ_RESULT(BLOCK_DEVICE_RESULT_OK, sd_fx_init(&fx));
+        T_EQ_U(sd_card_block_count(), fx.sd.block_count);
+        T_EQ_U(0U, sd_card_protocol_errors());
+
+        /* CMD17 framing. */
+        sd_guarded_buffer_t single;
+        sd_fx_guard_init(&single, 1U);
+        T_EQ_RESULT(BLOCK_DEVICE_RESULT_OK, block_device_read_blocks(
+            fx.device, 5U, sd_fx_guard_data(&single), 1U));
+        T_CHECK(sd_fx_guard_matches_card(&single, 5U));
+        T_EQ_U(0U, sd_card_protocol_errors());
+
+        /* CMD18 and CMD12, the two frames a single-block read never sends. */
+        sd_guarded_buffer_t multi;
+        sd_fx_guard_init(&multi, 3U);
+        T_EQ_RESULT(BLOCK_DEVICE_RESULT_OK, block_device_read_blocks(
+            fx.device, 9U, sd_fx_guard_data(&multi), 3U));
+        T_CHECK(sd_fx_guard_matches_card(&multi, 9U));
+        T_EQ_U(0U, sd_card_protocol_errors());
+        T_CHECK(sd_fx_check_bus_quiescent(&fx) == NULL);
+    }
+    t_clear_context();
+}
+
+/* ------------------------------------------------------------- SD-007 */
+
+static void gap_single_block_write_stores_the_data(void)
+{
+    /* sd_spi_device_write_blocks() is a stub returning NOT_IMPLEMENTED. Once
+     * implemented, a write must reach the card, store exactly the bytes it
+     * was given, and read back identically through the driver.
+     *
+     * The card model validates the CRC16 the host appends to each block and
+     * answers data-response token 0x0B without storing anything when it does
+     * not match, so a write path that computes the CRC wrongly fails here
+     * rather than appearing to succeed. */
+    sd_fixture_t fx;
+    sd_card_desc_t desc = sd_fx_card_sdhc();
+    T_CHECK(sd_fx_require_init(&fx, &desc));
+
+    uint8_t payload[SD_FX_BLOCK];
+    for (size_t i = 0U; i < sizeof(payload); ++i) {
+        payload[i] = (uint8_t)(0xA5U ^ (i & 0xFFU));
+    }
+
+    T_EQ_RESULT(BLOCK_DEVICE_RESULT_OK,
+        block_device_write_blocks(fx.device, 12U, payload, 1U));
+    T_EQ_U(0U, sd_card_protocol_errors());
+
+    /* What the card actually holds, read out of the model rather than back
+     * through the driver, so a driver that writes and reads the same wrong
+     * thing cannot agree with itself. */
+    uint8_t stored[SD_FX_BLOCK];
+    T_CHECK(sd_card_get_block(12U, stored));
+    T_CHECK(memcmp(stored, payload, sizeof(payload)) == 0);
+
+    /* And the round trip through the driver returns the same bytes. */
+    sd_guarded_buffer_t buffer;
+    sd_fx_guard_init(&buffer, 1U);
+    T_EQ_RESULT(BLOCK_DEVICE_RESULT_OK, block_device_read_blocks(
+        fx.device, 12U, sd_fx_guard_data(&buffer), 1U));
+    T_CHECK(sd_fx_guard_intact(&buffer));
+    T_CHECK(memcmp(sd_fx_guard_data(&buffer), payload, sizeof(payload)) == 0);
+    T_CHECK(sd_fx_check_bus_quiescent(&fx) == NULL);
+}
+
+static void gap_write_rejects_out_of_range_without_touching_the_bus(void)
+{
+    /* The range contract read_blocks already honours: an LBA at or past the
+     * card capacity is refused before any frame is sent, a count that runs
+     * past the end is refused too, and the last block is still writable. */
+    sd_fixture_t fx;
+    sd_card_desc_t desc = sd_fx_card_sdhc();
+    T_CHECK(sd_fx_require_init(&fx, &desc));
+
+    uint8_t payload[SD_FX_BLOCK];
+    memset(payload, 0x3CU, sizeof(payload));
+
+    const size_t before = pico_mock_spi_transfer_count();
+    T_EQ_RESULT(BLOCK_DEVICE_RESULT_OUT_OF_RANGE, block_device_write_blocks(
+        fx.device, fx.sd.block_count, payload, 1U));
+    T_EQ_RESULT(BLOCK_DEVICE_RESULT_OUT_OF_RANGE, block_device_write_blocks(
+        fx.device, fx.sd.block_count - 1U, payload, 2U));
+    T_EQ_U(before, pico_mock_spi_transfer_count());
+
+    T_EQ_RESULT(BLOCK_DEVICE_RESULT_OK, block_device_write_blocks(
+        fx.device, fx.sd.block_count - 1U, payload, 1U));
+    T_CHECK(sd_fx_check_bus_quiescent(&fx) == NULL);
+}
+
+static void gap_write_reports_a_rejected_data_response_token(void)
+{
+    /* The card answers each written block with a data-response token: 0x05
+     * accepted, 0x0B CRC error, 0x0D write error. A driver that ignores it
+     * reports success for a block the card refused, which is the write path
+     * equivalent of the SD-003 read gap. Both rejection tokens must surface
+     * as an error and must leave the driver usable. */
+    static const uint8_t tokens[] = { 0x0BU, 0x0DU };
+
+    for (size_t i = 0U; i < sizeof(tokens) / sizeof(tokens[0]); ++i) {
+        sd_fixture_t fx;
+        sd_card_desc_t desc = sd_fx_card_sdhc();
+        t_context("data-response token 0x%02X", (unsigned)tokens[i]);
+        T_CHECK(sd_fx_require_init(&fx, &desc));
+
+        uint8_t payload[SD_FX_BLOCK];
+        memset(payload, 0x77U, sizeof(payload));
+        sd_card_set_write_response_token(tokens[i]);
+
+        T_EQ_RESULT(BLOCK_DEVICE_RESULT_IO_ERROR,
+            block_device_write_blocks(fx.device, 20U, payload, 1U));
+        T_CHECK(sd_fx_check_bus_quiescent(&fx) == NULL);
+        /* The driver is still usable afterwards. */
+        sd_card_set_write_response_token(0x05U);
+        T_CHECK(sd_fx_check_recovers(&fx, 3U) == NULL);
+    }
+    t_clear_context();
+}
+
 /* --------------------------------------------------------------- main */
 
 int main(int argc, char **argv)
 {
     if (argc != 2) {
         (void)fprintf(stderr,
-            "usage: %s --gap-{data-crc|stop-residual|r1-tolerance}\n", argv[0]);
+            "usage: %s --gap-{data-crc|stop-residual|r1-tolerance"
+            "|command-crc|writes}\n", argv[0]);
         return 2;
     }
     if (strcmp(argv[1], "--gap-data-crc") == 0) {
@@ -131,6 +286,16 @@ int main(int argc, char **argv)
     } else if (strcmp(argv[1], "--gap-r1-tolerance") == 0) {
         t_run(gap_r1_poll_tolerance,
             "SD-005 R1 wait must cover the specified N_CR window");
+    } else if (strcmp(argv[1], "--gap-command-crc") == 0) {
+        t_run(gap_every_command_frame_carries_a_valid_crc7,
+            "SD-006 every command frame must carry a valid CRC7");
+    } else if (strcmp(argv[1], "--gap-writes") == 0) {
+        t_run(gap_single_block_write_stores_the_data,
+            "SD-007 a single-block write stores the data");
+        t_run(gap_write_rejects_out_of_range_without_touching_the_bus,
+            "SD-007 a write past the end is refused before the bus");
+        t_run(gap_write_reports_a_rejected_data_response_token,
+            "SD-007 a rejected data-response token is an error");
     } else {
         (void)fprintf(stderr, "unknown selector: %s\n", argv[1]);
         return 2;

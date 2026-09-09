@@ -300,8 +300,15 @@ void sd_card_set_stop_residual_bytes(size_t bytes);
 size_t sd_card_stop_residual_bytes(void);
 
 /* Data-response token the model returns after a written block.
- * 0x05 accepted, 0x0B CRC error, 0x0D write error. */
+ * 0x05 accepted, 0x0B CRC error, 0x0D write error. A block whose CRC16 the
+ * card rejected answers 0x0B regardless of what was set here. */
 void sd_card_set_write_response_token(uint8_t token);
+
+/* The card validates the CRC16 the host appends to every written block and,
+ * on a mismatch, answers 0x0B and stores nothing. This is on by default
+ * because real cards always check the data CRC in SPI mode; turn it off only
+ * to isolate a test from the write CRC deliberately. */
+void sd_card_set_write_crc_check(bool enabled);
 
 /* Blocks the card has actually streamed for the current/last read. Lets a
  * test prove the driver consumed exactly the blocks it asked for. */

@@ -644,3 +644,32 @@ static block_device_result_t sd_spi_stop_transmission(const sd_spi_t *sd)
 ===
 static block_device_result_t sd_spi_stop_transmission(const sd_spi_t *sd)
 {
+
+id: get-info-block-count-off-by-one
+file: src/storage/sd_spi.c
+why: off-by-one in reported capacity - a caller trusting it addresses one block past the end
+---
+    info->block_count = sd->block_count;
+===
+    info->block_count = sd->block_count + 1U;
+
+id: get-info-block-size-wrong
+file: src/storage/sd_spi.c
+why: wrong constant - the driver normalises every card to 512-byte logical blocks
+---
+    info->block_size_bytes = 512;
+===
+    info->block_size_bytes = 1024;
+
+id: get-info-skips-usability-check
+file: src/storage/sd_spi.c
+why: removed validation - geometry answered from stale cache after removal or before init
+---
+    const block_device_result_t usability = sd_spi_require_usable(sd);
+    if (usability != BLOCK_DEVICE_RESULT_OK) {
+        return usability;
+    }
+
+    info->block_count = sd->block_count;
+===
+    info->block_count = sd->block_count;

@@ -117,6 +117,39 @@ else()
         COMMAND sd_property_host_tests --seed ${TAVERNKEEP_TEST_SEED})
 endif()
 
+# The CRC7 helper on its own: specification vectors plus a differential
+# cross-check against the card model's independent implementation. It needs no
+# bus, so it links only the model (for sd_crc7 and the trace stubs the harness
+# references), the simulated clock and the assertion helpers.
+add_executable(sd_crc_host_tests test_sd_crc.c
+    support/sd_card_model.c
+    support/sim_clock.c
+    support/test_harness.c
+    ../src/storage/sd_crc.c)
+tavernkeep_configure_target(sd_crc_host_tests)
+if(TAVERNKEEP_TEST_SEED STREQUAL "")
+    add_test(NAME sd_crc_host_tests COMMAND sd_crc_host_tests)
+else()
+    add_test(NAME sd_crc_host_tests
+        COMMAND sd_crc_host_tests --seed ${TAVERNKEEP_TEST_SEED})
+endif()
+
+# The CRC16 helper: the CRC-16/XMODEM parameterisation the SD data CRC uses,
+# checked against the published catalogue value, against the card model's
+# independent implementation, and for the residue property a receiver relies on.
+add_executable(sd_crc16_host_tests test_sd_crc16.c
+    support/sd_card_model.c
+    support/sim_clock.c
+    support/test_harness.c
+    ../src/storage/sd_crc.c)
+tavernkeep_configure_target(sd_crc16_host_tests)
+if(TAVERNKEEP_TEST_SEED STREQUAL "")
+    add_test(NAME sd_crc16_host_tests COMMAND sd_crc16_host_tests)
+else()
+    add_test(NAME sd_crc16_host_tests
+        COMMAND sd_crc16_host_tests --seed ${TAVERNKEEP_TEST_SEED})
+endif()
+
 # ------------------------------------------------------- platform suites
 
 add_host_test(gpio_irq_host_tests test_gpio_irq.c
@@ -166,7 +199,7 @@ add_executable(sd_gaps_host_tests test_sd_gaps.c
     ../src/storage/sd_spi.c)
 tavernkeep_configure_target(sd_gaps_host_tests)
 
-foreach(gap IN ITEMS data-crc stop-residual r1-tolerance)
+foreach(gap IN ITEMS data-crc stop-residual r1-tolerance command-crc writes)
     add_test(NAME sd_gap_${gap} COMMAND sd_gaps_host_tests --gap-${gap})
     set_tests_properties(sd_gap_${gap} PROPERTIES TIMEOUT 60 LABELS "known-gap")
     if(NOT TAVERNKEEP_TEST_KNOWN_GAPS)

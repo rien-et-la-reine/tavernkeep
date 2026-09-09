@@ -117,6 +117,14 @@ static bool stop_stuff_sent;
 static uint64_t write_lba;
 static bool write_multiple;
 static uint8_t write_response_token;
+/* The CRC16 the host appended to the block it just sent, and whether the
+ * model checks it. A real card always validates the data CRC on a write -
+ * unlike the command CRC, which CMD59 gates - and answers data-response token
+ * 0x0B without storing the block when it does not match. Modelled so that a
+ * driver sending a wrong write CRC is caught rather than silently accepted. */
+static uint16_t host_write_crc;
+static bool write_crc_check_enabled = true;
+static bool write_crc_rejected;
 
 static uint64_t busy_until_us;
 static size_t global_busy_bytes;
@@ -1002,6 +1010,9 @@ void sd_card_reset(const sd_card_desc_t *desc)
     write_lba = 0U;
     write_multiple = false;
     write_response_token = 0x05U;
+    host_write_crc = 0U;
+    write_crc_check_enabled = true;
+    write_crc_rejected = false;
     busy_until_us = 0U;
     global_busy_bytes = 0U;
     sd_card_script_clear();
@@ -1093,6 +1104,11 @@ size_t sd_card_stop_residual_bytes(void)
 void sd_card_set_write_response_token(uint8_t token)
 {
     write_response_token = token;
+}
+
+void sd_card_set_write_crc_check(bool enabled)
+{
+    write_crc_check_enabled = enabled;
 }
 
 uint64_t sd_card_stream_blocks_sent(void)
@@ -1388,10 +1404,22 @@ static uint8_t produce_byte(uint8_t mosi)
         if (state_overridden) {
             return value;
         }
+        host_write_crc = (uint16_t)((host_write_crc << 8U) | mosi);
         data_crc_index++;
         if (data_crc_index >= 2U) {
-            (void)sd_card_set_block(write_lba, data_buffer);
-            trace_simple(SD_EV_BLOCK_WRITTEN, 0U, (uint32_t)write_lba);
+            const uint16_t expected =
+                sd_crc16_ccitt(data_buffer, SD_MODEL_BLOCK_SIZE);
+            if (write_crc_check_enabled && host_write_crc != expected) {
+                /* A real card discards the block and reports the error in the
+                 * data-response token; it does not store partial data. */
+                note_protocol_error("write data CRC16 rejected");
+                write_crc_rejected = true;
+            } else {
+                write_crc_rejected = false;
+                (void)sd_card_set_block(write_lba, data_buffer);
+                trace_simple(SD_EV_BLOCK_WRITTEN, 0U, (uint32_t)write_lba);
+            }
+            host_write_crc = 0U;
             write_lba++;
             state = ST_WRITE_RESPONSE;
         }
@@ -1399,8 +1427,10 @@ static uint8_t produce_byte(uint8_t mosi)
     }
 
     case ST_WRITE_RESPONSE: {
-        const uint8_t value =
-            emit(SD_PHASE_WRITE_RESPONSE, write_response_token);
+        /* 0x0B is the specification's "CRC error" data-response token. It
+         * outranks the token a test asked for: the card rejected the block. */
+        const uint8_t token = write_crc_rejected ? 0x0BU : write_response_token;
+        const uint8_t value = emit(SD_PHASE_WRITE_RESPONSE, token);
         if (state_overridden) {
             return value;
         }

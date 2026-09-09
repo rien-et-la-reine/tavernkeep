@@ -3,7 +3,7 @@
 Coverage says which lines ran. It says nothing about whether the suite would
 notice those lines being wrong. This is the evidence that it would.
 
-`tools/mutations.txt` holds 50 deliberate mistakes in `src/storage/sd_spi.c` and
+`tools/mutations.txt` holds 56 deliberate mistakes in `src/storage/sd_spi.c` and
 `src/platform/gpio_irq.c`, one per record, chosen to span the failure classes
 that matter for this driver: wrong constants, reversed conditions, removed
 validation, incorrect bit masks, truncated integer widths, off-by-one range
@@ -24,6 +24,22 @@ build failure. It normalises line endings before matching, because the
 repository mixes LF and CRLF sources and a pattern that fails to apply would
 otherwise be reported as a surviving mutation, which is a false clean bill of
 health.
+
+## Pending re-run
+
+Three records were added after the recorded run below, covering
+`sd_spi_device_get_info()`, which became live code in `7676adb` and had no
+mutation coverage until then:
+
+| Mutation | Class | Detected by |
+| --- | --- | --- |
+| `get-info-block-count-off-by-one` | off-by-one range check | `sd_spi`, `sd_protocol` |
+| `get-info-block-size-wrong` | wrong constant | `sd_spi`, `sd_protocol` |
+| `get-info-skips-usability-check` | removed validation | `sd_spi` (3 cases), `sd_protocol` |
+
+Each was confirmed detected by compiling the mutated source against the two
+suites directly; the table below has not been regenerated through
+`tools/mutate.py`, so the totals in it exclude these three.
 
 ## Result, 2026-09-05, GCC 13.3.0, Release
 

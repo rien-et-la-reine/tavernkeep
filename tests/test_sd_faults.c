@@ -129,18 +129,36 @@ static void sweep_read_faults(size_t blocks)
                 T_CHECK(sd_fx_guard_intact(&buffer));
 
                 /* 4. On success the data must be right - except where the
-                 *    fault corrupted payload bytes. The driver discards the
-                 *    data CRC (KNOWN_GAPS.md SD-003), so it cannot detect
-                 *    payload corruption and reports success with wrong data.
-                 *    That gap has its own dedicated case below; excluding it
-                 *    here keeps the sweep's other invariants meaningful
-                 *    instead of failing every payload row for one known
-                 *    reason. When CRC validation lands, drop this exclusion
-                 *    and the sweep tightens automatically. */
-                const bool fault_corrupts_payload =
+                 *    fault put bytes into the payload that the driver cannot
+                 *    tell from the card's own content. The driver discards
+                 *    the data CRC (KNOWN_GAPS.md SD-003), so it reports
+                 *    success with whatever arrived. That gap has its own
+                 *    dedicated case below; excluding it here keeps the
+                 *    sweep's other invariants meaningful instead of failing
+                 *    every payload row for one known reason.
+                 *
+                 *    Every fault kind currently in the table substitutes
+                 *    payload bytes when injected at DATA_PAYLOAD - STALL
+                 *    answers 0xFF onward, BUSY_FOREVER answers 0x00 onward,
+                 *    GARBAGE substitutes, FLIP_BITS alters, and TRUNCATE ends
+                 *    the payload and idles at 0xFF - so all five are listed.
+                 *    They are listed explicitly rather than excluded by phase
+                 *    alone so that a fault kind added to the table later is
+                 *    *checked* by default: if it genuinely rewrites payload,
+                 *    that is a deliberate line to add here, not something it
+                 *    inherits silently.
+                 *
+                 *    When SD-003 is fixed, delete `fault_rewrites_payload`
+                 *    and the condition below becomes a plain
+                 *    `result == OK` check. */
+                const bool fault_rewrites_payload =
                     phases[p] == SD_PHASE_DATA_PAYLOAD
-                    && faults[f].kind != SD_FAULT_NONE;
-                if (result == BLOCK_DEVICE_RESULT_OK && !fault_corrupts_payload) {
+                    && (faults[f].kind == SD_FAULT_STALL
+                        || faults[f].kind == SD_FAULT_BUSY_FOREVER
+                        || faults[f].kind == SD_FAULT_GARBAGE
+                        || faults[f].kind == SD_FAULT_FLIP_BITS
+                        || faults[f].kind == SD_FAULT_TRUNCATE);
+                if (result == BLOCK_DEVICE_RESULT_OK && !fault_rewrites_payload) {
                     T_CHECK(sd_fx_guard_matches_card(&buffer, 42U));
                 }
 

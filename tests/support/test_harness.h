@@ -45,16 +45,6 @@ const char *t_result_name(block_device_result_t result);
         }                                                                      \
     } while (false)
 
-/* Like T_CHECK but keeps going, for loops where one bad row should not hide
- * the rest. Use sparingly: it can turn one bug into pages of output. */
-#define T_CHECK_SOFT(condition)                                                \
-    do {                                                                       \
-        t_checks++;                                                            \
-        if (!(condition)) {                                                    \
-            t_report_failure(__FILE__, __LINE__, #condition);                   \
-        }                                                                      \
-    } while (false)
-
 #define T_EQ_U(expected, actual)                                               \
     do {                                                                       \
         t_checks++;                                                            \

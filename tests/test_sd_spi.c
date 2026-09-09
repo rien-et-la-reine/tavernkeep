@@ -1256,11 +1256,6 @@ static void test_read_range_uses_csd_capacity(void)
 static void test_unimplemented_operations_contract(void)
 {
     uint8_t block[SD_BLOCK_SIZE] = { 0 };
-    block_device_info_t info = {
-        .block_size_bytes = 0xaaaaU,
-        .block_count = 0xbbbbU,
-        .writable = true,
-    };
 
     pico_mock_reset();
     sd_spi_t sd = { 0 };
@@ -1268,14 +1263,88 @@ static void test_unimplemented_operations_contract(void)
     CHECK(device != NULL);
     const size_t transfers_before = pico_mock_spi_transfer_count();
 
+    /* write_blocks is the only remaining stub. It must refuse before it
+     * reaches the bus, so a caller cannot mistake a no-op for a write. */
     CHECK_EQ(BLOCK_DEVICE_RESULT_NOT_IMPLEMENTED,
         block_device_write_blocks(device, 9U, block, 1U));
-    CHECK_EQ(BLOCK_DEVICE_RESULT_NOT_IMPLEMENTED,
-        block_device_get_info(device, &info));
     CHECK_EQ(transfers_before, pico_mock_spi_transfer_count());
-    CHECK_EQ(0xaaaaU, info.block_size_bytes);
-    CHECK_EQ(0xbbbbU, info.block_count);
+}
+
+/*
+ * get_info reports the geometry cached during initialization, so it must
+ * answer from the decoded CSD without touching the bus, and the capacity it
+ * advertises must agree with the range read_blocks actually enforces.
+ */
+static void test_get_info_reports_card_geometry(void)
+{
+    uint8_t block[SD_BLOCK_SIZE];
+
+    pico_mock_reset();
+    sd_spi_t sdhc = { 0 };
+    block_device_t *device = initialize_sdhc(&sdhc);
+    CHECK(device != NULL);
+
+    block_device_info_t info = {
+        .block_size_bytes = 0xaaaaU,
+        .block_count = 0xbbbbU,
+        .writable = false,
+    };
+    size_t transfers_before = pico_mock_spi_transfer_count();
+    CHECK_EQ(BLOCK_DEVICE_RESULT_OK, block_device_get_info(device, &info));
+    CHECK_EQ(transfers_before, pico_mock_spi_transfer_count());
+    CHECK_EQ((uint64_t)SDHC_BLOCK_COUNT, info.block_count);
+    CHECK_EQ((uint32_t)SD_BLOCK_SIZE, info.block_size_bytes);
+    /* Pins today's behaviour: the driver hardcodes writable = true even
+     * though write_blocks is still NOT_IMPLEMENTED and no write-protect
+     * state is ever read. */
     CHECK(info.writable);
+
+    /* One block past the advertised end must be rejected, and rejected before
+     * any bus traffic. If this ever disagrees with block_count, a caller could
+     * derive a valid-looking LBA that the driver then refuses. */
+    transfers_before = pico_mock_spi_transfer_count();
+    CHECK_EQ(BLOCK_DEVICE_RESULT_OUT_OF_RANGE,
+        block_device_read_blocks(device, info.block_count, block, 1U));
+    CHECK_EQ(transfers_before, pico_mock_spi_transfer_count());
+
+    /* A byte-addressed CSD v1 card must report its own geometry, derived from
+     * C_SIZE/C_SIZE_MULT/READ_BL_LEN rather than the CSD v2 formula. */
+    pico_mock_reset();
+    sd_spi_t sdsc = { 0 };
+    device = initialize_legacy(&sdsc);
+    CHECK(device != NULL);
+
+    memset(&info, 0, sizeof(info));
+    transfers_before = pico_mock_spi_transfer_count();
+    CHECK_EQ(BLOCK_DEVICE_RESULT_OK, block_device_get_info(device, &info));
+    CHECK_EQ(transfers_before, pico_mock_spi_transfer_count());
+    CHECK_EQ((uint64_t)SDSC_BLOCK_COUNT, info.block_count);
+    CHECK_EQ((uint32_t)SD_BLOCK_SIZE, info.block_size_bytes);
+    CHECK(info.writable);
+}
+
+/*
+ * Before initialization there is no geometry to report. The getter must say so
+ * and leave the caller's struct untouched, so a caller that ignores the result
+ * cannot go on to read a plausible-looking zero capacity.
+ */
+static void test_get_info_before_initialization_leaves_output_untouched(void)
+{
+    pico_mock_reset();
+    sd_spi_t sd = { 0 };
+    const sd_spi_config_t config = valid_config();
+    CHECK_EQ(BLOCK_DEVICE_RESULT_OK, sd_spi_configure(&sd, &config));
+
+    block_device_info_t info;
+    block_device_info_t untouched;
+    memset(&info, 0xEEU, sizeof(info));
+    memset(&untouched, 0xEEU, sizeof(untouched));
+
+    const size_t transfers_before = pico_mock_spi_transfer_count();
+    CHECK_EQ(BLOCK_DEVICE_RESULT_NOT_INITIALIZED,
+        block_device_get_info(sd_spi_as_block_device(&sd), &info));
+    CHECK_EQ(transfers_before, pico_mock_spi_transfer_count());
+    CHECK(memcmp(&info, &untouched, sizeof(info)) == 0);
 }
 
 static void test_initialization_reports_busy_timeout(void)
@@ -1989,6 +2058,10 @@ int main(int argc, char **argv)
         "CSD capacity read range");
     run_test(test_unimplemented_operations_contract,
         "unimplemented operation contracts");
+    run_test(test_get_info_reports_card_geometry,
+        "get_info reports CSD geometry without bus traffic");
+    run_test(test_get_info_before_initialization_leaves_output_untouched,
+        "get_info before init reports NOT_INITIALIZED and writes nothing");
     run_test(test_initialization_reports_busy_timeout,
         "initialization busy timeout");
     run_test(test_read_command_reports_busy_timeout,
