@@ -29,6 +29,8 @@ int main(void)
     const uint8_t csd[] = {0xfe, 0x40, 0, 0, 0, 0, 0, 0, 0, 0x0f, 0xff, 0, 0, 0, 0, 0, 0, 0, 0};
     REQUIRE(pico_mock_sd_set_command(0, 1, NULL, 0));
     REQUIRE(pico_mock_sd_set_command(8, 1, r7, sizeof(r7)));
+    /* CMD59 (CRC_ON_OFF) is part of every bring-up; unscripted it stalls the R1 poll. */
+    REQUIRE(pico_mock_sd_set_command(59, 1, NULL, 0));
     REQUIRE(pico_mock_sd_set_command(55, 1, NULL, 0));
     REQUIRE(pico_mock_sd_set_command(41, 0, NULL, 0));
     REQUIRE(pico_mock_sd_set_command(58, 0, ocr, sizeof(ocr)));

@@ -68,8 +68,8 @@ The model enforces things a real card enforces and the old fake did not:
 
 - command framing (start bit, transmission bit, end bit) is validated;
 - CRC7 is checked on CMD0 and CMD8 always, and on everything else when the
-  card's `crc_check_enabled` is set — so the driver's CRC constants are
-  load-bearing, not decoration;
+  card's `crc_check_enabled` is set, which bring-up now turns on via CMD59 — so
+  every CRC the driver computes is load-bearing, not decoration;
 - CMD41 only behaves as ACMD41 when CMD55 immediately precedes it;
 - a high-capacity card refuses to leave the idle state unless ACMD41 carries
   the HCS bit;
@@ -208,7 +208,7 @@ it is derived from the code it stops being a test.
 
 ```sh
 python3 tests/tools/mutate.py                       # the whole catalogue
-python3 tests/tools/mutate.py --only cmd0-crc-constant
+python3 tests/tools/mutate.py --only command-crc-frame-length
 python3 tests/tools/mutate.py --list
 python3 tests/tools/mutate.py --build-dir tests/build-mutation \
     --cmake-arg=-DTAVERNKEEP_TEST_SANITIZE=ON --cmake-arg=-DCMAKE_BUILD_TYPE=Debug

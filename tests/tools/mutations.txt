@@ -13,21 +13,21 @@
 # curiosity. See MUTATION.md for the current results and for the ones that are
 # deliberately outside the tested contract.
 
-id: cmd0-crc-constant
+id: command-crc-frame-length
 file: src/storage/sd_spi.c
-why: wrong constant - the CRC7 a real card checks on CMD0
+why: wrong length - the CRC7 must cover all five bytes of the command frame
 ---
-        sd_spi_transfer(sd, 0x94|0x01);
+    sd_spi_transfer(sd, (crc_helper_7(transmit_buffer, 5) << 1)| 0x01);
 ===
-        sd_spi_transfer(sd, 0x96|0x01);
+    sd_spi_transfer(sd, (crc_helper_7(transmit_buffer, 4) << 1)| 0x01);
 
-id: cmd8-crc-constant
+id: cmd59-crc-disabled
 file: src/storage/sd_spi.c
-why: wrong constant - the CRC7 a real card checks on CMD8
+why: wrong constant - CMD59 argument bit 0 is the CRC option and 0 turns checking off
 ---
-        sd_spi_transfer(sd, 0x86|0x01);
+    result = sd_spi_command(sd, 59, 1, &r1);
 ===
-        sd_spi_transfer(sd, 0x88|0x01);
+    result = sd_spi_command(sd, 59, 0, &r1);
 
 id: acmd41-hcs-bit
 file: src/storage/sd_spi.c

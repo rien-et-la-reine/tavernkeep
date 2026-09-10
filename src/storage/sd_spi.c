@@ -5,6 +5,7 @@
 #include "hardware/gpio.h"
 #include "pico/time.h"
 #include "platform/gpio_irq.h"
+#include "sd_crc.h"
 
 enum {
     SD_SPI_CARD_DETECT_STABLE_SAMPLES = 10,
@@ -20,6 +21,7 @@ static void sd_spi_card_available_irq(
 );
 static bool sd_spi_removal_latched(const sd_spi_t *sd);
 static block_device_result_t sd_spi_require_usable(const sd_spi_t *sd);
+static bool sd_spi_wait_ready_timeout(const sd_spi_t *sd, int timeout_ms);
 static bool sd_spi_wait_ready(const sd_spi_t *sd);
 static uint8_t sd_spi_transfer(const sd_spi_t *sd, uint8_t tx);
 static block_device_result_t sd_spi_command(
@@ -211,6 +213,14 @@ static block_device_result_t sd_spi_device_init(void *context)
         return sd_spi_init_rollback(sd, BLOCK_DEVICE_RESULT_IO_ERROR);
     }
     //omitting ocr check since we're operating at 3v3 anyway and supporting that's basically mandated by the spec for all cards
+    //cmd59 to enable command crc checking, done here as per spec recommendation to protect ACMD41 as well as remaining init procedure, ensures entire init sequence is crc protected
+    result = sd_spi_command(sd, 59, 1, &r1);
+    if (result != BLOCK_DEVICE_RESULT_OK) {
+        return sd_spi_init_rollback(sd, result);
+    }
+    if (r1 > 0x01) { 
+            return sd_spi_init_rollback(sd, BLOCK_DEVICE_RESULT_IO_ERROR);
+    }
     //repeat ACMD41 until card not idle, make sure to set the HCS bit if card is v2
     absolute_time_t timeout = make_timeout_time_ms(1200); //slightly higher to account for starting timer before first attempt
     do {
@@ -529,6 +539,59 @@ static block_device_result_t sd_spi_device_write_blocks(
     if (usability != BLOCK_DEVICE_RESULT_OK) {
         return usability;
     }
+    if (first_lba >= sd->block_count || (uint64_t)block_count > sd->block_count - first_lba) {
+        return BLOCK_DEVICE_RESULT_OUT_OF_RANGE;
+    }
+    if (block_count == 0) {
+        return BLOCK_DEVICE_RESULT_OK;
+    }
+
+    uint8_t r1, token;
+    const uint8_t *buf = buffer;
+    block_device_result_t result;
+
+    //adjust block address to byte address for sdsc cards
+    if (!sd->card_type_hcxc) {
+        first_lba *= 512U;
+    }
+
+    //assert chip select
+    sd_spi_capture_bus(sd);
+
+    //requested block count check to determine command
+    if (block_count != 1) {
+        //multiblock write cmd25
+        //issue command
+        //check removal latch
+        //check r1
+        //repeat for block_count number of blocks
+            //transmit start block token + data block (check removal latch after every byte transmitted)
+            //read data response token
+                //if error, send stop tran token
+                //wait ready (NOTE: this is longer than the standard wait period, sd_spi_wait_ready_timeout(sd, 1000)
+                //release bus
+                //check removal latch
+                //return io error
+            //wait ready (NOTE: this is longer than the standard wait period, sd_spi_wait_ready_timeout(sd, 1000)
+        //transmit stop tran token
+    } else {
+        //single block write cmd24
+        //issue command
+        //check removal latch
+        //check r1
+        //transmit start block token + data block (check removal latch after every byte transmitted)
+        //read data response token
+            //if error, wait ready (NOTE: this is longer than the standard wait period, sd_spi_wait_ready_timeout(sd, 1000)
+            //release bus
+            //check removal latch
+            //return io error
+    }
+    //wait ready (NOTE: this is longer than the standard wait period, sd_spi_wait_ready_timeout(sd, 1000)
+    //release chip select
+    //check latch
+    //return ok
+
+    //todo: see if the "release chip, check latch, return result" in the multiblock error, single block error, and success paths can be collapsed together
 
     /* TODO(owner): Implement bounded-time SD SPI block writes, preserving the
      * sd_spi_require_usable() check at each operation entry. */
@@ -563,14 +626,21 @@ static block_device_result_t sd_spi_stop_transmission(const sd_spi_t *sd)
     if (sd_spi_removal_latched(sd)) {
         return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
     }
+    uint8_t transmit_buffer[5], i;
 
-    // CMD12 must be sent while the card is still in the active CMD18 state.
-    sd_spi_transfer(sd, 12U | 0x40U);
-    sd_spi_transfer(sd, 0x00U);
-    sd_spi_transfer(sd, 0x00U);
-    sd_spi_transfer(sd, 0x00U);
-    sd_spi_transfer(sd, 0x00U);
-    sd_spi_transfer(sd, 0x01U);
+    //populate transmit buffer
+    transmit_buffer[0] = 12U | 0x40;
+    transmit_buffer[1] = (0x00U);
+    transmit_buffer[2] = (0x00U);
+    transmit_buffer[3] = (0x00U);
+    transmit_buffer[4] = (0x00U);
+    //send command index and args
+    for (i = 0; i < 5; i++) {
+        sd_spi_transfer(sd, transmit_buffer[i]);
+    }
+    //send CRC7
+    sd_spi_transfer(sd, (crc_helper_7(transmit_buffer, 5) << 1)| 0x01);
+
     if (sd_spi_removal_latched(sd)) {
         return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
     }
@@ -784,7 +854,11 @@ static block_device_result_t sd_spi_require_usable(const sd_spi_t *sd) {
 }
 
 static bool sd_spi_wait_ready(const sd_spi_t *sd) {
-    absolute_time_t timeout = make_timeout_time_ms(1000);
+    return sd_spi_wait_ready_timeout(sd, 250); //this value is an estimate, not from spec
+}
+
+static bool sd_spi_wait_ready_timeout(const sd_spi_t *sd, int timeout_ms) {
+    absolute_time_t timeout = make_timeout_time_ms(timeout_ms);
     while (!time_reached(timeout)) {
         if (sd_spi_removal_latched(sd)) {
             return false;
@@ -813,8 +887,9 @@ static block_device_result_t sd_spi_command(
     uint32_t arg,
     uint8_t *r1)
 {
-    uint8_t i = 0;
     uint8_t response;
+    uint8_t transmit_buffer[5];
+    uint8_t i = 0;
 
     if (sd_spi_removal_latched(sd)) {
         return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
@@ -826,25 +901,24 @@ static block_device_result_t sd_spi_command(
             ? BLOCK_DEVICE_RESULT_INVALID_DEVICE
             : BLOCK_DEVICE_RESULT_BUSY_TIMEOUT;
     }
-    //send command index cmd
-    sd_spi_transfer(sd, cmd | 0x40);
-    //send argument arg, big endian
-    sd_spi_transfer(sd, (uint8_t) (arg >> 24));
-    sd_spi_transfer(sd, (uint8_t) (arg >> 16));
-    sd_spi_transfer(sd, (uint8_t) (arg >> 8));
-    sd_spi_transfer(sd, (uint8_t) (arg));
-    //send CRC if needed
-    if (cmd == 0) {
-        sd_spi_transfer(sd, 0x94|0x01);
-    } else if (cmd == 8) {
-        sd_spi_transfer(sd, 0x86|0x01);
-    } else {
-        sd_spi_transfer(sd, 0x00|0x01);
+    //populate transmit buffer
+    transmit_buffer[0] = cmd | 0x40;
+    transmit_buffer[1] = (uint8_t) (arg >> 24);
+    transmit_buffer[2] = (uint8_t) (arg >> 16);
+    transmit_buffer[3] = (uint8_t) (arg >> 8);
+    transmit_buffer[4] = (uint8_t) (arg);
+    //send command index and args
+    for (i = 0; i < 5; i++) {
+        sd_spi_transfer(sd, transmit_buffer[i]);
     }
+    //send CRC7
+    sd_spi_transfer(sd, (crc_helper_7(transmit_buffer, 5) << 1)| 0x01);
+
     if (sd_spi_removal_latched(sd)) {
         return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
     }
     //wait for R1 response
+    i = 0;
     while (((response = sd_spi_transfer(sd, 0xFF)) & 0x80) == 0x80) {
         if (sd_spi_removal_latched(sd)) {
             return BLOCK_DEVICE_RESULT_INVALID_DEVICE;

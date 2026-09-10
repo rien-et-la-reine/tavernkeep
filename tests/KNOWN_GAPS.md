@@ -1,6 +1,6 @@
 # Production contract gaps
 
-Gaps that are still open, and the three that were fixed. Each open gap has a
+Gaps that are still open, and the four that were fixed. Each open gap has a
 registered regression that asserts the behaviour the driver *should* have and
 therefore fails against the current source. They are disabled by default, so a
 green default run is not evidence that they are resolved.
@@ -11,12 +11,77 @@ cmake --build tests/build
 ctest --test-dir tests/build -L known-gap --output-on-failure
 ```
 
-All five currently fail. `-DTAVERNKEEP_TEST_KNOWN_GAPS=OFF` restores the
-default; `ctest -L host` selects the enabled coverage alone.
+Four of the five currently fail; `sd_gap_command-crc` passes now that SD-006 is
+fixed and can be promoted out of the label when convenient.
+`-DTAVERNKEEP_TEST_KNOWN_GAPS=OFF` restores the default; `ctest -L host` selects
+the enabled coverage alone.
 
-SD-006 and SD-007 describe work that is planned rather than deferred: they are
-the acceptance tests for per-frame command CRC7 and for the write path, written
-ahead of the implementation so the target is fixed before the code is.
+SD-007 describes work that is planned rather than deferred: it is the acceptance
+test for the write path, written ahead of the implementation so the target is
+fixed before the code is. SD-006 was the same for per-frame command CRC7 and is
+now closed; see "Fixed during this work".
+
+## Order of work
+
+1. ~~**SD-006** - CMD12's placeholder CRC.~~ Done 2026-09-09.
+2. **SD-007** — writes. The current priority. One-shot
+   `crc_helper_16()` over the contiguous source buffer is sufficient for this;
+   the write path does not need the resumable form below.
+3. **Resumable CRC16, together with transfer pipelining.** See the note under
+   "CRC16: interleaving versus pipelining" below for why these are one item and
+   not two, and why neither belongs ahead of writes.
+4. Everything else here, and the card recovery policy in
+   [VALIDATION_PLAN.md](VALIDATION_PLAN.md).
+
+The reason this is written down: writes are major functionality that has sat
+unimplemented while several hardening and refinement passes went ahead of them.
+SD-003, SD-004, SD-005 and the recovery policy are all hardening. Each is worth
+doing and none of them is worth doing before the storage layer can write, so
+they should stop displacing it. A driver that reads reliably and cannot write is
+not further from finished than one that reads and writes imperfectly - it is
+missing half the contract.
+
+### CRC16: interleaving versus pipelining
+
+An earlier revision put a resumable `crc_helper_16()` ahead of writes, on the
+grounds that the API should be generalised before it acquires callers. That
+argument does not hold and is recorded here so it is not made again: adding
+`crc_helper_16_update(seed, ...)` later is **additive**, with the existing
+one-shot becoming a wrapper. Nothing breaks by deferring it, so there is no
+cost to doing it when there is evidence rather than in anticipation.
+
+**Interleaving on its own buys no latency.** `sd_spi_transfer()` calls
+`spi_write_read_blocking()` for a single byte, which busy-waits on the FIFO.
+Interleaved (`transfer; crc; transfer; crc; ...`) and batched (`transfer x512;
+crc x512`) execute the same instructions serially and cost the same wall time.
+Per byte the interleaved form is *spin, then CRC* - the CRC lands after the
+wait, not inside it.
+
+**Pipelining is the mechanism that actually hides the cost.** Push byte N+1 into
+the TX FIFO, compute the CRC of byte N while it is on the wire, then collect RX.
+That requires non-blocking FIFO access instead of a blocking per-byte call, so
+it is a change to the transfer loop, not to the CRC helper. A resumable CRC is a
+**prerequisite** for it and worthless without it - which is why the two are one
+work item.
+
+Order-of-magnitude estimate, to be confirmed by measurement rather than trusted:
+at 12 MHz a byte is ~667 ns, about 100 core cycles at 150 MHz; a bit-by-bit
+CRC16 over one byte is roughly 40-60 cycles. So the CRC should fit inside a byte
+time if pipelined, and un-pipelined it plausibly adds tens of percent to a
+512-byte block's wall time. That penalty is paid identically by the interleaved
+and batched arrangements today.
+
+**This is still worth doing even though DMA will not need it.** The DMA sniffer
+computes the CRC in hardware for that path (see VALIDATION_PLAN.md), so none of
+the above applies once DMA lands. But the blocking SPI path is intended to
+remain as a fallback, and a fallback should still aim to minimise latency rather
+than being left slow on the grounds that something faster exists. It is also the
+path that runs first, on every card, before any DMA work is written.
+
+Two constraints when it happens: keep it scoped to CRC16 - CRC7 is always
+computed over exactly 5 bytes already sitting in a buffer - and do not fold in a
+table-driven rewrite, which is a separate and separately measurable
+optimisation. `docs/architecture.md` asks for the straightforward form first.
 
 ---
 
@@ -46,8 +111,14 @@ The fault sweep in `test_sd_faults.c` had to be given an explicit exclusion for
 payload-corrupting faults because of this gap. When CRC validation lands, remove
 that exclusion and the sweep tightens automatically.
 
-**Cost to fix:** a CRC16 routine and a comparison at two call sites. The
-question worth settling first is what to do on a mismatch — fail, or retry a
+**Cost to fix:** a comparison at two call sites. The routine already exists:
+`crc_helper_16()` in `src/storage/sd_crc.c` is the CRC-16/XMODEM
+parameterisation the SD data CRC uses, verified against the published catalogue
+value, differentially against the card model, on every single-bit error in a
+512-byte block, and for the zero-residue property a receiver relies on
+(`sd_crc16_host_tests`). It is not yet called from anywhere.
+
+The question worth settling first is what to do on a mismatch — fail, or retry a
 bounded number of times, which is what the card's own error-recovery model
 expects.
 
@@ -81,18 +152,44 @@ for a related collision, where an out-of-range error token arriving as CMD12 was
 sent left some cards rejecting every subsequent command until reset
 ([patch](https://lkml.iu.edu/hypermail/linux/kernel/1403.0/00865.html)).
 
-**Two candidate fixes, both design decisions:**
+**Two fixes addressing different halves. They are not alternatives.**
+
+The collision is a function of *when* CMD12 is sent. The misread R1 is a
+function of *how its response is interpreted*. Treating these as an either/or
+was an error in an earlier revision of this note.
 
 1. *Synchronise before stopping*, as Linux does: clock 0xFF until the next data
-   token appears, then send CMD12. Deterministic, but costs up to a block time
-   of extra latency on every multiple-block read and needs its own bounded wait.
-2. *Do not gate success on CMD12's response.* The data has already been received
-   and, once SD-003 is fixed, validated; CMD12 only ends the transfer. Still
-   wait for the busy period so the bus is quiescent, but do not turn a good read
-   into an error because the response byte could not be located.
+   token appears, then send CMD12. This fixes the **collision**: waiting until a
+   token has arrived and been consumed means CMD12 no longer lands while the
+   card is mid-token. The token's content is irrelevant to that — an error token
+   works as a synchronisation point exactly as a start-block token does. Costs
+   up to a block time of extra latency on every multiple-block read and needs
+   its own bounded wait.
+2. *Do not gate success on CMD12's response.* This fixes the **false negative**:
+   the data has already been received and, once SD-003 is fixed, validated, so a
+   read whose payload is good should not fail because the response byte could
+   not be located. Still wait out the busy period so the bus is quiescent. This
+   does **not** address the collision, and by discarding CMD12's response as a
+   failure signal it removes the earliest evidence that the card has wedged.
 
-Not chosen here: this changes the driver's error semantics and wants validation
-against real cards before it is settled.
+**Chosen: option 1**, because it is the one carrying the safety property. Option
+2 remains available on top of it and is worth revisiting once SD-003 lands.
+
+**Not a specification requirement.** The Physical Layer Simplified Specification
+was checked at v1.0, v2.00 §7.2.3 and v6.00 §7.2.3: all three say only that
+CMD12 "will actually stop the data transfer operation" and none prescribe
+waiting for a token first. Option 1 is a driver-level workaround for observed
+card behaviour, not a conformance obligation. What the specification does
+establish is that CMD12 is an **R1b** command — R1 with an optional trailing
+busy signal — and that for R1b commands generally the sanctioned way to learn
+the real outcome is `SEND_STATUS` (CMD13) after busy clears (§7.2.10 says this
+for lock/unlock). The driver does not currently use CMD13 anywhere.
+
+**Consequence if the collision is not prevented:** the card rejects every
+subsequent command until reset. That is unrecoverable through the command
+channel, so it needs a recovery path the driver does not yet have. Recorded
+with the reset ladder and the open design decisions in
+[VALIDATION_PLAN.md](VALIDATION_PLAN.md) under "Card recovery policy".
 
 ### SD-005 — the R1 wait is shorter than the specified response window
 
@@ -118,42 +215,13 @@ widening a tolerance is the owner's call and wants bus captures from real cards
 to size properly. `test_response_latency_boundary` pins the current boundary
 exactly from both sides, so whatever is chosen has to be chosen deliberately.
 
-### SD-006 — only CMD0 and CMD8 carry a real CRC7
-
-Affected code: `sd_spi_command()` in `src/storage/sd_spi.c`.
-
-```sh
-ctest --test-dir tests/build -R sd_gap_command-crc --output-on-failure
-```
-
-The driver sends a hardcoded CRC7 byte for CMD0 (`0x95`) and CMD8 (`0x87`) and
-a placeholder — stop bit only — for every other frame. That is legal against a
-card with CRC checking off, which is the SPI-mode default, and it is what the
-suite exercises today. It is not legal against a card that has checking on:
-CMD59 can enable it, and a card is entitled to arrive with it enabled, in which
-case the first frame after CMD8 is rejected and bring-up fails with a generic
-`IO_ERROR`.
-
-`crc_helper_7()` in `src/storage/sd_crc.c` is the intended fix and is already
-verified against the specification's vectors and against the card model's
-independent implementation (`sd_crc_host_tests`). What remains is wiring it
-into the frame builder in place of the two constants and the placeholder.
-
-The regression brings up three card variants with `crc_check_enabled` set and
-requires a full lifecycle — bring-up, a single-block read and a multiple-block
-read, so CMD17, CMD18 and CMD12 framing are all covered — with the card
-recording no protocol error at any point.
-
-**When this passes**, `test_bad_cmd0_crc_is_rejected_by_the_card` in
-`test_sd_protocol.c` asserts the opposite and must be **deleted**, not
-adjusted: the behaviour it pins will no longer exist. Its comment says so.
-`test_command_framing_and_crc` is unaffected — the wire bytes it checks are
-what the real polynomial produces.
-
 ### SD-007 — writes are unimplemented
 
 Affected code: `sd_spi_device_write_blocks()` in `src/storage/sd_spi.c`, marked
 TODO in the source.
+
+**This is the next substantial piece of work after SD-006.** See "Order of work"
+above.
 
 ```sh
 ctest --test-dir tests/build -R sd_gap_writes --output-on-failure
@@ -190,10 +258,11 @@ out where a test needs to isolate something else.
 
 ## Fixed during this work
 
-Both were previously reproduced and documented but left unfixed. They now have
-regressions in the **enabled** suite, so reintroducing either fails the default
-run; mutations `release-race-unchecked-single` and `deinit-releases-twice` in
-`tools/mutations.txt` confirm that.
+SD-001 and SD-002 were previously reproduced and documented but left unfixed.
+They now have regressions in the **enabled** suite, so reintroducing either
+fails the default run; mutations `release-race-unchecked-single` and
+`deinit-releases-twice` in `tools/mutations.txt` confirm that. SD-006 was closed
+later and is recorded below it.
 
 ### SD-001 — removal during the release clock published a successful read
 
@@ -243,6 +312,28 @@ every removal case uses, and the operation-sequence fuzz, which asserts one
 hardware release per initialisation across random lifecycles.
 
 ---
+
+### SD-006 — command frames carried a placeholder CRC7
+
+Fixed 2026-09-09. `sd_spi_command()` computes a real CRC7 with
+`crc_helper_7()` for every frame it builds, bring-up issues CMD59 with argument
+1 to enable the card's checking and rejects a card that refuses it, and
+`sd_spi_stop_transmission()` computes CMD12's CRC the same way instead of
+sending the stop-bit-only placeholder.
+
+`sd_gap_command-crc` passes and can be promoted out of the known-gap label when
+convenient. In the enabled suite, `test_command_crc_checking_is_actually_enabled`
+pins that the card really ends bring-up in checking mode,
+`test_cmd59_rejection_fails_initialization` sweeps four refusal responses, and
+`test_long_multiple_block_read` asserts the card records no protocol error
+across a full multiple-block lifecycle - which is what a placeholder CRC on
+CMD12 would trip.
+
+Worth remembering from the fix: the regression briefly *passed* while CMD59 was
+still being sent with argument 0, because the driver was switching the strict
+card's checking off and CMD12's bad CRC was therefore never examined. Asserting
+`sd_card_protocol_errors() == 0` rather than a return code is what made the real
+defect visible. Mutation `cmd59-crc-disabled` reproduces that exact trap.
 
 ## Other limits recorded during this review
 

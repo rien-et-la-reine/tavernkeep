@@ -102,6 +102,15 @@ static void configure_csd_v1(void)
     configure_csd_v1_fields(SDSC_C_SIZE, SDSC_C_SIZE_MULT, 9U);
 }
 
+/* CMD59 (CRC_ON_OFF) is issued on every successful bring-up, so a scripted
+ * card must answer it. An unscripted command answers a lone 0xFF, which never
+ * clears the R1 busy bit, so the poll exhausts its budget and initialisation
+ * fails for a reason unrelated to the case under test. */
+static void configure_crc_on_off(void)
+{
+    pico_mock_sd_set_command(59U, 0x01U, NULL, 0U);
+}
+
 static void configure_successful_sdhc_card(void)
 {
     static const uint8_t r7[] = { 0x00U, 0x00U, 0x01U, 0xaaU };
@@ -109,6 +118,7 @@ static void configure_successful_sdhc_card(void)
 
     pico_mock_sd_set_command(0U, 0x01U, NULL, 0U);
     pico_mock_sd_set_command(8U, 0x01U, r7, sizeof(r7));
+    configure_crc_on_off();
     pico_mock_sd_set_command(55U, 0x01U, NULL, 0U);
     pico_mock_sd_set_command(41U, 0x00U, NULL, 0U);
     pico_mock_sd_set_command(58U, 0x00U, ocr, sizeof(ocr));
@@ -121,6 +131,7 @@ static void configure_successful_sdsc_card(void)
 
     pico_mock_sd_set_command(0U, 0x01U, NULL, 0U);
     pico_mock_sd_set_command(8U, 0x05U, NULL, 0U);
+    configure_crc_on_off();
     pico_mock_sd_set_command(55U, 0x01U, NULL, 0U);
     pico_mock_sd_set_command(41U, 0x00U, NULL, 0U);
     pico_mock_sd_set_command(58U, 0x00U, ocr, sizeof(ocr));
@@ -527,6 +538,7 @@ static void test_legacy_card_initialization(void)
     CHECK_EQ(BLOCK_DEVICE_RESULT_OK, sd_spi_configure(&sd, &config));
     pico_mock_sd_set_command(0U, 0x01U, NULL, 0U);
     pico_mock_sd_set_command(8U, 0x05U, NULL, 0U);
+    configure_crc_on_off();
     pico_mock_sd_set_command(55U, 0x01U, NULL, 0U);
     pico_mock_sd_set_command(41U, 0x00U, NULL, 0U);
     pico_mock_sd_set_command(58U, 0x00U, ocr, sizeof(ocr));
@@ -643,6 +655,39 @@ static void test_card_detect_debounce(void)
     CHECK(pico_mock_gpio_was_deinitialized(PIN_CARD_AVAILABLE));
 }
 
+static void test_cmd59_rejection_fails_initialization(void)
+{
+    /* CMD59 is issued while the card is still idle, so R1 must read 0x01. A
+     * card that refuses it answers illegal-command (0x04) - the realistic
+     * response from a card that does not implement CRC_ON_OFF - and command
+     * CRC checking stays off.
+     *
+     * Continuing past that would be worse than not sending CMD59 at all: the
+     * driver would compute a correct CRC for every later frame while the card
+     * ignored all of them, so a corrupted command would be accepted silently
+     * and nothing in the bring-up would report anything wrong. Bring-up must
+     * fail rather than proceed believing it is protected. */
+    static const uint8_t refusals[] = { 0x04U, 0x05U, 0x08U, 0x40U };
+
+    for (size_t i = 0U; i < sizeof(refusals) / sizeof(refusals[0]); ++i) {
+        pico_mock_reset();
+        sd_spi_t sd = { 0 };
+        const sd_spi_config_t config = valid_config();
+        CHECK_EQ(BLOCK_DEVICE_RESULT_OK, sd_spi_configure(&sd, &config));
+        configure_successful_sdhc_card();
+        CHECK(pico_mock_sd_set_command(59U, refusals[i], NULL, 0U));
+
+        CHECK_EQ(BLOCK_DEVICE_RESULT_IO_ERROR,
+            block_device_init(sd_spi_as_block_device(&sd)));
+        CHECK(!sd.initialized);
+        /* The ACMD41 loop must never be entered on a refused CMD59. */
+        CHECK_EQ(0U, pico_mock_sd_command_count(41U));
+        /* Rollback still has to leave the bus and pins released. */
+        CHECK(pico_mock_gpio_level(PIN_CHIP_SELECT));
+        CHECK(!pico_mock_spi_is_initialized());
+    }
+}
+
 static void test_card_initialization_timeout_is_bounded(void)
 {
     pico_mock_reset();
@@ -653,6 +698,7 @@ static void test_card_initialization_timeout_is_bounded(void)
     CHECK_EQ(BLOCK_DEVICE_RESULT_OK, sd_spi_configure(&sd, &config));
     pico_mock_sd_set_command(0U, 0x01U, NULL, 0U);
     pico_mock_sd_set_command(8U, 0x01U, r7, sizeof(r7));
+    configure_crc_on_off();
     pico_mock_sd_set_command(55U, 0x01U, NULL, 0U);
     pico_mock_sd_set_command(41U, 0x01U, NULL, 0U);
 
@@ -806,6 +852,7 @@ static void test_initialization_response_validation(void)
     CHECK_EQ(BLOCK_DEVICE_RESULT_OK, sd_spi_configure(&sd, &config));
     pico_mock_sd_set_command(0U, 0x01U, NULL, 0U);
     pico_mock_sd_set_command(8U, 0x01U, good_r7, sizeof(good_r7));
+    configure_crc_on_off();
     pico_mock_sd_set_command(55U, 0x01U, NULL, 0U);
     pico_mock_sd_set_command(41U, 0x00U, NULL, 0U);
     pico_mock_sd_set_command(58U, 0x00U,
@@ -819,6 +866,7 @@ static void test_initialization_response_validation(void)
     CHECK_EQ(BLOCK_DEVICE_RESULT_OK, sd_spi_configure(&sd, &config));
     pico_mock_sd_set_command(0U, 0x01U, NULL, 0U);
     pico_mock_sd_set_command(8U, 0x05U, NULL, 0U);
+    configure_crc_on_off();
     pico_mock_sd_set_command(55U, 0x01U, NULL, 0U);
     pico_mock_sd_set_command(41U, 0x00U, NULL, 0U);
     pico_mock_sd_set_command(58U, 0x00U, legacy_ocr, sizeof(legacy_ocr));
@@ -1048,7 +1096,10 @@ static void test_multiple_block_read(void)
     CHECK_EQ(0U, tx_log[stop_offset + 2U]);
     CHECK_EQ(0U, tx_log[stop_offset + 3U]);
     CHECK_EQ(0U, tx_log[stop_offset + 4U]);
-    CHECK_EQ(1U, tx_log[stop_offset + 5U]);
+    /* CRC7 over 4C 00 00 00 00 is 0x30, so the frame byte is (0x30 << 1) | 1.
+     * This was 0x01 - the placeholder - until SD-006 was closed. Recomputed
+     * from the polynomial, not copied from the driver. */
+    CHECK_EQ(0x61U, tx_log[stop_offset + 5U]);
     CHECK_EQ(2078U,
         pico_mock_spi_transfer_count() - transfers_before);
 }
@@ -1985,6 +2036,8 @@ int main(int argc, char **argv)
     if (argc != 1) { return 2; }
     run_test(test_modern_sdsc_and_retry_success, "modern SDSC, ACMD41 retries and multiblock byte addressing");
     run_test(test_initialization_error_matrix, "initialization rejection matrix and invalid CSD encodings");
+    run_test(test_cmd59_rejection_fails_initialization,
+        "a refused CMD59 fails initialization instead of proceeding unprotected");
     run_test(test_spi_framing_and_response_boundary, "SPI selection, command CRC and R1 byte boundary");
     run_test(test_all_data_error_token_combinations, "all fifteen data-error token combinations");
     run_test(test_maximum_sdhc_lba_and_overflow_requests, "maximum SDHC address and overflow rejection");

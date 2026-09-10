@@ -20,26 +20,44 @@ The specification is the authority; the secondary sources are used where the
 simplified specification omits a detail, and are cross-checked against each
 other and against arithmetic wherever possible.
 
-## P-01 — CRC7 is checked on CMD0 and CMD8 even though CRC mode is off
+## P-01 — every command frame carries a real CRC7, and CMD59 turns checking on
 
-**Rule.** In SPI mode CRC checking is disabled by default, so a host may send a
-placeholder CRC for most commands. CMD0 and CMD8 are the exception: they bracket
-the transition into SPI mode and the card validates them. A command frame is
-five bytes plus `(CRC7 << 1) | 1`.
+**Rule.** In SPI mode command CRC checking is disabled by default, so a host
+*may* send a placeholder CRC. CMD0 and CMD8 are the exception: they bracket the
+transition into SPI mode and the card validates them regardless. CMD59
+(`CRC_ON_OFF`) takes `[31:1]` stuff bits and `[0]` as the CRC option — 1 enables
+checking, 0 disables it — after which the card validates every frame. A command
+frame is five bytes plus `(CRC7 << 1) | 1`.
 
 **Verified independently.** CRC7 over `40 00 00 00 00` is 0x4A, giving the frame
 byte 0x95; over `48 00 00 01 AA` it is 0x43, giving 0x87. Both were recomputed
 from the polynomial rather than taken from a source, and the test recomputes
-them again at run time.
+them again at run time. The same reference reproduces the driver's bytes for
+CMD59 (0x83 with argument 1), CMD55 (0x65), ACMD41 with HCS (0x77), CMD58
+(0xFD) and CMD9 (0xAF).
 
-**Implementation.** `sd_spi_command()` sends `0x94|0x01` for CMD0 and
-`0x86|0x01` for CMD8, which evaluate to 0x95 and 0x87. Correct.
+**Implementation.** `sd_spi_command()` builds the five-byte frame in a buffer
+and sends `(crc_helper_7(buffer, 5) << 1) | 0x01`, so the two former hardcoded
+constants are gone and every frame it sends is covered. Bring-up issues CMD59
+with argument 1 immediately after CMD8 — before ACMD41, so the rest of the
+sequence is protected — and rejects a card whose R1 comes back above 0x01.
 
-**Tests.** `test_command_framing_and_crc` recomputes both constants and confirms
-the bytes on the wire; `test_bad_cmd0_crc_is_rejected_by_the_card` runs against a
-card with CRC checking enabled to prove the check has teeth. Mutation
-`cmd8-crc-constant` is caught by six executables. The card model validates CMD0
-and CMD8 unconditionally, so these constants can no longer be wrong silently.
+`sd_spi_stop_transmission()` builds its own CMD12 frame rather than calling
+`sd_spi_command()`, because CMD12 carries a positional stuff byte before its R1
+that the shared path does not model - but it computes the CRC7 the same way. All
+twelve command sites therefore send a real CRC. This was SD-006, closed
+2026-09-09.
+
+**Tests.** `test_command_framing_and_crc` recomputes the CMD0 and CMD8 bytes and
+confirms them on the wire. `test_command_crc_checking_is_actually_enabled`
+asserts the card ends bring-up with checking genuinely on — one CMD59, argument
+bit 0 set — because a correct CRC the card never inspects is worth nothing.
+`test_cmd59_rejection_fails_initialization` sweeps four refusal responses and
+requires bring-up to fail rather than proceed unprotected. `sd_gap_command-crc`
+requires a full lifecycle against strict cards and passes.
+Mutations `command-crc-frame-length` and `cmd59-crc-disabled` are both caught.
+The card model validates CMD0 and CMD8 unconditionally, so those bytes can never
+be wrong silently.
 
 ## P-02 — ACMD41 requires an immediately preceding CMD55
 

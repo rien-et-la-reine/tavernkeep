@@ -80,6 +80,7 @@ add_executable(sd_spi_host_tests
     support/gpio_irq_mock.c
     ${TAVERNKEEP_HARNESS_SOURCES}
     ../src/storage/sd_spi.c
+    ../src/storage/sd_crc.c
 )
 tavernkeep_configure_target(sd_spi_host_tests)
 add_test(NAME sd_spi_host_tests
@@ -98,17 +99,20 @@ endforeach()
 add_host_test(sd_protocol_host_tests test_sd_protocol.c
     support/gpio_irq_mock.c
     ${TAVERNKEEP_HARNESS_SOURCES} ${TAVERNKEEP_FIXTURE_SOURCES}
-    ../src/storage/sd_spi.c)
+    ../src/storage/sd_spi.c
+    ../src/storage/sd_crc.c)
 
 add_host_test(sd_faults_host_tests test_sd_faults.c
     support/gpio_irq_mock.c
     ${TAVERNKEEP_HARNESS_SOURCES} ${TAVERNKEEP_FIXTURE_SOURCES}
-    ../src/storage/sd_spi.c)
+    ../src/storage/sd_spi.c
+    ../src/storage/sd_crc.c)
 
 add_executable(sd_property_host_tests test_sd_property.c
     support/gpio_irq_mock.c
     ${TAVERNKEEP_HARNESS_SOURCES} ${TAVERNKEEP_FIXTURE_SOURCES}
-    ../src/storage/sd_spi.c)
+    ../src/storage/sd_spi.c
+    ../src/storage/sd_crc.c)
 tavernkeep_configure_target(sd_property_host_tests)
 if(TAVERNKEEP_TEST_SEED STREQUAL "")
     add_test(NAME sd_property_host_tests COMMAND sd_property_host_tests)
@@ -162,7 +166,7 @@ add_host_test(filesystem_host_tests test_filesystem.c ../src/storage/filesystem.
 add_host_test(sd_irq_integration_host_tests test_sd_irq_integration.c
     ${TAVERNKEEP_HARNESS_SOURCES} support/gpio_irq_hardware_mock.c
     support/gpio_irq_integration_bridge.c
-    ../src/storage/sd_spi.c ../src/platform/gpio_irq.c)
+    ../src/storage/sd_spi.c ../src/storage/sd_crc.c ../src/platform/gpio_irq.c)
 
 add_host_test(main_host_tests test_main.c support/main_under_test.c)
 foreach(mode IN ITEMS no-led debug-failure irq-failure)
@@ -196,7 +200,8 @@ endforeach()
 add_executable(sd_gaps_host_tests test_sd_gaps.c
     support/gpio_irq_mock.c
     ${TAVERNKEEP_HARNESS_SOURCES} ${TAVERNKEEP_FIXTURE_SOURCES}
-    ../src/storage/sd_spi.c)
+    ../src/storage/sd_spi.c
+    ../src/storage/sd_crc.c)
 tavernkeep_configure_target(sd_gaps_host_tests)
 
 foreach(gap IN ITEMS data-crc stop-residual r1-tolerance command-crc writes)

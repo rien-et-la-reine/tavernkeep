@@ -39,10 +39,12 @@ only passes under the artifact is exposed.
 The fake answered a command by pushing an opaque byte string into a queue. It
 never examined what the host sent beyond the command index. So:
 
-- **CRC7 was never checked.** The driver's CMD0 constant (0x95) and CMD8
-  constant (0x87) are the two a real card validates. Either could have been
-  wrong and every test would still have passed. Mutating CMD8's constant now
-  fails six test executables.
+- **CRC7 was never checked.** The driver then sent hardcoded bytes for CMD0
+  (0x95) and CMD8 (0x87), the two a real card validates unconditionally. Either
+  could have been wrong and every test would still have passed. Those constants
+  have since been replaced by a computed `crc_helper_7()` over the whole frame;
+  mutating its length (`command-crc-frame-length`) now fails both SD suites
+  outright.
 - **ACMD41 needed no CMD55.** Responses were keyed on the command index alone,
   so deleting the CMD55 that turns CMD41 into ACMD41 was undetectable. It now
   fails five executables.
@@ -150,7 +152,7 @@ at all, because the fake could not produce the situation:
 
 | Mutation | Why it was invisible before |
 | --- | --- |
-| `cmd8-crc-constant` | the fake never looked at the CRC byte |
+| `command-crc-frame-length` (then `cmd8-crc-constant`) | the fake never looked at the CRC byte |
 | `drop-cmd55` | responses were keyed on the command index alone |
 | `acmd41-hcs-bit` | the fake answered regardless of HCS |
 | `ocr-powerup-check-removed` | no way to make the card report "still powering up" |

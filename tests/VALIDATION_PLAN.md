@@ -1,8 +1,8 @@
 # Repository assessment and validation plan
 
-Reviewed 2026-09-04 and revised 2026-09-05 after the test-infrastructure
-overhaul: production sources, build configuration, README,
-`docs/requirements.md`, `docs/architecture.md`, `docs/validation.md`, and tests.
+Reviewed 2026-09-04, revised 2026-09-05 after the test-infrastructure overhaul
+and 2026-09-09 to add the card recovery policy. Covers production sources, build
+configuration, README, `docs/requirements.md`, `docs/architecture.md`, `docs/validation.md`, and tests.
 No future product subsystem is implemented by this suite.
 
 This document is forward-looking: it records what evidence each planned feature
@@ -83,6 +83,37 @@ Physical Layer revision from the
 [SD Association archive](https://www.sdcard.org/downloads/pls/archives/)
 and record the sections used for golden expectations.
 
+### Note: the DMA sniffer computes CRC-16-CCITT in hardware
+
+Relevant to FR-009 and to any decision about the shape of the software CRC.
+
+RP2350's DMA has a sniffer that computes a checksum over data passing through a
+sniffed channel, in hardware, concurrently with the transfer and at no CPU cost.
+The pico-sdk exposes it as `dma_sniffer_enable(channel, mode, force)` with
+`dma_sniffer_set_data_accumulator()` to seed it. Mode `0x2` is CRC-16-CCITT
+(`0x3` is the bit-reversed variant; `0x0`/`0x1` are CRC-32, `0xe` XOR reduction,
+`0xf` a 32-bit sum).
+
+The consequence for design: **a DMA data path would not run the software CRC
+alongside the transfer.** DMA does not compute a checksum as a side effect of
+moving bytes - the sniffer is the thing that does, and it replaces
+`crc_helper_16()` in the data path rather than being fed by it. The software
+implementation keeps two roles in that future: the reference the sniffer is
+validated against, and the fallback for any path that is not DMA.
+
+So "DMA will run the CRC in parallel" is not an argument for a particular
+software API shape. Software chunking would only be needed for a DMA design
+that deliberately did *not* use the sniffer - half-buffer interrupts CRCing each
+chunk on the CPU - which is strictly worse on this part.
+
+**To verify before relying on it:** "CRC-16-CCITT" is an ambiguous name. The SD
+data CRC is CRC-16/XMODEM - polynomial 0x1021, initial value 0x0000,
+non-reflected, no final XOR. Mode `0x2` with the accumulator seeded to zero
+should match, but that must be confirmed against known vectors on real silicon,
+and the datasheet's transfer-width and byte-order rules for the sniffer checked.
+`sd_crc16_host_tests` already pins the catalogue check value for "123456789",
+which is exactly the vector to compare a sniffer result against.
+
 ## Cross-cutting requirements
 
 | Requirement | Evidence to add |
@@ -94,7 +125,174 @@ and record the sections used for golden expectations.
 | NFR-005 resources | Host sanitizers where supported; target map, stack high-water marks, buffer bounds and allocation ceilings on worst supported content. Set budgets before acceptance. |
 | NFR-006 power | Instrumented current/energy for defined active/idle/sleep workloads and unused peripheral inactivity. |
 | NFR-007 offline | Future product flows with network absent. Today's no-download host suite alone does not prove future offline product functionality. |
-| NFR-008 recovery | Fault/retry, removal/reinsertion and peripheral recovery without unnecessary full reset; ownership never leaked or released twice. |
+| NFR-008 recovery | Fault/retry, removal/reinsertion and peripheral recovery without unnecessary full reset; ownership never leaked or released twice. The SD side of this is unsettled - see "Card recovery policy" below. |
+
+## Card recovery policy
+
+**Status: undecided, and deliberately deferred.** The intended order of work is
+SD-007 (writes) first - SD-006 closed on 2026-09-09 - then this. Writes are major
+functionality that has been left unimplemented while several hardening passes
+went ahead of it; recovery is another hardening pass and should not jump the
+queue again. Settle this before the SD driver is called finished, not before
+writes exist.
+
+It is recorded here rather than in [KNOWN_GAPS.md](KNOWN_GAPS.md) because no
+regression can be written until the policy is chosen.
+
+The driver today has an initialisation path and an initialisation *rollback*
+path, and nothing in between. Any card that stops responding correctly after
+bring-up produces an error to the caller and stays broken. The goal is a driver
+that is reasonably robust against cards that are less than perfectly
+specification-conforming, which is the common case in the field.
+
+### The failure mode that motivates this
+
+SD-004 describes a collision in which a card, having received CMD12 while it was
+emitting a token, rejects every subsequent command until it is reset. This is
+the sharp case because it is **unrecoverable through the command channel**: no
+sequence of commands gets the card back, so error handling that only retries
+commands will loop until it gives up.
+
+It is not the only way to arrive there. A card wedged by a glitch, a brown-out
+during programming, or a marginal card mid-write can land in the same place. The
+recovery path is therefore worth having on its own merits, not only as SD-004
+insurance. Choosing SD-004 option 1 makes this rarer; it does not make it
+impossible.
+
+### Detecting it
+
+The signature is that the *next* command after the triggering operation fails:
+either persistent 0xFF with bit 7 never clearing, which the driver currently
+surfaces as `IO_ERROR` or `BUSY_TIMEOUT`, or an R1 with the illegal-command bit
+set. Note that the failure is attributed to the operation *after* the one that
+caused it, which makes it awkward to diagnose from logs alone.
+
+Two open questions:
+
+- Is a deliberate liveness check wanted after a multiple-block read? CMD13
+  (`SEND_STATUS`) is the specification's sanctioned way to obtain the real
+  outcome of an R1b command, and CMD12 is R1b. It costs one command per
+  multi-block read. The driver does not use CMD13 anywhere today.
+- How is "wedged" distinguished from "removed" and from "legitimately busy"?
+  The card-detect GPIO and the existing removal latch already separate removal
+  from the other two, which is a real advantage this driver has.
+
+### The reset ladder
+
+Escalating, cheapest first. Each rung needs a decision on how many attempts
+before escalating, and the whole ladder needs a decision on what the caller
+sees while it runs.
+
+1. **Bus resynchronisation.** Deassert CS, clock idle bytes, retry. Adequate for
+   a desynchronised byte stream, useless for a card in a rejecting state.
+2. **Soft reset — full SPI re-initialisation.** CS deasserted, 74+ clocks with
+   MOSI high, CMD0 to re-enter idle, then the normal bring-up: CMD8, CMD59,
+   ACMD41, CMD58, CMD9, and CMD16 for byte-addressed cards. This is the
+   documented escape for most bad states and reuses the bring-up code that
+   already exists.
+3. **Power cycle.** Required when CMD0 itself is refused, because nothing in the
+   command channel can reach the card. **The board can support this** — the
+   specific mechanism (a load switch or equivalent on the card supply, under
+   GPIO control) needs confirming against the schematic and recording here,
+   along with the off-time the card needs to fully discharge before power is
+   reapplied. That off-time is a real constraint: too short and the card does
+   not actually reset. After power returns, bring-up restarts from the 74-clock
+   sequence.
+
+### Design decisions this needs
+
+- Retry counts at each rung, and whether the in-flight operation is retried
+  transparently or the error is surfaced to the caller.
+- Whether recovery is automatic or the caller must ask for it. Automatic
+  recovery hides real hardware problems; manual recovery pushes protocol
+  knowledge up into the filesystem layer.
+- What state is invalidated by a reset. `card_type_legacy`, `card_type_hcxc`
+  and `block_count` are re-derived by bring-up, but any cached position or
+  outstanding operation is not.
+- How recovery interacts with the removal/hot-plug machinery. A deliberate
+  re-initialisation must not be mistaken for a removal event, and the card-detect
+  IRQ and debounce state have to stay coherent across it. This is the part most
+  likely to introduce a regression in behaviour that currently works.
+- When to stop. A card that fails recovery repeatedly should be declared dead
+  rather than retried forever, and the caller needs a way to see that.
+
+### Structural prerequisite: split bring-up from resource acquisition
+
+`sd_spi_device_init()` currently does two jobs in one function: it **acquires
+resources** (GPIO configuration, SPI init, the debounced presence check, the
+removal-latch clear, and the IRQ registration with its recheck-after-register
+ordering) and then **brings the card up** (CMD0, CMD8, CMD59, ACMD41, CMD58,
+CMD9, CMD16). Recovery needs only the second job.
+
+There is a specific landmine in re-entering the first. Bring-up clears the
+removal latch before registering the IRQ:
+
+```c
+//clear the latch
+atomic_store_explicit(&sd->removal_latched, false, memory_order_relaxed);
+```
+
+If recovery calls the existing init, **it clears a latch that a genuine removal
+may have just set**, and the driver proceeds believing a card is present that is
+not. That is the same failure class as SD-001. Re-entering init would also
+double-register the card-detect IRQ.
+
+So the split is not tidiness, it is a correctness prerequisite:
+
+- **acquire** — runs once, owns the IRQ registration and the presence-check /
+  latch-clear / register / recheck ordering that closes the race between the
+  presence check and registration;
+- **bring up** — repeatable, pure protocol, assumes resources are already held
+  and that latch ownership belongs to the caller.
+
+Initialisation is then acquire + bring-up, recovery is bring-up alone, and
+reinsertion is presence re-establishment + bring-up. Three callers converge on
+one bring-up implementation instead of a second copy that drifts from the first.
+
+Worth noting even if recovery is never built: reinsertion and initialisation
+already share this sequence informally.
+
+### Invariants to pin before writing the code
+
+These are testable on the host today, in the style the suite already uses for
+removal sweeps. Writing them first means the policy is fixed before the code is.
+
+1. **Recovery never clears the removal latch.** The latch is cleared in exactly
+   one place, and that place has just proven presence with a debounced check.
+2. **Removal always wins.** A latch set before recovery starts means this is a
+   removal, not a wedge, and goes to teardown. A latch set during any recovery
+   phase abandons recovery. Assert this at every rung, including inside the
+   power-cycle window.
+3. **Teardown during recovery still releases hardware exactly once.** SD-002 is
+   the existing regression for this property; recovery adds new paths into
+   teardown and must not break it.
+4. **Recovery cannot re-enter itself.** A bring-up failure inside recovery must
+   not start another recovery.
+5. **Recovery exhaustion is distinguishable from removal.** A caller must be
+   able to tell "the card is gone" from "the card is present but will not
+   respond", because the correct response differs.
+6. **The card-detect IRQ is registered exactly once** across any sequence of
+   recovery attempts, successful or not. This extends
+   `sd_removal_repeated-teardown`.
+7. **Derived state is re-derived, never stale.** After a successful recovery,
+   `card_type_legacy`, `card_type_hcxc` and `block_count` reflect the card that
+   is present now. A recovery that silently keeps values from before the reset
+   is a correctness bug even when the same card is reinserted.
+8. **No I/O is attempted while recovery is in progress**, and requests arriving
+   during it are refused rather than interleaved onto the bus.
+
+### Evidence this will owe
+
+Host tests can cover the policy but not the phenomenon: the card model can be
+told to reject all commands until reset, which exercises the ladder's logic,
+the state invalidation and the interaction with removal. What it cannot
+establish is whether real cards actually recover at each rung, or what off-time
+a power cycle needs.
+
+That part is hardware work: induce the wedge (SD-004's collision is the
+reproducible route), then confirm at which rung each card in the test set comes
+back, with bus captures. Until that exists, any retry count or off-time written
+into the driver is a guess. See NFR-008 in the cross-cutting table.
 
 ## Hardware procedure (planned, not performed)
 

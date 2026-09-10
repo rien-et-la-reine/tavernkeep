@@ -1,11 +1,16 @@
-# Host validation record — 2026-09-05
+# Host validation record
+
+Runs are recorded oldest first. The 2026-09-05 record below is the original; a
+later run is appended at the end.
+
+## Run of 2026-09-05
 
 Environment: Linux x86-64, GCC 13.3.0, Clang 18.1.3, CMake 3.28.3, Unix
 Makefiles. The suite is also maintained for GCC 15.2 / MSYS2 MinGW on Windows,
 which is the toolchain the previous record used; the Windows numbers below are
 from that earlier run and are marked as such.
 
-## Baseline, before this work
+### Baseline, before this work
 
 Recorded on the tree as it stood, with the previous harness:
 
@@ -14,7 +19,7 @@ Recorded on the tree as it stood, with the previous harness:
 | Enabled suite | 15/15 CTest cases passed; SD executable reported 60 groups passed |
 | Registered gap cases (disabled by default) | 3/3 failed as documented |
 
-## Final
+### Final
 
 | Run | Result |
 | --- | --- |
@@ -40,7 +45,7 @@ compiler-rt runtime (`libclang-rt-18-dev`), so the clang sanitizer link fails.
 GCC's ASan and UBSan were used instead, and clang was used as a second static
 analysis pass.
 
-## Mutation testing
+### Mutation testing
 
 The primary evidence that the suite detects bugs rather than merely executing
 code. 53 deliberate incorrect implementations across `sd_spi.c` and
@@ -67,7 +72,7 @@ It also caught a bug in the harness itself — the card model's capacity guard
 rejected the smallest legal CSD v1 card, because it treated a `C_SIZE` of zero
 as a failed search.
 
-## Coverage
+### Coverage
 
 GCC coverage, per target. Reports that share a basename overwrite each other,
 so these must not be summed; each row is one executable's view of one source.
@@ -90,7 +95,7 @@ compiler-instrumented lines and branch outcomes, not to requirements. High line
 coverage does not establish real-time bounds or validate a card protocol
 physically, which is why the mutation results above carry more weight here.
 
-## Production changes made
+### Production changes made
 
 Two defects, each with a regression written first. Both were previously
 reproduced and documented but left unfixed.
@@ -108,7 +113,7 @@ Documentation corrections: the root `README.md` no longer claims the storage
 layer is unimplemented, and `docs/validation.md` carries a validation record
 instead of empty templates.
 
-## Not performed
+### Not performed in the 2026-09-05 run
 
 No Pico SDK cross-build, no target flashing, no physical card test, no bus
 capture, no power measurement, no hardware validation of any kind. Everything
@@ -116,3 +121,69 @@ above is host-side evidence about host-side behaviour of the production
 sources. What that cannot establish is enumerated in
 [RESIDUAL_RISK.md](RESIDUAL_RISK.md); acceptance criteria for functionality not
 yet written are in [VALIDATION_PLAN.md](VALIDATION_PLAN.md).
+
+---
+
+## Run of 2026-09-09 — command CRC7 integration
+
+Environment: Windows 11 x86-64, GCC 15.2.0 (MSYS2 MinGW), CMake 4.2.3, Ninja,
+Release. Covers the change that replaced the two hardcoded command CRC bytes
+with `crc_helper_7()` over the whole frame and added CMD59 to bring-up.
+
+| Run | Result |
+| --- | --- |
+| Enabled suite, Release | **24/24 CTest cases passed** |
+| `sd_protocol_host_tests` | 24/24 cases |
+| `sd_spi_host_tests`, bus-time clock | 63/63 groups passed |
+| `sd_spi_host_tests`, poll-tick clock | 63/63 groups passed |
+| `sd_faults_host_tests` | 11/11 cases, 2052 checks |
+| `sd_crc_host_tests` | 2/2 cases, 1474 checks |
+| `sd_crc16_host_tests` | 5/5 cases, 4968 checks |
+| `sd_property_host_tests` | 6/6 cases, 12218 checks (default seed) |
+| Strict warnings (`-Werror` on the full warning set), Release | **fails** - `-Wshadow` in `sd_spi_stop_transmission()`, see below |
+| Registered gap cases (disabled by default) | 4/5 failed as documented; `sd_gap_command-crc` passes (SD-006 closed) |
+
+SD-006 was closed during this run. `test_long_multiple_block_read` asserting
+`sd_card_protocol_errors() == 0` failed until `sd_spi_stop_transmission()` was
+changed to compute CMD12's CRC7; it passes now, as does `sd_gap_command-crc`.
+The CMD12 frame byte pinned in `test_sd_spi.c` was updated from the placeholder
+0x01 to 0x61, recomputed from the polynomial rather than copied from the driver.
+
+CRC7 was cross-checked three independent ways: the specification's CMD0 (0x95)
+and CMD8 (0x87) frame bytes, a differential sweep against the card model's
+separate implementation (1474 checks), and a reference implementation written
+from the polynomial for this run, which reproduced the driver's bytes for CMD0,
+CMD8, CMD59, CMD55, ACMD41, CMD58 and CMD9.
+
+**The strict-warnings build is broken.** `sd_spi_stop_transmission()` declares
+`uint8_t transmit_buffer[5], i;` and then a nested `for (uint8_t i = 0U; ...)`
+shadows it, which `-Wshadow` reports and `-Werror` turns fatal:
+
+```
+sd_spi.c:601:18: error: declaration of 'i' shadows a previous local [-Werror=shadow]
+sd_spi.c:575:33: note: shadowed declaration is here
+```
+
+This blocks `tools/run_diagnostics.sh strict`. The numbers in the table above
+were obtained from a build with `TAVERNKEEP_TEST_STRICT_WARNINGS=OFF`; the
+behaviour under test is identical, but the strict stage cannot currently run.
+
+### Not performed in this run
+
+ASan and UBSan were **not** exercised: this MinGW toolchain has no `libasan` or
+`libubsan`, so the sanitizer link fails with `cannot find -lasan`. The
+sanitizer evidence in the 2026-09-05 record stands and was not re-obtained.
+
+One thing that record's environment would surface and this one cannot: under
+UBSan instrumentation GCC loses the range analysis that keeps `-Wconversion`
+quiet, and warns at `sd_crc.c:25`, `sd_crc.c:60` and `sd_spi.c:850`. Because
+`tools/run_diagnostics.sh` sets `TAVERNKEEP_TEST_SANITIZE=ON` together with
+`TAVERNKEEP_TEST_STRICT_WARNINGS=ON`, that stage will fail on `-Werror` on a
+toolchain that has the runtimes. Both files are clean at `-O0` and `-O3`
+without sanitizers.
+
+No mutation run. Two catalogue records were repaired and separately confirmed —
+see [MUTATION.md](MUTATION.md). The green baseline a full run needs now exists.
+
+No Pico SDK cross-build, no target flashing, no physical card test, no bus
+capture, no hardware validation of any kind.

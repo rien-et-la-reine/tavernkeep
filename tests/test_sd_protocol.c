@@ -137,9 +137,10 @@ static void test_initialization_command_order(void)
     /* The exact sequence matters: CMD8 must precede ACMD41 so the HCS bit can
      * be chosen, CMD58 must follow ACMD41 so CCS is meaningful, and CMD16
      * must only appear for byte-addressed cards. A command-count assertion
-     * cannot see an order mistake; this can. */
-    static const uint8_t sdhc[] = { 0U, 8U, 55U, 41U, 58U, 9U };
-    static const uint8_t sdsc[] = { 0U, 8U, 55U, 41U, 58U, 9U, 16U };
+     * cannot see an order mistake; this can. CMD59 must also precede ACMD41 so
+     * the rest of bring-up is CRC-protected. */
+    static const uint8_t sdhc[] = { 0U, 8U, 59U, 55U, 41U, 58U, 9U };
+    static const uint8_t sdsc[] = { 0U, 8U, 59U, 55U, 41U, 58U, 9U, 16U };
 
     sd_fixture_t fx;
     sd_card_desc_t desc = sd_fx_card_sdhc();
@@ -207,39 +208,39 @@ static void test_command_framing_and_crc(void)
     T_CHECK(found_cmd8);
 }
 
-static void test_bad_cmd0_crc_is_rejected_by_the_card(void)
+static void test_command_crc_checking_is_actually_enabled(void)
 {
-    /* Proves the previous test has teeth: if the driver's CMD0 CRC were
-     * wrong, the card refuses and initialisation fails. This is the assertion
-     * that turns the CRC constants into tested behaviour rather than
-     * decoration.
+    /* Follow-on to SD-006. A correct crc_helper_7() is necessary but not
+     * sufficient: the driver must also switch the card's checking ON, or every
+     * CRC it computes is ignored and a corrupted command frame is accepted
+     * silently - the failure mode the CRC exists to prevent.
      *
-     * PINS A LIMITATION, NOT A REQUIREMENT. The failure asserted below is the
-     * driver's placeholder CRC being refused, and it is expected to become
-     * wrong: the moment crc_helper_7() is wired into sd_spi_command(), a
-     * strict card accepts every frame and this initialisation succeeds.
+     * CMD59 (CRC_ON_OFF) takes [31:1] stuff bits and [0] as the CRC option,
+     * 1 = on and 0 = off (Physical Layer Simplified Specification). A zero
+     * argument therefore disables the checking the command exists to enable,
+     * and it does so without any error the driver could notice.
      *
-     * When that happens, delete this case rather than adjusting it - the
-     * behaviour it describes will no longer exist. Its replacement is already
-     * written: gap_every_command_frame_carries_a_valid_crc7() in
-     * test_sd_gaps.c (KNOWN_GAPS.md SD-006), which asserts the opposite and
-     * fails today. Enable it with:
-     *
-     *   ctest --test-dir tests/build -R sd_gap_command-crc --output-on-failure
-     *
-     * test_command_framing_and_crc above is unaffected either way: the wire
-     * bytes it checks, 0x95 and 0x87, are what the real polynomial produces
-     * for those two frames. */
+     * This asserts the card's own state, not the driver's, because the card is
+     * what decides whether a bad frame is refused. */
     sd_fixture_t fx;
     sd_card_desc_t desc = sd_fx_card_sdhc();
-    desc.crc_check_enabled = true; /* strict card: every frame is checked */
-    sd_fx_begin(&fx, &desc);
-    /* The driver sends a placeholder CRC for everything after CMD8, so a
-     * card with CRC checking on rejects the first such command. */
-    T_EQ_RESULT(BLOCK_DEVICE_RESULT_IO_ERROR, sd_fx_init(&fx));
-    T_CHECK(sd_card_protocol_errors() > 0U);
-    T_CHECK(!fx.sd.initialized);
-    T_CHECK(pico_mock_gpio_level(SD_FX_PIN_CS));
+    T_CHECK(sd_fx_require_init(&fx, &desc));
+
+    /* Exactly one CMD59, and it must carry the CRC-on bit. */
+    T_EQ_U(1U, (unsigned)sd_card_command_count(59U));
+    t_context("CMD59 argument 0x%08lx",
+        (unsigned long)sd_card_last_argument(59U));
+    T_EQ_U(1U, sd_card_last_argument(59U) & 1U);
+    t_clear_context();
+
+    /* The card must be in CRC-checking mode once bring-up completes. */
+    T_CHECK(sd_card_description()->crc_check_enabled);
+
+    /* CMD59 must land before ACMD41, so the rest of bring-up is protected. */
+    T_CHECK(sd_card_command_count(41U) > 0U);
+
+    /* Nothing in the sequence may have tripped a protocol error. */
+    T_EQ_U(0U, sd_card_protocol_errors());
 }
 
 static void test_acmd41_is_always_prefixed_by_cmd55(void)
@@ -592,6 +593,12 @@ static void test_long_multiple_block_read(void)
         T_CHECK(sd_fx_check_bus_quiescent(&fx) == NULL);
         /* A truncated trace would quietly weaken the assertions above. */
         T_CHECK(!sd_card_trace_overflowed());
+        /* Every frame in this sequence - CMD18 and CMD12 included - must
+         * satisfy the card CRC check that CMD59 turned on during bring-up.
+         * The model records a rejected frame but still answers the stop
+         * sequence normally, so without this assertion nothing here would
+         * notice a CMD12 carrying a placeholder CRC. */
+        T_EQ_U(0U, sd_card_protocol_errors());
     }
     t_clear_context();
 }
@@ -1119,8 +1126,8 @@ int main(void)
     t_run(test_card_variant_initialization, "card variant initialization matrix");
     t_run(test_initialization_command_order, "initialization command order");
     t_run(test_command_framing_and_crc, "command framing and CMD0/CMD8 CRC7");
-    t_run(test_bad_cmd0_crc_is_rejected_by_the_card,
-        "strict card rejects placeholder CRC (pins today's limitation, see SD-006)");
+    t_run(test_command_crc_checking_is_actually_enabled,
+        "CMD59 actually enables command CRC checking");
     t_run(test_acmd41_is_always_prefixed_by_cmd55, "ACMD41 requires CMD55 and carries HCS");
     t_run(test_cmd8_response_is_matched_exactly, "CMD8 R1 sweep: only 0x01 and 0x05 are meaningful");
     t_run(test_legacy_card_omits_the_hcs_bit, "legacy card ACMD41 omits HCS");

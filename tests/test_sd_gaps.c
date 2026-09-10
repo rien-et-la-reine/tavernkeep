@@ -118,20 +118,19 @@ static void gap_r1_poll_tolerance(void)
 
 static void gap_every_command_frame_carries_a_valid_crc7(void)
 {
-    /* sd_spi_command() hardcodes the CRC7 byte for CMD0 and CMD8 and sends a
-     * placeholder (stop bit only) for every other frame. A card with CRC
-     * checking enabled therefore rejects the first frame after CMD8 and
-     * bring-up fails. CMD59 can turn that checking on, and a card is entitled
-     * to have it on already, so this is a real compatibility limit rather
-     * than a theoretical one.
+    /* A strict card must be indistinguishable from a permissive one: full
+     * bring-up, a single-block read and a multiple-block read all succeed, and
+     * the card records no protocol error at any point.
      *
-     * With crc_helper_7() wired into the frame builder, a strict card must be
-     * indistinguishable from a permissive one: full bring-up, a single-block
-     * read and a multiple-block read all succeed, and the card records no
-     * protocol error at any point.
+     * sd_spi_command() computes a real CRC7 for every frame it builds, bring-up
+     * enables the card's checking with CMD59, and sd_spi_stop_transmission()
+     * computes CMD12's CRC the same way. This case passes as of 2026-09-09;
+     * SD-006 is closed and it can be promoted out of the known-gap label.
      *
-     * When this passes, test_bad_cmd0_crc_is_rejected_by_the_card in
-     * test_sd_protocol.c is asserting the opposite and must be replaced. */
+     * The zero-protocol-error assertion below is the load-bearing one. A
+     * return-code check alone would pass, because the model still answers the
+     * stop sequence normally after recording a rejected frame - which is how
+     * the CMD12 placeholder hid for as long as it did. */
     static const struct {
         const char *name;
         sd_card_desc_t (*make)(void);

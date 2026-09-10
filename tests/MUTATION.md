@@ -15,7 +15,7 @@ failure.
 ```sh
 python3 tests/tools/mutate.py                 # everything
 python3 tests/tools/mutate.py --list
-python3 tests/tools/mutate.py --only cmd0-crc-constant
+python3 tests/tools/mutate.py --only command-crc-frame-length
 ```
 
 The script applies one mutation, rebuilds, runs the enabled host suite, records
@@ -26,6 +26,35 @@ otherwise be reported as a surviving mutation, which is a false clean bill of
 health.
 
 ## Pending re-run
+
+Two records were replaced after the recorded run below. `cmd0-crc-constant` and
+`cmd8-crc-constant` patched the two hardcoded CRC bytes in `sd_spi_command()`,
+which no longer exist now that the frame builder calls `crc_helper_7()`. A
+record whose pattern cannot apply is reported as a surviving mutation, so they
+were replaced rather than left to rot:
+
+| Mutation | Class | Confirmed against |
+| --- | --- | --- |
+| `command-crc-frame-length` | wrong length | `sd_protocol` (24 of 24 cases), `sd_spi` (168 checks) |
+| `cmd59-crc-disabled` | wrong constant | `sd_protocol`, via `test_command_crc_checking_is_actually_enabled` |
+
+Both were confirmed by compiling the mutated source against those two suites,
+not by a full run across every executable, so their "detected by" counts are a
+floor rather than a measurement.
+
+`cmd59-crc-disabled` is worth reading closely. It restores the exact defect that
+existed briefly during development — CMD59 sent with argument 0 — and under it
+`test_long_multiple_block_read` *passes*, because a card with checking off never
+examines CMD12's placeholder CRC. Only the CMD59 enablement assertion catches
+it. A mutation that makes one test pass while breaking another is the case
+mutation testing exists to find.
+
+**Mutation runs need a green baseline.** The script records which executables
+failed, so any case already failing counts as a false kill for every mutation.
+The enabled suite is green again as of 2026-09-09, so a full re-run is
+unblocked; it has not been performed.
+
+## Earlier additions
 
 Three records were added after the recorded run below, covering
 `sd_spi_device_get_info()`, which became live code in `7676adb` and had no
@@ -62,8 +91,8 @@ Every mutation and its killer:
 
 | Mutation | Class | Detected by |
 | --- | --- | --- |
-| `cmd0-crc-constant` | wrong constant | 9 executables |
-| `cmd8-crc-constant` | wrong constant | 9 executables |
+| `command-crc-frame-length` | wrong length | `sd_spi`, `sd_protocol` (see note) |
+| `cmd59-crc-disabled` | wrong constant | `sd_protocol` (see note) |
 | `acmd41-hcs-bit` | wrong constant | 5 executables |
 | `drop-cmd55` | skipped state transition | 5 executables |
 | `data-error-token-mask` | incorrect bit mask | 4 executables |
