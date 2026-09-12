@@ -135,37 +135,45 @@ static void sweep_read_faults(size_t blocks)
                 /* 3. Nothing was written outside the destination. */
                 T_CHECK(sd_fx_guard_intact(&buffer));
 
-                /* 4. On success the data must be right - except where the
-                 *    fault put bytes into the payload that the driver cannot
-                 *    tell from the card's own content. The driver discards
-                 *    the data CRC (KNOWN_GAPS.md SD-003), so it reports
-                 *    success with whatever arrived. That gap has its own
-                 *    dedicated case below; excluding it here keeps the
-                 *    sweep's other invariants meaningful instead of failing
-                 *    every payload row for one known reason.
-                 *
-                 *    Every fault kind currently in the table substitutes
-                 *    payload bytes when injected at DATA_PAYLOAD - STALL
-                 *    answers 0xFF onward, BUSY_FOREVER answers 0x00 onward,
-                 *    GARBAGE substitutes, FLIP_BITS alters, and TRUNCATE ends
-                 *    the payload and idles at 0xFF - so all five are listed.
-                 *    They are listed explicitly rather than excluded by phase
-                 *    alone so that a fault kind added to the table later is
-                 *    *checked* by default: if it genuinely rewrites payload,
-                 *    that is a deliberate line to add here, not something it
-                 *    inherits silently.
-                 *
-                 *    When SD-003 is fixed, delete `fault_rewrites_payload`
-                 *    and the condition below becomes a plain
-                 *    `result == OK` check. */
-                const bool fault_rewrites_payload =
+                /* 4. On success the data must be right. The driver now
+                 *    validates the data CRC16 the card sends after each
+                 *    block (SD-003 closed), so a fault that rewrites payload
+                 *    or CRC bytes must surface as an error rather than as a
+                 *    successful read of the wrong bytes. Every fault kind in
+                 *    the table substitutes bytes when injected at
+                 *    DATA_PAYLOAD or DATA_CRC - STALL answers 0xFF onward,
+                 *    BUSY_FOREVER 0x00 onward, GARBAGE substitutes, FLIP_BITS
+                 *    alters and TRUNCATE ends the payload and idles at 0xFF -
+                 *    so none of those rows may report OK, with one exception
+                 *    the specification's CRC cannot close: CRC-16/XMODEM
+                 *    starts from a zero register with no final XOR, so a
+                 *    512-byte block of zeros has CRC 0x0000. A bus stuck low
+                 *    from the first payload byte therefore delivers a
+                 *    self-consistent frame that is indistinguishable from a
+                 *    legitimately erased block, and BUSY_FOREVER at payload
+                 *    offset 0 is expected to read as OK (RESIDUAL_RISK.md).
+                 *    From any later offset the real prefix makes the running
+                 *    CRC nonzero and the zero CRC bytes are rejected. The
+                 *    1-in-65536 chance of some other corruption matching its
+                 *    CRC does not apply: the model's data is deterministic,
+                 *    so a row either always collides or never does. */
+                const bool stuck_low_from_payload_start =
                     phases[p] == SD_PHASE_DATA_PAYLOAD
-                    && (faults[f].kind == SD_FAULT_STALL
-                        || faults[f].kind == SD_FAULT_BUSY_FOREVER
-                        || faults[f].kind == SD_FAULT_GARBAGE
-                        || faults[f].kind == SD_FAULT_FLIP_BITS
-                        || faults[f].kind == SD_FAULT_TRUNCATE);
-                if (result == BLOCK_DEVICE_RESULT_OK && !fault_rewrites_payload) {
+                    && faults[f].kind == SD_FAULT_BUSY_FOREVER
+                    && offsets[o] == 0U;
+                if (phases[p] == SD_PHASE_DATA_PAYLOAD
+                        || phases[p] == SD_PHASE_DATA_CRC) {
+                    if (stuck_low_from_payload_start && blocks == 1U) {
+                        /* Pinned in the direction it actually goes so a
+                         * change here has to be deliberate. A stream fails
+                         * later instead: the next token never arrives. */
+                        T_EQ_RESULT(BLOCK_DEVICE_RESULT_OK, result);
+                    } else {
+                        T_CHECK(result != BLOCK_DEVICE_RESULT_OK);
+                    }
+                }
+                if (result == BLOCK_DEVICE_RESULT_OK
+                        && !stuck_low_from_payload_start) {
                     T_CHECK(sd_fx_guard_matches_card(&buffer, 42U));
                 }
 
@@ -545,16 +553,121 @@ static void test_reinsertion_requires_fresh_initialization(void)
     T_CHECK(sd_fx_check_recovers(&fx, 3U) == NULL);
 }
 
-/* ------------------------------------------------ data integrity limits */
+/* ------------------------------------------------------- data integrity */
 
-static void test_read_data_crc_is_not_validated(void)
+/*
+ * Read-path CRC validation (formerly gap SD-003). The card model computes a
+ * real CRC16-CCITT over the block it sends and appends it MSB first; the
+ * driver folds every payload byte through crc_helper_rolling_16() and
+ * compares against the two bytes that follow. Each row corrupts one thing -
+ * a payload byte at the start, middle or end of a block, or the CRC bytes
+ * themselves - on CMD17 and on a chosen block of a CMD18 stream, and demands
+ * the same outcome: a detected error, a quiescent bus, nothing written past
+ * the destination, no protocol error recorded by the card (the CMD12 the
+ * driver sends after a mismatch must be well formed) and a device that still
+ * works afterwards.
+ */
+typedef struct {
+    const char *name;
+    size_t blocks;
+    uint32_t occurrence;   /* which block of the stream is corrupted */
+    sd_phase_t phase;
+    uint32_t byte_offset;
+    sd_fault_kind_t kind;
+    uint32_t param;
+} crc_row_t;
+
+static void check_corruption_is_detected(
+    const crc_row_t *row, sd_card_desc_t (*make)(void), const char *card)
 {
-    /* Documented limitation, pinned so it cannot regress silently in either
-     * direction. src/storage/sd_spi.c discards the two CRC bytes after each
-     * data block, so a card that returns corrupt data with a matching-looking
-     * transfer is reported as success. The consequence for NFR-003 is silent
-     * corruption, not a detected error. KNOWN_GAPS.md SD-003 registers the
-     * regression that will pass once CRC validation exists. */
+    sd_fixture_t fx;
+    sd_card_desc_t desc = make();
+    t_context("%s: %s (blocks=%zu block=%u phase=%s offset=%u)",
+        card, row->name, row->blocks, (unsigned)row->occurrence,
+        phase_label(row->phase), (unsigned)row->byte_offset);
+    T_CHECK(sd_fx_require_init(&fx, &desc));
+
+    sd_fault_t fault;
+    memset(&fault, 0, sizeof(fault));
+    fault.phase = row->phase;
+    fault.command = row->blocks == 1U ? 17U : 18U;
+    fault.occurrence = row->occurrence;
+    fault.byte_offset = row->byte_offset;
+    fault.kind = row->kind;
+    fault.param = row->param;
+    T_CHECK(sd_card_add_fault(&fault));
+
+    sd_guarded_buffer_t buffer;
+    sd_fx_guard_init(&buffer, row->blocks);
+    const block_device_result_t result = block_device_read_blocks(
+        fx.device, 12U, sd_fx_guard_data(&buffer), row->blocks);
+
+    /* The fault fired exactly once, so the read really saw corruption. */
+    T_EQ_U(1U, sd_card_fault_activations(0U));
+    T_EQ_RESULT(BLOCK_DEVICE_RESULT_IO_ERROR, result);
+    T_CHECK(sd_fx_guard_intact(&buffer));
+    T_EQ_U(0U, sd_card_protocol_errors());
+    const char *problem = sd_fx_check_bus_quiescent(&fx);
+    if (problem != NULL) {
+        t_context("%s: %s: %s", card, row->name, problem);
+    }
+    T_CHECK(problem == NULL);
+    const char *recovery = sd_fx_check_recovers(&fx, 12U);
+    if (recovery != NULL) {
+        t_context("%s: %s: %s", card, row->name, recovery);
+    }
+    T_CHECK(recovery == NULL);
+}
+
+static void test_read_data_crc_is_validated(void)
+{
+    static const crc_row_t rows[] = {
+        /* CMD17: a single bit in the first, a middle and the last payload
+         * byte; the whole of a byte; and each CRC byte on its own. */
+        { "first payload byte, one bit", 1U, 0U,
+            SD_PHASE_DATA_PAYLOAD, 0U, SD_FAULT_FLIP_BITS, 0x01U },
+        { "middle payload byte, all bits", 1U, 0U,
+            SD_PHASE_DATA_PAYLOAD, 3U, SD_FAULT_FLIP_BITS, 0xFFU },
+        { "last payload byte, top bit", 1U, 0U,
+            SD_PHASE_DATA_PAYLOAD, 511U, SD_FAULT_FLIP_BITS, 0x80U },
+        { "CRC high byte, one bit", 1U, 0U,
+            SD_PHASE_DATA_CRC, 0U, SD_FAULT_FLIP_BITS, 0x01U },
+        { "CRC low byte, one bit", 1U, 0U,
+            SD_PHASE_DATA_CRC, 1U, SD_FAULT_FLIP_BITS, 0x01U },
+        /* The payload arrives intact but the card's CRC is wrong: the
+         * driver cannot tell which side is at fault and must still reject. */
+        { "intact payload, inverted CRC", 1U, 0U,
+            SD_PHASE_DATA_PAYLOAD, 0U, SD_FAULT_BAD_DATA_CRC, 0U },
+        /* CMD18, four blocks: the first, a middle and the last block of the
+         * stream, plus a bad CRC on a middle block. */
+        { "stream block 0, one payload bit", 4U, 0U,
+            SD_PHASE_DATA_PAYLOAD, 17U, SD_FAULT_FLIP_BITS, 0x01U },
+        { "stream block 1, last payload byte", 4U, 1U,
+            SD_PHASE_DATA_PAYLOAD, 511U, SD_FAULT_FLIP_BITS, 0x01U },
+        { "stream block 3, first payload byte", 4U, 3U,
+            SD_PHASE_DATA_PAYLOAD, 0U, SD_FAULT_FLIP_BITS, 0x40U },
+        { "stream block 2, CRC low byte", 4U, 2U,
+            SD_PHASE_DATA_CRC, 1U, SD_FAULT_FLIP_BITS, 0x10U },
+        { "stream block 2, inverted CRC", 4U, 2U,
+            SD_PHASE_DATA_PAYLOAD, 100U, SD_FAULT_BAD_DATA_CRC, 0U },
+    };
+    for (size_t i = 0U; i < sizeof(rows) / sizeof(rows[0]); ++i) {
+        check_corruption_is_detected(&rows[i], sd_fx_card_sdhc, "SDHC");
+    }
+    /* The check does not depend on the addressing mode; one byte-addressed
+     * card, single and multiple block, is enough to show that. */
+    check_corruption_is_detected(&rows[1], sd_fx_card_v1_sdsc, "v1 SDSC");
+    check_corruption_is_detected(&rows[8], sd_fx_card_v1_sdsc, "v1 SDSC");
+    t_clear_context();
+}
+
+static void test_read_data_crc_mismatch_stops_the_stream_only_once(void)
+{
+    /* On a mismatch mid-stream the driver must abort with exactly one CMD12
+     * and release the bus; the blocks before the bad one had already been
+     * delivered, which the contract allows to remain but does not require.
+     * Pin the exact frame sequence so an accidental second stop, or a
+     * missing one that leaves the card streaming, cannot pass. */
     sd_fixture_t fx;
     sd_card_desc_t desc = sd_fx_card_sdhc();
     T_CHECK(sd_fx_require_init(&fx, &desc));
@@ -562,33 +675,44 @@ static void test_read_data_crc_is_not_validated(void)
     sd_fault_t fault;
     memset(&fault, 0, sizeof(fault));
     fault.phase = SD_PHASE_DATA_PAYLOAD;
-    fault.command = 17U;
-    fault.byte_offset = 3U;
+    fault.command = 18U;
+    fault.occurrence = 1U;
+    fault.byte_offset = 5U;
     fault.kind = SD_FAULT_FLIP_BITS;
-    fault.param = 0xFFU;
+    fault.param = 0x01U;
     T_CHECK(sd_card_add_fault(&fault));
 
     sd_guarded_buffer_t buffer;
-    sd_fx_guard_init(&buffer, 1U);
-    /* The card's CRC still describes the uncorrupted block, so a driver that
-     * validated it would reject this read. */
-    T_EQ_RESULT(BLOCK_DEVICE_RESULT_OK,
-        block_device_read_blocks(fx.device, 12U, sd_fx_guard_data(&buffer), 1U));
-    T_EQ_U(1U, sd_card_fault_activations(0U));
-    /* Current behaviour: the corruption reaches the caller undetected. */
-    T_CHECK(!sd_fx_guard_matches_card(&buffer, 12U));
-    uint8_t expected[SD_FX_BLOCK];
-    sd_card_fill_expected_block(12U, expected);
-    const uint8_t *const data = sd_fx_guard_data(&buffer);
-    T_EQ_U((unsigned)(expected[3] ^ 0xFFU), (unsigned)data[3]);
-    /* Exactly one byte differs: the harness is corrupting what it claims to. */
-    size_t differing = 0U;
-    for (size_t i = 0U; i < SD_FX_BLOCK; ++i) {
-        if (data[i] != expected[i]) {
-            differing++;
+    sd_fx_guard_init(&buffer, 4U);
+    const size_t before = sd_card_trace_length();
+    T_EQ_RESULT(BLOCK_DEVICE_RESULT_IO_ERROR, block_device_read_blocks(
+        fx.device, 20U, sd_fx_guard_data(&buffer), 4U));
+
+    /* Command frames after the read began: CMD18 then exactly one CMD12. */
+    unsigned int cmd18 = 0U, cmd12 = 0U, other = 0U, blocks_sent = 0U;
+    for (size_t i = before; i < sd_card_trace_length(); ++i) {
+        const sd_event_t *ev = sd_card_trace_at(i);
+        if (ev->kind == SD_EV_COMMAND) {
+            if (ev->command == 18U) {
+                cmd18++;
+            } else if (ev->command == 12U) {
+                cmd12++;
+            } else {
+                other++;
+            }
+        } else if (ev->kind == SD_EV_BLOCK_SENT) {
+            blocks_sent++;
         }
     }
-    T_EQ_U(1U, differing);
+    T_EQ_U(1U, cmd18);
+    T_EQ_U(1U, cmd12);
+    T_EQ_U(0U, other);
+    /* The card had sent two blocks (good, then corrupt) when it was told to
+     * stop; no third block was consumed. */
+    T_EQ_U(2U, blocks_sent);
+    T_EQ_U(1U, sd_fx_guard_prefix_from_card(&buffer, 20U) / SD_FX_BLOCK);
+    T_CHECK(sd_fx_check_bus_quiescent(&fx) == NULL);
+    T_CHECK(sd_fx_check_recovers(&fx, 20U) == NULL);
 }
 
 /* --------------------------------------------------------------- main */
@@ -605,6 +729,8 @@ int main(void)
     t_run(test_removal_during_the_release_clock, "removal during the release clock cancels success");
     t_run(test_ocr_reports_card_still_powering_up, "OCR power-up status is checked");
     t_run(test_reinsertion_requires_fresh_initialization, "reinsertion needs a fresh init");
-    t_run(test_read_data_crc_is_not_validated, "read data CRC is discarded (documented gap)");
+    t_run(test_read_data_crc_is_validated, "read data CRC is validated on CMD17 and CMD18");
+    t_run(test_read_data_crc_mismatch_stops_the_stream_only_once,
+        "a mid-stream CRC mismatch is aborted with exactly one CMD12");
     return t_summary("sd_faults");
 }

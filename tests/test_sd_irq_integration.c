@@ -2,6 +2,7 @@
 #include "gpio_irq_hardware_mock.h"
 #include "hardware/gpio.h"
 #include "pico_mock.h"
+#include "sd_card_model.h"
 #include "platform/gpio_irq.h"
 #include "storage/sd_spi.h"
 #include "test_check.h"
@@ -26,7 +27,11 @@ int main(void)
     };
     const uint8_t r7[] = {0, 0, 1, 0xaa};
     const uint8_t ocr[] = {0xc0, 0xff, 0x80, 0};
-    const uint8_t csd[] = {0xfe, 0x40, 0, 0, 0, 0, 0, 0, 0, 0x0f, 0xff, 0, 0, 0, 0, 0, 0, 0, 0};
+    uint8_t csd[] = {0xfe, 0x40, 0, 0, 0, 0, 0, 0, 0, 0x0f, 0xff, 0, 0, 0, 0, 0, 0, 0, 0};
+    /* Real CRC16 over the 16 register bytes: the driver validates it. */
+    const uint16_t csd_crc = sd_crc16_ccitt(&csd[1], 16U);
+    csd[17] = (uint8_t)(csd_crc >> 8U);
+    csd[18] = (uint8_t)(csd_crc & 0xFFU);
     REQUIRE(pico_mock_sd_set_command(0, 1, NULL, 0));
     REQUIRE(pico_mock_sd_set_command(8, 1, r7, sizeof(r7)));
     /* CMD59 (CRC_ON_OFF) is part of every bring-up; unscripted it stalls the R1 poll. */

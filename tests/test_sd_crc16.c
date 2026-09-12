@@ -245,6 +245,197 @@ static void test_empty_message_is_not_a_sentinel(void)
     T_EQ_U(0x0000U, crc_helper_16(zeros, sizeof(zeros)));
 }
 
+/* --------------------------------------------------------- rolling form */
+
+/*
+ * crc_helper_rolling_16() is the same computation as crc_helper_16(), but
+ * one byte at a time with the register carried by the caller, so the read
+ * path can fold each payload byte in as it leaves the SPI peripheral instead
+ * of buffering the block and running the CRC afterwards. That makes two
+ * things load-bearing that the block form never had to prove: the register
+ * argument must be honoured exactly (a helper that zeroed it, or returned
+ * only its low bits, would still get the first byte right), and the step must
+ * be correct from *every* register state, not only the ones a zero-initial
+ * fold happens to visit for the vectors above.
+ */
+
+static uint16_t fold(uint16_t crc, const uint8_t *data, size_t length)
+{
+    for (size_t i = 0U; i < length; ++i) {
+        crc = crc_helper_rolling_16(crc, data[i]);
+    }
+    return crc;
+}
+
+static void test_rolling_specification_vectors(void)
+{
+    /* The same vectors as the block form, folded from a zero register. */
+    uint8_t check[9] = { 0x31U, 0x32U, 0x33U, 0x34U, 0x35U,
+                         0x36U, 0x37U, 0x38U, 0x39U };
+    t_context("rolling fold of ASCII 123456789 gives the catalogue value");
+    T_EQ_U(0x31C3U, fold(0U, check, 9U));
+
+    t_context("rolling a single 0x00 byte through a zero register");
+    T_EQ_U(0x0000U, crc_helper_rolling_16(0U, 0x00U));
+    t_context("rolling a single 0x01 byte leaves the generator in the register");
+    T_EQ_U(0x1021U, crc_helper_rolling_16(0U, 0x01U));
+
+    /* Only the top register bit is set and the data byte is zero: the
+     * generator is applied on the first bit time and the result shifts up
+     * through the remaining seven, feeding back once more when it reaches
+     * the top again at bit time five. Derived by hand from the generator. */
+    t_context("rolling 0x00 through a register holding 0x8000");
+    T_EQ_U(0x9188U, crc_helper_rolling_16(0x8000U, 0x00U));
+
+    /* A full 512-byte block of zeros stays at zero, as for the block form. */
+    uint8_t zeros[512];
+    memset(zeros, 0, sizeof(zeros));
+    t_context("rolling a full 512-byte block of zeros");
+    T_EQ_U(0x0000U, fold(0U, zeros, sizeof(zeros)));
+
+    /* The register must come out 16 bits wide: a helper that truncated its
+     * result (the first version returned bool) would still pass every vector
+     * whose answer is 0 or 1, so pin one that is neither and has both bytes
+     * nonzero. */
+    t_context("the returned register is 16 bits wide");
+    T_CHECK(crc_helper_rolling_16(0x1234U, 0x56U) > 0xFFU);
+    t_clear_context();
+}
+
+static void test_rolling_fold_matches_block_form(void)
+{
+    /* A fold from zero over any message must equal the block helper and
+     * the card model's oracle, at the lengths the driver uses and around
+     * them. */
+    static const size_t lengths[] = {
+        0U, 1U, 2U, 3U, 15U, 16U, 17U, 511U, 512U, 513U, 528U,
+    };
+    uint8_t buffer[CRC16_MAX_LENGTH];
+    char hex[(3U * 32U) + 8U];
+    t_rand_t rng;
+    t_rand_seed(&rng, suite_seed + 3U);
+
+    for (size_t i = 0U; i < sizeof(lengths) / sizeof(lengths[0]); ++i) {
+        const size_t length = lengths[i];
+        for (unsigned int iteration = 0U; iteration < 16U; ++iteration) {
+            fill_random(&rng, buffer, length);
+            format_hex(hex, sizeof(hex), buffer, length < 32U ? length : 32U);
+            t_context("length %zu iteration %u head [%s] (replay: --seed %"
+                PRIu64 ")", length, iteration, hex, suite_seed);
+            const uint16_t rolled = fold(0U, buffer, length);
+            T_EQ_U(crc_helper_16(buffer, length), rolled);
+            T_EQ_U(sd_crc16_ccitt(buffer, length), rolled);
+        }
+    }
+    t_clear_context();
+}
+
+static void test_rolling_honours_the_carried_register(void)
+{
+    /* The register argument is the state after some prefix, so folding a
+     * suffix from that state must give the CRC of prefix and suffix
+     * together. A helper that ignored or partially used its first argument
+     * still passes the from-zero cases; this one it cannot. */
+    static const size_t splits[][2] = {
+        { 1U, 1U }, { 1U, 511U }, { 511U, 1U }, { 256U, 256U },
+        { 16U, 496U }, { 512U, 16U }, { 3U, 525U },
+    };
+    uint8_t buffer[CRC16_MAX_LENGTH];
+    t_rand_t rng;
+    t_rand_seed(&rng, suite_seed + 4U);
+
+    for (size_t i = 0U; i < sizeof(splits) / sizeof(splits[0]); ++i) {
+        const size_t prefix = splits[i][0];
+        const size_t suffix = splits[i][1];
+        for (unsigned int iteration = 0U; iteration < 16U; ++iteration) {
+            fill_random(&rng, buffer, prefix + suffix);
+            const uint16_t after_prefix = crc_helper_16(buffer, prefix);
+            t_context("prefix %zu suffix %zu iteration %u register 0x%04X "
+                "(replay: --seed %" PRIu64 ")", prefix, suffix, iteration,
+                (unsigned)after_prefix, suite_seed);
+            T_EQ_U(sd_crc16_ccitt(buffer, prefix + suffix),
+                fold(after_prefix, buffer + prefix, suffix));
+        }
+    }
+    t_clear_context();
+}
+
+static void test_rolling_step_is_correct_from_every_register_state(void)
+{
+    /* The one-byte step of a non-reflected CRC is linear over GF(2), which
+     * gives the classic table identity:
+     *
+     *     step(crc, d) = (crc << 8) ^ T[(crc >> 8) ^ d]
+     *
+     * where T[x] is the CRC of the single byte x from a zero register. Every
+     * term on the right comes from the card model's independent
+     * implementation, so this checks the helper against the oracle at every
+     * one of the 65536 x 256 (register, byte) pairs rather than only along the
+     * paths random messages happen to take. It takes well under a second. */
+    uint16_t table[256];
+    for (unsigned int x = 0U; x < 256U; ++x) {
+        const uint8_t byte = (uint8_t)x;
+        table[x] = sd_crc16_ccitt(&byte, 1U);
+    }
+
+    unsigned long mismatches = 0UL;
+    for (unsigned int crc = 0U; crc < 0x10000U; ++crc) {
+        for (unsigned int d = 0U; d < 256U; ++d) {
+            const uint16_t expected = (uint16_t)(
+                ((crc << 8U) & 0xFFFFU) ^ table[((crc >> 8U) ^ d) & 0xFFU]);
+            const uint16_t actual =
+                crc_helper_rolling_16((uint16_t)crc, (uint8_t)d);
+            if (actual != expected) {
+                if (mismatches == 0UL) {
+                    t_context("first mismatch: register 0x%04X byte 0x%02X "
+                        "expected 0x%04X got 0x%04X",
+                        crc, d, (unsigned)expected, (unsigned)actual);
+                    T_CHECK(actual == expected);
+                }
+                mismatches++;
+            }
+        }
+    }
+    t_context("%lu mismatching (register, byte) pairs", mismatches);
+    T_EQ_U(0U, mismatches);
+    t_clear_context();
+}
+
+static void test_rolling_receiver_conventions(void)
+{
+    /* What the read path does with the helper: fold the 512 payload bytes,
+     * then assemble the two received CRC bytes most significant first and
+     * compare. Pin both that the comparison is met for an intact block and
+     * that the residue form (folding the CRC bytes in as well) reaches zero,
+     * so either receiver convention is valid against this helper. */
+    uint8_t block[514];
+    t_rand_t rng;
+    t_rand_seed(&rng, suite_seed + 5U);
+
+    for (unsigned int iteration = 0U; iteration < 16U; ++iteration) {
+        fill_random(&rng, block, 512U);
+        const uint16_t sent = sd_crc16_ccitt(block, 512U);
+        block[512] = (uint8_t)(sent >> 8U);
+        block[513] = (uint8_t)(sent & 0xFFU);
+
+        const uint16_t received = (uint16_t)(
+            ((uint16_t)block[512] << 8U) | (uint16_t)block[513]);
+        t_context("iteration %u crc 0x%04X (replay: --seed %" PRIu64 ")",
+            iteration, (unsigned)sent, suite_seed);
+        T_EQ_U(received, fold(0U, block, 512U));
+        T_EQ_U(0U, fold(0U, block, 514U));
+
+        /* And a byte-swapped receiver would be rejected, as for the block
+         * form, unless the two bytes happen to be equal. */
+        if (block[512] != block[513]) {
+            const uint16_t swapped = (uint16_t)(
+                ((uint16_t)block[513] << 8U) | (uint16_t)block[512]);
+            T_CHECK(swapped != fold(0U, block, 512U));
+        }
+    }
+    t_clear_context();
+}
+
 /* --------------------------------------------------------------- main */
 
 int main(int argc, char **argv)
@@ -275,5 +466,15 @@ int main(int argc, char **argv)
         "appending the CRC MSB-first leaves a zero residue");
     t_run(test_empty_message_is_not_a_sentinel,
         "an empty message and an all-zero block share a CRC of 0x0000");
+    t_run(test_rolling_specification_vectors,
+        "rolling CRC16 specification vectors and register width");
+    t_run(test_rolling_fold_matches_block_form,
+        "rolling CRC16 fold matches the block form and the model");
+    t_run(test_rolling_honours_the_carried_register,
+        "rolling CRC16 continues correctly from a carried register");
+    t_run(test_rolling_step_is_correct_from_every_register_state,
+        "rolling CRC16 step is correct from every register state");
+    t_run(test_rolling_receiver_conventions,
+        "rolling CRC16 supports compare and residue receivers MSB-first");
     return t_summary("sd_crc16");
 }

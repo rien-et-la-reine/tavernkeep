@@ -23,8 +23,8 @@ cmake --build tests/build -j 4
 ctest --test-dir tests/build --output-on-failure
 ```
 
-Generated files stay inside `tests`. There are **24 enabled CTest cases** and
-five disabled ones for gaps that are still open. Checks remain active under
+Generated files stay inside `tests`. There are **25 enabled CTest cases** and
+three disabled ones for gaps that are still open. Checks remain active under
 `NDEBUG`; every case has a real-time timeout.
 
 ## Where to look
@@ -46,10 +46,10 @@ five disabled ones for gaps that are still open. Checks remain active under
 | --- | --- |
 | `sd_spi_host_tests` | 63 groups: SDHC/legacy/v2 SDSC, ACMD41 retries, CSD capacities and rejection, SPI framing, R1 byte limits, all error tokens, reads, canaries, address limits, cleanup, IRQ races, removal sweeps, a refused CMD59, an implemented write and the info contract. Run twice, once under each clock model |
 | `sd_protocol_host_tests` | card variant matrix, command ordering, per-frame CRC7, CMD59 actually enabling the card's command CRC checking, application commands, HCS, the R1 poll boundary, all 128 R1 values, all error tokens, long multiple-block reads, addressing per card type, capacity boundaries, CSD registers from real cards, 74-clock bring-up, bus release after every outcome |
-| `sd_faults_host_tests` | fault injection across every read phase, error after partial success, CMD12 failure after good data, bounded busy periods, removal at each phase and during the release clock, OCR power-up status, reinsertion, the data-CRC gap |
+| `sd_faults_host_tests` | fault injection across every read phase, error after partial success, CMD12 failure after good data, bounded busy periods, removal at each phase and during the release clock, OCR power-up status, reinsertion, read data CRC validation on CMD17 and CMD18 (payload and CRC-byte corruption, a bad CRC on an intact payload, exactly one CMD12 on a mid-stream mismatch) and a no-false-success invariant for payload and CRC faults |
 | `sd_writes_host_tests` | CMD24/CMD25 on every card kind with the data read back out of the card model, byte addressing, the token each command requires, the N_WR idle byte, CRC16 on the wire, stop-tran, data-response tokens with don't-care bits, rejections (CMD12 only for CMD25), unknown response bytes, R1 errors, programming busy between blocks and after stop-tran including the N_BR window, `BUSY_TIMEOUT` on overrun, removal at every write phase and during the release clock, a fault sweep with a no-false-success invariant, and argument validation with no bus traffic |
 | `sd_crc_host_tests` | `crc_helper_7()` against the specification's CMD0/CMD17 vectors and, differentially, against the card model's independent CRC7. No bus |
-| `sd_crc16_host_tests` | `crc_helper_16()` against the CRC-16/XMODEM catalogue check value and hand-derivable vectors, differentially against the card model, every single-bit error in a 512-byte block, and the zero-residue property a receiver validates with. No bus |
+| `sd_crc16_host_tests` | `crc_helper_16()` against the CRC-16/XMODEM catalogue check value and hand-derivable vectors, differentially against the card model, every single-bit error in a 512-byte block, and the zero-residue property a receiver validates with; `crc_helper_rolling_16()` against the same vectors, as a fold against the block form and the model, from a carried register, exhaustively at every (register, byte) pair against the model's table identity, and for the MSB-first compare and residue receiver conventions. No bus |
 | `sd_property_host_tests` | CSD arithmetic across all field encodings, the largest addressable card, address conversion on random cards, random card responses, random operation and removal sequences. Seeded; prints its seed and takes `--seed N` |
 | `sd_removal_*_host_tests` | regressions for the two production defects fixed during the test overhaul |
 | `gpio_irq_host_tests` | ownership and core rules, validation, routing and masking, multiple GPIO users, callback retention, nested interrupt state, self-unregistration, out-of-range dispatch indexes |
@@ -108,8 +108,11 @@ Mutation testing is the stronger signal: see [MUTATION.md](MUTATION.md).
   programming busy. It still forgets a pending write when chip select is
   released, which a real card does not; see
   [RESIDUAL_RISK.md](RESIDUAL_RISK.md).
-- Production discards the read and CSD data CRC. Passing tests do not
-  demonstrate read CRC validation, FatFs, PIO/DMA or USB storage. The
-  acceptance test for read CRC validation is written and failing: see
-  [KNOWN_GAPS.md](KNOWN_GAPS.md) SD-003. Writes are implemented and covered by
-  `sd_writes_host_tests` on the host only; no real-card evidence exists yet.
+- Production validates the data CRC16 on CMD17/CMD18 reads and on the CSD
+  register (SD-003 closed). A card whose bus sticks low from
+  the first payload byte returns an all-zero block with a self-consistent
+  CRC of `0x0000`, which no CRC-16/XMODEM receiver can distinguish from an
+  erased block; see [RESIDUAL_RISK.md](RESIDUAL_RISK.md). Passing tests do not
+  demonstrate FatFs, PIO/DMA or USB storage. Writes are implemented and
+  covered by `sd_writes_host_tests` on the host only; no real-card evidence
+  exists yet for reads with CRC checking or for writes.

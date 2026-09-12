@@ -12,7 +12,9 @@
  *   ctest --test-dir tests/build -L known-gap --output-on-failure
  *
  * The SD-007 write acceptance cases that used to live here were promoted to
- * test_sd_writes.c (sd_writes_host_tests) when the write path was implemented.
+ * test_sd_writes.c (sd_writes_host_tests) when the write path was implemented,
+ * and the SD-003 read-CRC case to test_sd_faults.c (sd_faults_host_tests)
+ * when read data CRC validation was implemented.
  */
 #include <inttypes.h>
 #include <string.h>
@@ -21,42 +23,6 @@
 #include "sd_card_model.h"
 #include "sd_fixture.h"
 #include "test_harness.h"
-
-/* ------------------------------------------------------------- SD-003 */
-
-static void gap_read_data_crc_must_be_validated(void)
-{
-    /* src/storage/sd_spi.c reads the two CRC bytes after each data block and
-     * discards them (its own TODO says so). A card returning corrupt data is
-     * therefore reported as a successful read, which is silent corruption
-     * rather than a detected error - the opposite of what NFR-003 asks for.
-     *
-     * The model computes a real CRC16-CCITT over the block it sent, so a
-     * driver that validated it would reject this read. */
-    for (unsigned int blocks = 1U; blocks <= 2U; ++blocks) {
-        sd_fixture_t fx;
-        sd_card_desc_t desc = sd_fx_card_sdhc();
-        t_context("%u block(s), one payload byte corrupted", blocks);
-        T_CHECK(sd_fx_require_init(&fx, &desc));
-
-        sd_fault_t fault;
-        memset(&fault, 0, sizeof(fault));
-        fault.phase = SD_PHASE_DATA_PAYLOAD;
-        fault.command = blocks == 1U ? 17U : 18U;
-        fault.byte_offset = 17U;
-        fault.kind = SD_FAULT_FLIP_BITS;
-        fault.param = 0x01U;
-        T_CHECK(sd_card_add_fault(&fault));
-
-        sd_guarded_buffer_t buffer;
-        sd_fx_guard_init(&buffer, blocks);
-        T_EQ_RESULT(BLOCK_DEVICE_RESULT_IO_ERROR, block_device_read_blocks(
-            fx.device, 30U, sd_fx_guard_data(&buffer), blocks));
-        T_CHECK(sd_fx_guard_intact(&buffer));
-        T_CHECK(sd_fx_check_bus_quiescent(&fx) == NULL);
-    }
-    t_clear_context();
-}
 
 /* ------------------------------------------------------------- SD-004 */
 
@@ -180,14 +146,11 @@ int main(int argc, char **argv)
 {
     if (argc != 2) {
         (void)fprintf(stderr,
-            "usage: %s --gap-{data-crc|stop-residual|r1-tolerance"
-            "|command-crc}\n", argv[0]);
+            "usage: %s --gap-{stop-residual|r1-tolerance|command-crc}\n",
+            argv[0]);
         return 2;
     }
-    if (strcmp(argv[1], "--gap-data-crc") == 0) {
-        t_run(gap_read_data_crc_must_be_validated,
-            "SD-003 read data CRC must be validated");
-    } else if (strcmp(argv[1], "--gap-stop-residual") == 0) {
+    if (strcmp(argv[1], "--gap-stop-residual") == 0) {
         t_run(gap_stop_transmission_tolerates_in_flight_data,
             "SD-004 CMD12 must tolerate in-flight read data");
     } else if (strcmp(argv[1], "--gap-r1-tolerance") == 0) {

@@ -117,6 +117,7 @@ why: wrong addressing conversion - byte-addressed cards sent block addresses on 
      (the write path has its own copy; see write-sdsc-byte-address-dropped)
 ---
     uint8_t *buf = buffer;
+    uint16_t crc_calc = 0x0000, crc_in = 0x0000;
     block_device_result_t result;
 
     //adjust block address to byte address for sdsc cards
@@ -125,6 +126,7 @@ why: wrong addressing conversion - byte-addressed cards sent block addresses on 
     }
 ===
     uint8_t *buf = buffer;
+    uint16_t crc_calc = 0x0000, crc_in = 0x0000;
     block_device_result_t result;
 
     //adjust block address to byte address for sdsc cards
@@ -137,6 +139,7 @@ file: src/storage/sd_spi.c
 why: wrong addressing conversion - the conversion applied to the wrong type on reads
 ---
     uint8_t *buf = buffer;
+    uint16_t crc_calc = 0x0000, crc_in = 0x0000;
     block_device_result_t result;
 
     //adjust block address to byte address for sdsc cards
@@ -145,6 +148,7 @@ why: wrong addressing conversion - the conversion applied to the wrong type on r
     }
 ===
     uint8_t *buf = buffer;
+    uint16_t crc_calc = 0x0000, crc_in = 0x0000;
     block_device_result_t result;
 
     //adjust block address to byte address for sdsc cards
@@ -208,57 +212,133 @@ file: src/storage/sd_spi.c
 why: wrong constant - the single-block data start token
 ---
                 if (token == 0xFE) {
-                    //data response token, read in block to buffer and discard 2 byte crc
+                    //data response token
+                    //reset crc registers
+                    crc_calc = 0x0000;
+                    crc_in = 0x0000;
+                    //read in block to buffer
                     for (uint16_t i = 0; i < 512; i++) {
-                        *buf++ = sd_spi_transfer(sd, 0xFF);
-                        if (sd_spi_removal_latched(sd)) {
-                            sd_spi_release_bus(sd);
-                            return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
-                        }
-                    }
-                    //discard CRC, TODO: check and validate CRC instead of discarding
+                        *buf = sd_spi_transfer(sd, 0xFF);
 ===
                 if (token == 0xFC) {
-                    //data response token, read in block to buffer and discard 2 byte crc
+                    //data response token
+                    //reset crc registers
+                    crc_calc = 0x0000;
+                    crc_in = 0x0000;
+                    //read in block to buffer
                     for (uint16_t i = 0; i < 512; i++) {
-                        *buf++ = sd_spi_transfer(sd, 0xFF);
-                        if (sd_spi_removal_latched(sd)) {
-                            sd_spi_release_bus(sd);
-                            return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
-                        }
-                    }
-                    //discard CRC, TODO: check and validate CRC instead of discarding
+                        *buf = sd_spi_transfer(sd, 0xFF);
 
 id: block-length-511
 file: src/storage/sd_spi.c
 why: off-by-one payload length in the multi-block path
 ---
                         for (uint16_t i = 0; i < 512; i++) {
-                            *buf++ = sd_spi_transfer(sd, 0xFF);
-                            if (sd_spi_removal_latched(sd)) {
-                                sd_spi_release_bus(sd);
-                                return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
-                            }
-                        }
+                            *buf = sd_spi_transfer(sd, 0xFF);
+                            crc_calc = crc_helper_rolling_16(crc_calc, *buf++);
 ===
                         for (uint16_t i = 0; i < 511; i++) {
-                            *buf++ = sd_spi_transfer(sd, 0xFF);
-                            if (sd_spi_removal_latched(sd)) {
-                                sd_spi_release_bus(sd);
-                                return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
-                            }
-                        }
+                            *buf = sd_spi_transfer(sd, 0xFF);
+                            crc_calc = crc_helper_rolling_16(crc_calc, *buf++);
 
 id: crc-bytes-not-consumed
 file: src/storage/sd_spi.c
-why: skipped state transition - the data CRC is left on the bus
+why: skipped state transition - only one data CRC byte is consumed in the
+     multi-block path, leaving the second on the bus
 ---
-                        //discard CRC TODO: don't discard CRC, check it
-                        sd_spi_transfer(sd, 0xFF);
-                        sd_spi_transfer(sd, 0xFF);
+                        //read in crc
+                        crc_in |= ((uint16_t) sd_spi_transfer(sd, 0xFF)) << 8;
+                        crc_in |= (uint16_t) sd_spi_transfer(sd, 0xFF);
 ===
-                        //discard CRC TODO: don't discard CRC, check it
-                        sd_spi_transfer(sd, 0xFF);
+                        //read in crc
+                        crc_in |= ((uint16_t) sd_spi_transfer(sd, 0xFF)) << 8;
+
+id: read-crc-bytes-swapped
+file: src/storage/sd_spi.c
+why: wrong byte order - the received data CRC is assembled least significant
+     byte first in the multi-block path
+---
+                        //read in crc
+                        crc_in |= ((uint16_t) sd_spi_transfer(sd, 0xFF)) << 8;
+                        crc_in |= (uint16_t) sd_spi_transfer(sd, 0xFF);
+===
+                        //read in crc
+                        crc_in |= (uint16_t) sd_spi_transfer(sd, 0xFF);
+                        crc_in |= ((uint16_t) sd_spi_transfer(sd, 0xFF)) << 8;
+
+id: read-crc-bytes-swapped-single
+file: src/storage/sd_spi.c
+why: wrong byte order - the received data CRC is assembled least significant
+     byte first in the single-block path
+---
+                    //read in crc
+                    crc_in |= ((uint16_t) sd_spi_transfer(sd, 0xFF)) << 8;
+                    crc_in |= (uint16_t) sd_spi_transfer(sd, 0xFF);
+===
+                    //read in crc
+                    crc_in |= (uint16_t) sd_spi_transfer(sd, 0xFF);
+                    crc_in |= ((uint16_t) sd_spi_transfer(sd, 0xFF)) << 8;
+
+id: read-crc-check-removed-multi
+file: src/storage/sd_spi.c
+why: removed validation - the multi-block path never compares the data CRC
+---
+                        //check crc
+                        if (!(crc_in == crc_calc)) {
+===
+                        //check crc
+                        if (0) {
+
+id: read-crc-check-removed-single
+file: src/storage/sd_spi.c
+why: removed validation - the single-block path never compares the data CRC
+---
+                    //check crc
+                    if (!(crc_in == crc_calc)) {
+===
+                    //check crc
+                    if (0) {
+
+id: read-crc-register-not-reset
+file: src/storage/sd_spi.c
+why: stale state - the running CRC register carries over from the previous
+     block of a multi-block stream
+---
+                        //reset crc registers
+                        crc_calc = 0x0000;
+                        crc_in = 0x0000;
+===
+                        //reset crc registers
+                        crc_in = 0x0000;
+
+id: rolling-crc-wrong-generator
+file: src/storage/sd_crc.c
+why: wrong constant - the rolling helper uses the CRC-16/IBM generator
+---
+uint16_t crc_helper_rolling_16(uint16_t crc, uint8_t data) {
+    //G(x) = x^16 + x^12 + x^5 + 1 -> mask: 0x1021
+    uint16_t mask = 0x1021;
+===
+uint16_t crc_helper_rolling_16(uint16_t crc, uint8_t data) {
+    //G(x) = x^16 + x^12 + x^5 + 1 -> mask: 0x1021
+    uint16_t mask = 0x8005;
+
+id: rolling-crc-ignores-register
+file: src/storage/sd_crc.c
+why: dropped feedback - the rolling helper's step ignores the carried register's
+     top bit, so it is only right for the first byte
+---
+        feedback = ((crc >> 15) & 1) ^ ((data >> next_bit) & 1);
+===
+        feedback = ((data >> next_bit) & 1);
+
+id: rolling-crc-seven-bits
+file: src/storage/sd_crc.c
+why: off-by-one - the rolling helper processes seven bits of each byte
+---
+    } while (next_bit-- > 0);
+===
+    } while (--next_bit > 0);
 
 id: cmd12-not-sent
 file: src/storage/sd_spi.c
@@ -333,7 +413,8 @@ file: src/storage/sd_spi.c
 why: removed cancellation - a removal during the payload is not noticed
 ---
                     for (uint16_t i = 0; i < 512; i++) {
-                        *buf++ = sd_spi_transfer(sd, 0xFF);
+                        *buf = sd_spi_transfer(sd, 0xFF);
+                        crc_calc = crc_helper_rolling_16(crc_calc, *buf++);
                         if (sd_spi_removal_latched(sd)) {
                             sd_spi_release_bus(sd);
                             return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
@@ -341,7 +422,8 @@ why: removed cancellation - a removal during the payload is not noticed
                     }
 ===
                     for (uint16_t i = 0; i < 512; i++) {
-                        *buf++ = sd_spi_transfer(sd, 0xFF);
+                        *buf = sd_spi_transfer(sd, 0xFF);
+                        crc_calc = crc_helper_rolling_16(crc_calc, *buf++);
                     }
 
 id: removal-latch-never-set
@@ -709,17 +791,46 @@ file: src/storage/sd_spi.c
 why: wrong framing - the CRC7 end-bit habit applied to the data CRC16; every block whose
      true CRC has bit 0 clear is rejected by the card
 ---
-                crc = crc_helper_16((buf + (sent_blocks * 512)), 512);
+                //transmit CRC
+                sd_spi_transfer(sd, (uint8_t) (crc >> 8));
+                sd_spi_transfer(sd, (uint8_t) crc);
 ===
-                crc = crc_helper_16((buf + (sent_blocks * 512)), 512) | 0x0001;
+                //transmit CRC
+                sd_spi_transfer(sd, (uint8_t) (crc >> 8));
+                sd_spi_transfer(sd, (uint8_t) (crc | 0x0001));
+
+id: write-crc16-not-reset-between-blocks
+file: src/storage/sd_spi.c
+why: stale state - the rolling CRC register carries over from the previous block of a
+     CMD25 stream, so every block after the first carries the wrong CRC
+---
+                //reset crc
+                crc = 0x0000;
+===
+                //reset crc
+
+id: write-crc16-result-discarded
+file: src/storage/sd_spi.c
+why: dropped return value - the rolling helper's result is not assigned back, so the
+     register stays 0x0000 and every block is sent with CRC 0x0000 (the defect that
+     existed briefly when the write path moved to the rolling form)
+---
+                crc = crc_helper_rolling_16(crc, buf[byte_counter++]);
+===
+                crc_helper_rolling_16(crc, buf[byte_counter++]);
 
 id: write-crc16-short
 file: src/storage/sd_spi.c
 why: wrong length - the data CRC must cover all 512 bytes of the block
 ---
-            crc = crc_helper_16(buf, 512);
+                //rolling crc calc + increment counter
+                crc = crc_helper_rolling_16(crc, buf[byte_counter++]);
 ===
-            crc = crc_helper_16(buf, 511);
+                //rolling crc calc + increment counter
+                if (byte_counter != 511) {
+                    crc = crc_helper_rolling_16(crc, buf[byte_counter]);
+                }
+                byte_counter++;
 
 id: write-source-stride
 file: src/storage/sd_spi.c

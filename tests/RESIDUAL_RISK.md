@@ -208,13 +208,26 @@ generic error is least helpful.
 
 ## 5. Known gaps that are open
 
-Three regressions assert desired behaviour and fail against the current source.
+Two regressions assert desired behaviour and fail against the current source.
 They are registered in CTest and disabled by default; see
 [KNOWN_GAPS.md](KNOWN_GAPS.md). A green default run is not evidence that they
 are resolved.
 
-- **SD-003** — read data CRC is discarded, so payload corruption is reported as
-  success.
 - **SD-004** — CMD12 can mistake in-flight read data for its own response.
 - **SD-005** — the R1 wait is one byte short of the specified window and well
   short of what real cards have needed.
+
+One limit of read CRC validation (SD-003, closed) is inherent rather than an
+open gap:
+
+- **An all-zero packet is self-consistent.** CRC-16/XMODEM has a zero initial
+  register and no final XOR, so 512 zero bytes followed by `0x00 0x00` is a
+  valid frame. A bus stuck low from the first payload byte of a single-block
+  read is therefore reported as a successful read of an erased block. Stuck
+  high (`0xFF`) is detected, as is stuck low from any later byte or on a
+  multiple-block stream. Only a different CRC parameterisation would close
+  this, and the specification fixes the parameterisation. The same holds for
+  the CSD register, which is also validated: a 16-byte all-zero register with
+  a zero CRC would pass the CRC, but its `READ_BL_LEN` of 0 is outside the
+  9..11 range the decoder accepts (and a high-capacity card reporting CSD
+  structure 0 fails the version sanity check), so bring-up rejects it anyway.

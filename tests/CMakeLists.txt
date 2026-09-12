@@ -214,7 +214,7 @@ add_executable(sd_gaps_host_tests test_sd_gaps.c
     ../src/storage/sd_crc.c)
 tavernkeep_configure_target(sd_gaps_host_tests)
 
-foreach(gap IN ITEMS data-crc stop-residual r1-tolerance command-crc)
+foreach(gap IN ITEMS stop-residual r1-tolerance command-crc)
     add_test(NAME sd_gap_${gap} COMMAND sd_gaps_host_tests --gap-${gap})
     set_tests_properties(sd_gap_${gap} PROPERTIES TIMEOUT 60 LABELS "known-gap")
     if(NOT TAVERNKEEP_TEST_KNOWN_GAPS)

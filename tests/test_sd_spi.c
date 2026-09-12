@@ -7,6 +7,7 @@
 #include "hardware/gpio.h"
 #include "hardware/spi.h"
 #include "pico_mock.h"
+#include "sd_card_model.h"
 #include "storage/sd_spi.h"
 
 enum {
@@ -82,6 +83,12 @@ static void configure_csd_v2_fields(uint32_t c_size)
     payload[8] = (uint8_t)((c_size >> 16U) & 0x3fU);
     payload[9] = (uint8_t)(c_size >> 8U);
     payload[10] = (uint8_t)c_size;
+    /* The driver validates the CRC16 after the CSD register, so the scripted
+     * card must send the real one (MSB first), from the model's independent
+     * implementation. */
+    const uint16_t csd_crc = sd_crc16_ccitt(&payload[1], 16U);
+    payload[17] = (uint8_t)(csd_crc >> 8U);
+    payload[18] = (uint8_t)(csd_crc & 0xFFU);
     pico_mock_sd_set_command(9U, 0x00U, payload, sizeof(payload));
 }
 
@@ -103,6 +110,12 @@ static void configure_csd_v1_fields(
     payload[9] = (uint8_t)((c_size & 0x03U) << 6U);
     payload[10] = (uint8_t)((c_size_mult >> 1U) & 0x03U);
     payload[11] = (uint8_t)((c_size_mult & 0x01U) << 7U);
+    /* The driver validates the CRC16 after the CSD register, so the scripted
+     * card must send the real one (MSB first), from the model's independent
+     * implementation. */
+    const uint16_t csd_crc = sd_crc16_ccitt(&payload[1], 16U);
+    payload[17] = (uint8_t)(csd_crc >> 8U);
+    payload[18] = (uint8_t)(csd_crc & 0xFFU);
     pico_mock_sd_set_command(9U, 0x00U, payload, sizeof(payload));
 }
 
@@ -204,11 +217,17 @@ static size_t make_read_payload(
     size_t position = 0U;
     for (size_t block = 0U; block < block_count; ++block) {
         payload[position++] = 0xfeU;
+        const uint8_t *const data = &payload[position];
         for (size_t offset = 0U; offset < SD_BLOCK_SIZE; ++offset) {
             payload[position++] = expected_data_byte(seed, block, offset);
         }
-        payload[position++] = 0x12U;
-        payload[position++] = 0x34U;
+        /* The driver validates the data CRC16 (MSB first) after every block,
+         * so the scripted card must send the real one. sd_crc16_ccitt() is
+         * the card model's implementation, independent of the production
+         * helper the driver folds the payload through. */
+        const uint16_t crc = sd_crc16_ccitt(data, SD_BLOCK_SIZE);
+        payload[position++] = (uint8_t)(crc >> 8U);
+        payload[position++] = (uint8_t)(crc & 0xFFU);
     }
     return position;
 }
@@ -899,6 +918,12 @@ static void test_unsupported_csd_rolls_back_initialization(void)
     const sd_spi_config_t config = valid_config();
     CHECK_EQ(BLOCK_DEVICE_RESULT_OK, sd_spi_configure(&sd, &config));
     configure_successful_sdhc_card();
+    /* The driver validates the CRC16 after the CSD register, so the scripted
+     * card must send the real one (MSB first), from the model's independent
+     * implementation. */
+    const uint16_t csd_crc = sd_crc16_ccitt(&payload[1], 16U);
+    payload[17] = (uint8_t)(csd_crc >> 8U);
+    payload[18] = (uint8_t)(csd_crc & 0xFFU);
     pico_mock_sd_set_command(9U, 0x00U, payload, sizeof(payload));
 
     CHECK_EQ(BLOCK_DEVICE_RESULT_NOT_IMPLEMENTED,

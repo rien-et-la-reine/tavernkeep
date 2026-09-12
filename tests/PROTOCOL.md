@@ -269,18 +269,27 @@ caught.
 **Rule.** Every data packet carries a 16-bit CRC (CRC-CCITT, polynomial
 `x^16 + x^12 + x^5 + 1`) after the payload.
 
-**Implementation.** The driver reads the two bytes and discards them; its own
-comment marks this as a TODO. A card returning corrupt data is therefore
-reported as a successful read.
+**Implementation.** `sd_spi_device_read_blocks()` folds each payload byte
+through `crc_helper_rolling_16()` as it is received, reads the two CRC bytes
+most significant first and compares. A mismatch on the CMD18 path issues CMD12,
+releases the bus and returns `IO_ERROR`; on the CMD17 path the card has already
+finished transmitting, so the driver releases the bus and returns `IO_ERROR`
+without a stop command. `sd_spi_read_csd()` validates the CRC after the 16-byte
+CSD register the same way, before the register is decoded.
 
-**Disposition.** Registered as gap **SD-003**. The model computes a real CRC16
-over every block it sends, so the regression that will pass once validation
-exists is already written. The consequence for NFR-003 is silent corruption
-rather than a detected error, which is worth deciding on deliberately.
+**Disposition.** Gap **SD-003** closed for data blocks on 2026-09-12. The
+parameterisation is CRC-16/XMODEM: generator `0x1021`, zero initial register,
+MSB first, no reflection, no final XOR. Its one structural blind spot is that
+an all-zero payload has CRC `0x0000`, so a bus stuck low across an entire
+packet is accepted; that is a property of the specified CRC and is recorded in
+RESIDUAL_RISK.md.
 
-**Tests.** `test_read_data_crc_is_not_validated` pins the current behaviour and
-proves the corruption reaches the caller; `sd_gap_data-crc` asserts the desired
-behaviour and fails.
+**Tests.** `test_read_data_crc_is_validated` and
+`test_read_data_crc_mismatch_stops_the_stream_only_once` in `test_sd_faults.c`;
+the fault sweep there requires every payload and CRC-byte fault row to fail
+except the stuck-low-from-offset-0 single-block row, which it pins as the
+false success it is. `sd_crc16_host_tests` covers the helper, including an
+exhaustive (register, byte) check against the model's implementation.
 
 ## P-13 — write data packets: start-block tokens and the N_WR idle byte
 

@@ -39,11 +39,11 @@ suppression, exactly-once hardware release, and that reinsertion requires a
 fresh initialization. Discrete injection is not exhaustive testing of
 machine-instruction races or of multicore execution.
 
-The three disabled regressions in [KNOWN_GAPS.md](KNOWN_GAPS.md) are failed
+The two disabled regressions in [KNOWN_GAPS.md](KNOWN_GAPS.md) are failed
 contract evidence and must accompany any report of a passing enabled suite.
-Read data CRC validation remains explicitly unimplemented. Writes are
-implemented and host-tested; the real-card evidence in the FR-009 row below is
-still outstanding.
+Read data CRC validation is implemented and host-tested for CMD17/CMD18 and
+for the CSD register; no real card has yet been read with checking on. Writes are implemented and host-tested; the real-card evidence in
+the FR-009 row below is still outstanding.
 
 ## Future acceptance matrix
 

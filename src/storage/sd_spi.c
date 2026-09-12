@@ -83,15 +83,19 @@ block_device_result_t sd_spi_configure(
     }
 
     sd->config = *config;
-    sd->configured = true;
     sd->initialized = false;
     sd->block_count = 0U;
     sd->block_device.context = sd;
     sd->block_device.operations = &sd_spi_operations;
 
     //unlatch the removal flag
-    atomic_init(&sd->removal_latched, false);
-
+    if (sd->configured) {
+        //already configured once, use atomic store
+        atomic_store(&sd->removal_latched, false);
+    } else {
+        sd->configured = true;
+        atomic_init(&sd->removal_latched, false);
+    }
     return BLOCK_DEVICE_RESULT_OK;
 }
 
@@ -371,13 +375,13 @@ static block_device_result_t sd_spi_device_read_blocks(
 
     uint8_t r1, token;
     uint8_t *buf = buffer;
+    uint16_t crc_calc = 0x0000, crc_in = 0x0000;
     block_device_result_t result;
 
     //adjust block address to byte address for sdsc cards
     if (!sd->card_type_hcxc) {
         first_lba *= 512U;
     }
-
 
     //assert chip select
     sd_spi_capture_bus(sd);
@@ -396,26 +400,44 @@ static block_device_result_t sd_spi_device_read_blocks(
             do {
                 absolute_time_t timeout = make_timeout_time_ms(100);
                 do {
+                    //get token
                     token = sd_spi_transfer(sd, 0xFF);
                     if (sd_spi_removal_latched(sd)) {
                         sd_spi_release_bus(sd);
                         return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
                     }
                     if (token == 0xFE) {
-                        //data response token, read in block to buffer and discard 2 byte crc
+                        //data response token
+                        //reset crc registers
+                        crc_calc = 0x0000;
+                        crc_in = 0x0000;
+                        //read in block to buffer
                         for (uint16_t i = 0; i < 512; i++) {
-                            *buf++ = sd_spi_transfer(sd, 0xFF);
+                            *buf = sd_spi_transfer(sd, 0xFF);
+                            crc_calc = crc_helper_rolling_16(crc_calc, *buf++);
                             if (sd_spi_removal_latched(sd)) {
                                 sd_spi_release_bus(sd);
                                 return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
                             }
                         }
-                        //discard CRC TODO: don't discard CRC, check it
-                        sd_spi_transfer(sd, 0xFF);
-                        sd_spi_transfer(sd, 0xFF);
+                        //read in crc
+                        crc_in |= ((uint16_t) sd_spi_transfer(sd, 0xFF)) << 8;
+                        crc_in |= (uint16_t) sd_spi_transfer(sd, 0xFF);
                         if (sd_spi_removal_latched(sd)) {
                             sd_spi_release_bus(sd);
                             return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
+                        }
+                        //check crc
+                        if (!(crc_in == crc_calc)) {
+                            result = sd_spi_stop_transmission(sd);
+                            sd_spi_release_bus(sd);
+                            if (result == BLOCK_DEVICE_RESULT_INVALID_DEVICE) {
+                                return result;
+                            }
+                            if (result == BLOCK_DEVICE_RESULT_BUSY_TIMEOUT) {
+                                return result;
+                            }
+                            return BLOCK_DEVICE_RESULT_IO_ERROR;
                         }
                         break;
                     } else if (sd_spi_is_data_error_token(token)) {
@@ -480,20 +502,30 @@ static block_device_result_t sd_spi_device_read_blocks(
                     return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
                 }
                 if (token == 0xFE) {
-                    //data response token, read in block to buffer and discard 2 byte crc
+                    //data response token
+                    //reset crc registers
+                    crc_calc = 0x0000;
+                    crc_in = 0x0000;
+                    //read in block to buffer
                     for (uint16_t i = 0; i < 512; i++) {
-                        *buf++ = sd_spi_transfer(sd, 0xFF);
+                        *buf = sd_spi_transfer(sd, 0xFF);
+                        crc_calc = crc_helper_rolling_16(crc_calc, *buf++);
                         if (sd_spi_removal_latched(sd)) {
                             sd_spi_release_bus(sd);
                             return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
                         }
                     }
-                    //discard CRC, TODO: check and validate CRC instead of discarding
-                    sd_spi_transfer(sd, 0xFF);
-                    sd_spi_transfer(sd, 0xFF);
+                    //read in crc
+                    crc_in |= ((uint16_t) sd_spi_transfer(sd, 0xFF)) << 8;
+                    crc_in |= (uint16_t) sd_spi_transfer(sd, 0xFF);
                     if (sd_spi_removal_latched(sd)) {
                         sd_spi_release_bus(sd);
                         return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
+                    }
+                    //check crc
+                    if (!(crc_in == crc_calc)) {
+                        sd_spi_release_bus(sd);
+                        return BLOCK_DEVICE_RESULT_IO_ERROR;
                     }
                     break;
                 }
@@ -559,7 +591,21 @@ static block_device_result_t sd_spi_device_write_blocks(
     //requested block count check to determine command
     if (block_count > 1) {
         //multiblock write cmd25
-        //issue command and check block device result
+        //pre-erase blocks acmd23, ignoring r1 errors for this since it's a performance optimization fail, not a write fail (yet)
+        //issue command 55
+        result = sd_spi_command(sd, 55, 0x00, &r1);
+        if (result != BLOCK_DEVICE_RESULT_OK) {
+            sd_spi_release_bus(sd);
+            return result;
+        }
+        //issue acmd23
+        //NOTE: block_count should not exceed 0x7FFFFFU to avoid rolling into the stuff bits of the acmd23 argument, not a realistic concern on an RP2350
+        result = sd_spi_command(sd, 23, (uint32_t)block_count, &r1);
+        if (result != BLOCK_DEVICE_RESULT_OK) {
+            sd_spi_release_bus(sd);
+            return result;
+        }
+        //issue command 25 immediately and check block device result
         result = sd_spi_command(sd, 25, (uint32_t)first_lba, &r1);
         if (result != BLOCK_DEVICE_RESULT_OK) {
             sd_spi_release_bus(sd);
@@ -573,11 +619,15 @@ static block_device_result_t sd_spi_device_write_blocks(
             do {
                 //reset byte counter
                 byte_counter = 0;
+                //reset crc
+                crc = 0x0000;
                 //transmit start block token (0b11111100 for multi block write) + load data block into transmit buffer
                 sd_spi_transfer(sd, 0b11111100);
                 do {
                     //transmit byte
                     sd_spi_transfer(sd, buf[(sent_blocks * 512) + (byte_counter)]);
+                    //rolling crc calc
+                    crc = crc_helper_rolling_16(crc, buf[(sent_blocks * 512) + (byte_counter)]);
                     //increment byte counter
                     byte_counter++;
                     if (sd_spi_removal_latched(sd)) {
@@ -586,7 +636,6 @@ static block_device_result_t sd_spi_device_write_blocks(
                     }
                 } while (byte_counter < 512);
                 //transmit CRC
-                crc = crc_helper_16((buf + (sent_blocks * 512)), 512);
                 sd_spi_transfer(sd, (uint8_t) (crc >> 8));
                 sd_spi_transfer(sd, (uint8_t) crc);
                 //read data response token (which is the byte immediately following last CRC byte transmission with no gap)
@@ -665,11 +714,15 @@ static block_device_result_t sd_spi_device_write_blocks(
             sd_spi_transfer(sd, 0xFF);
             //reset byte counter
             byte_counter = 0;
+            //seed crc
+            crc = 0x0000;
             //transmit start block token (0b11111110 for single block write)
             sd_spi_transfer(sd, 0b11111110);
             do {
-                //transmit byte + increment counter
-                sd_spi_transfer(sd, buf[byte_counter++]);
+                //transmit byte
+                sd_spi_transfer(sd, buf[byte_counter]);
+                //rolling crc calc + increment counter
+                crc = crc_helper_rolling_16(crc, buf[byte_counter++]);
                 //check latch
                 if (sd_spi_removal_latched(sd)) {
                     sd_spi_release_bus(sd);
@@ -677,7 +730,6 @@ static block_device_result_t sd_spi_device_write_blocks(
                 }
             } while (byte_counter < 512);
             //transmit crc
-            crc = crc_helper_16(buf, 512);
             sd_spi_transfer(sd, (uint8_t) (crc >> 8));
             sd_spi_transfer(sd, (uint8_t) crc);
 
@@ -817,6 +869,7 @@ static block_device_result_t sd_spi_read_csd(
     const sd_spi_t *sd,
     uint64_t *block_count)
 {
+    uint16_t crc_in = 0x0000, crc_calc = 0x0000;
     //issue command 9 and check result and r1
     uint8_t r1;
     block_device_result_t result = sd_spi_command(sd, 9, 0, &r1);
@@ -853,15 +906,21 @@ static block_device_result_t sd_spi_read_csd(
     uint8_t csd[16];
     for (size_t i = 0U; i < sizeof(csd); ++i) {
         csd[i] = sd_spi_transfer(sd, 0xFF);
+        crc_calc = crc_helper_rolling_16(crc_calc, csd[i]);
         if (sd_spi_removal_latched(sd)) {
             return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
         }
     }
-    //discard crc
-    sd_spi_transfer(sd, 0xFF);
-    sd_spi_transfer(sd, 0xFF);
+    //read in crc
+    crc_in |= ((uint16_t) sd_spi_transfer(sd, 0xFF)) << 8;
+    crc_in |= (uint16_t) sd_spi_transfer(sd, 0xFF);
     if (sd_spi_removal_latched(sd)) {
+        sd_spi_release_bus(sd);
         return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
+    }
+    //check crc
+    if (!(crc_in == crc_calc)) {
+        return BLOCK_DEVICE_RESULT_IO_ERROR;
     }
 
     //check csd structure to determine version (version 1.0 for sdsc and 2.0 for sdhc/sdxc. sduc not supported)

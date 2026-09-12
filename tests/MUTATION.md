@@ -57,6 +57,42 @@ correctly refused to run. The budgets were settled on 2026-09-11 (500 ms before
 a command, 250 ms elsewhere; PROTOCOL.md P-16), the tests updated, and the
 catalogue re-run in full - see "Result, 2026-09-11" below.
 
+## Read data CRC, 2026-09-12
+
+Read CRC validation changed the text of `sd_spi_device_read_blocks()`, which
+broke the patterns of six existing records (`data-token-constant`,
+`block-length-511`, `crc-bytes-not-consumed`, `sdsc-byte-address-dropped`,
+`sdsc-byte-address-inverted`, `removal-check-in-payload-removed`). They were
+re-anchored to the current source rather than left to rot, and eight records
+were added for the new code. Every one was confirmed by compiling the mutated
+source by hand against four suites (`sd_crc16`, `sd_faults`, `sd_protocol`,
+`sd_spi`), not by a full catalogue run: the enabled suite was not green at the
+time (two `sd_spi` cases fail on a separate, uncommitted change to
+`sd_spi_configure()`), so `mutate.py` correctly refused to run.
+
+| Mutation | Class | Confirmed against |
+| --- | --- | --- |
+| `data-token-constant` (re-anchored) | wrong constant | `sd_faults`, `sd_protocol`, `sd_spi` |
+| `block-length-511` (re-anchored) | off-by-one | `sd_faults`, `sd_protocol`, `sd_spi` |
+| `crc-bytes-not-consumed` (re-anchored) | skipped state transition | `sd_faults`, `sd_protocol`, `sd_spi` |
+| `sdsc-byte-address-dropped` (re-anchored) | wrong addressing | `sd_faults`, `sd_protocol`, `sd_spi` |
+| `sdsc-byte-address-inverted` (re-anchored) | wrong addressing | `sd_faults`, `sd_protocol`, `sd_spi` |
+| `removal-check-in-payload-removed` (re-anchored) | removed cancellation | `sd_spi` only |
+| `read-crc-bytes-swapped` | wrong byte order | `sd_faults`, `sd_protocol`, `sd_spi` (every good multi-block read fails) |
+| `read-crc-bytes-swapped-single` | wrong byte order | `sd_faults`, `sd_protocol`, `sd_spi` (every good single-block read fails) |
+| `read-crc-check-removed-multi` | removed validation | `sd_faults` only, via the sweep and `test_read_data_crc_is_validated` |
+| `read-crc-check-removed-single` | removed validation | `sd_faults` only, via the sweep and `test_read_data_crc_is_validated` |
+| `read-crc-register-not-reset` | stale state | `sd_faults`, `sd_protocol`, `sd_spi` (second block of every stream) |
+| `rolling-crc-wrong-generator` | wrong constant | `sd_crc16` (5 checks), and every read in the other three |
+| `rolling-crc-ignores-register` | dropped feedback | `sd_crc16` (5 checks), and every read in the other three |
+| `rolling-crc-seven-bits` | off-by-one | `sd_crc16` (5 checks), and every read in the other three |
+
+The two `read-crc-check-removed-*` rows are the ones that matter: they are
+killed **only** by `sd_faults_host_tests`, because it is the only suite that
+sends a corrupt block. Every other suite sends correct CRCs and cannot tell a
+validating driver from a discarding one. `removal-check-in-payload-removed`
+is likewise killed only by `sd_spi`, as before.
+
 ## Write path, 2026-09-11
 
 Twenty-two records were added with the write implementation

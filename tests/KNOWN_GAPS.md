@@ -36,7 +36,8 @@ per-frame command CRC7.
 
 The reason this is written down: writes are major functionality that has sat
 unimplemented while several hardening and refinement passes went ahead of them.
-SD-003, SD-004, SD-005 and the recovery policy are all hardening. Each is worth
+SD-004, SD-005 and the recovery policy are all hardening (SD-003 has since
+been closed). Each is worth
 doing and none of them is worth doing before the storage layer can write, so
 they should stop displacing it. A driver that reads reliably and cannot write is
 not further from finished than one that reads and writes imperfectly - it is
@@ -50,6 +51,12 @@ argument does not hold and is recorded here so it is not made again: adding
 `crc_helper_16_update(seed, ...)` later is **additive**, with the existing
 one-shot becoming a wrapper. Nothing breaks by deferring it, so there is no
 cost to doing it when there is evidence rather than in anticipation.
+
+*Status:* the resumable form now exists as `crc_helper_rolling_16(crc, byte)`
+and the read path folds each payload byte through it as it arrives (the
+interleaved arrangement). The analysis below is unchanged: this buys no
+latency on its own, and the pipelined transfer loop that would is still
+future work.
 
 **Interleaving on its own buys no latency.** `sd_spi_transfer()` calls
 `spi_write_read_blocking()` for a single byte, which busy-waits on the FIFO.
@@ -87,41 +94,6 @@ optimisation. `docs/architecture.md` asks for the straightforward form first.
 ---
 
 ## Open
-
-### SD-003 — read data CRC is discarded, so corruption is reported as success
-
-Affected code: `sd_spi_device_read_blocks()` and `sd_spi_read_csd()` in
-`src/storage/sd_spi.c`, both marked TODO in the source.
-
-```sh
-ctest --test-dir tests/build -R sd_gap_data-crc --output-on-failure
-```
-
-Every data packet carries a CRC16-CCITT over the payload. The driver clocks the
-two bytes and throws them away, so a card that returns corrupt data produces a
-successful read with wrong contents. For NFR-003 that is silent corruption
-rather than a detected error.
-
-The card model computes a real CRC16 over every block it sends, so the
-regression is already expressible: corrupt one payload byte and a validating
-driver would reject the read. `test_read_data_crc_is_not_validated` in
-`test_sd_faults.c` pins the current behaviour and proves the corrupted byte
-reaches the caller; `sd_gap_data-crc` asserts the desired behaviour and fails.
-
-The fault sweep in `test_sd_faults.c` had to be given an explicit exclusion for
-payload-corrupting faults because of this gap. When CRC validation lands, remove
-that exclusion and the sweep tightens automatically.
-
-**Cost to fix:** a comparison at two call sites. The routine already exists:
-`crc_helper_16()` in `src/storage/sd_crc.c` is the CRC-16/XMODEM
-parameterisation the SD data CRC uses, verified against the published catalogue
-value, differentially against the card model, on every single-bit error in a
-512-byte block, and for the zero-residue property a receiver relies on
-(`sd_crc16_host_tests`). It is not yet called from anywhere.
-
-The question worth settling first is what to do on a mismatch — fail, or retry a
-bounded number of times, which is what the card's own error-recovery model
-expects.
 
 ### SD-004 — CMD12 can mistake in-flight read data for its own response
 
@@ -167,14 +139,15 @@ was an error in an earlier revision of this note.
    up to a block time of extra latency on every multiple-block read and needs
    its own bounded wait.
 2. *Do not gate success on CMD12's response.* This fixes the **false negative**:
-   the data has already been received and, once SD-003 is fixed, validated, so a
+   the data has already been received and validated (SD-003), so a
    read whose payload is good should not fail because the response byte could
    not be located. Still wait out the busy period so the bus is quiescent. This
    does **not** address the collision, and by discarding CMD12's response as a
    failure signal it removes the earliest evidence that the card has wedged.
 
 **Chosen: option 1**, because it is the one carrying the safety property. Option
-2 remains available on top of it and is worth revisiting once SD-003 lands.
+2 remains available on top of it and is worth revisiting now that SD-003 has
+landed.
 
 **Not a specification requirement.** The Physical Layer Simplified Specification
 was checked at v1.0, v2.00 §7.2.3 and v6.00 §7.2.3: all three say only that
@@ -296,6 +269,56 @@ still being sent with argument 0, because the driver was switching the strict
 card's checking off and CMD12's bad CRC was therefore never examined. Asserting
 `sd_card_protocol_errors() == 0` rather than a return code is what made the real
 defect visible. Mutation `cmd59-crc-disabled` reproduces that exact trap.
+
+### SD-003 — read data CRC was discarded, so corruption was reported as success
+
+Fixed 2026-09-12 for data blocks. `sd_spi_device_read_blocks()` folds every
+payload byte through `crc_helper_rolling_16()` as it leaves the SPI
+peripheral, assembles the two CRC bytes that follow most significant byte
+first and compares; on a mismatch it issues CMD12, releases the bus and
+returns `IO_ERROR` (or the removal / busy-timeout result if the stop sequence
+reports one). Both the CMD17 and CMD18 paths do this and reset the running
+register at every start-block token.
+
+The former `sd_gap_data-crc` case was promoted, strengthened, into the enabled
+`sd_faults_host_tests` as `test_read_data_crc_is_validated` (payload bytes at
+the start, middle and end of a block, each CRC byte, and a bad CRC on an intact
+payload, on CMD17 and on the first, middle and last block of a CMD18 stream,
+on SDHC and a byte-addressed card; every row demands `IO_ERROR`, an intact
+guard, a quiescent bus, zero protocol errors from the card and a device that
+still reads) and `test_read_data_crc_mismatch_stops_the_stream_only_once`
+(exactly one CMD12, no third block consumed). The fault sweep's exclusion for
+payload-rewriting faults is gone and it now requires every DATA_PAYLOAD and
+DATA_CRC fault row to fail. `test_read_data_crc_is_not_validated` no longer
+exists. The helper itself is covered in `sd_crc16_host_tests`, including an
+exhaustive check of the byte step at every (register, byte) pair against the
+card model's implementation.
+
+Mutants tried by hand against scratch copies of the source, all killed by the
+enabled suite: CRC bytes assembled LSB first, the comparison removed, the
+running register not reset between blocks, a wrong generator in the helper,
+and the helper ignoring its carried register.
+
+`sd_spi_read_csd()` validates the CSD register's CRC the same way (folded per
+byte, compared before the structure is decoded, `IO_ERROR` on mismatch), and
+the write path now builds its CRC with the rolling helper as each byte is
+sent. The legacy scripted suites (`test_sd_spi.c`, `test_sd_irq_integration.c`)
+had to start sending a real CSD CRC for bring-up to succeed - the mock had
+been encoding the discard.
+
+One thing remains and is recorded rather than hidden:
+
+- **An all-zero block with an all-zero CRC is valid.** CRC-16/XMODEM starts
+  from a zero register with no final XOR, so a bus stuck low from the first
+  payload byte produces a frame the specification's CRC cannot reject. The
+  sweep pins this: `BUSY_FOREVER` at payload offset 0 on a single-block read
+  is *expected* to return `OK` with 512 zero bytes; from any later offset, or
+  on a stream, it is detected. This is a property of the specified CRC, not
+  of the implementation. See [RESIDUAL_RISK.md](RESIDUAL_RISK.md).
+
+On a mismatch the driver fails rather than retrying; the bounded-retry policy
+the card's error-recovery model expects is still the open decision recorded in
+[VALIDATION_PLAN.md](VALIDATION_PLAN.md).
 
 ### SD-007 — writes were unimplemented
 
