@@ -377,8 +377,8 @@ static void test_response_latency_boundary(void)
             T_EQ_U(sd_card_block_count(), fx.sd.block_count);
         } else {
             T_EQ_RESULT(BLOCK_DEVICE_RESULT_IO_ERROR, result);
-            /* Recognised as "no response", not waited out: the ready wait
-             * alone would have cost 1000 ms. */
+            /* Recognised as "no response", not waited out: the pre-command
+             * ready wait alone would have cost 500 ms. */
             T_CHECK(elapsed_us < UINT64_C(100000));
             T_CHECK(!fx.sd.initialized);
             T_CHECK(pico_mock_gpio_level(SD_FX_PIN_CS));
@@ -1014,13 +1014,14 @@ static void test_bus_is_released_after_every_outcome(void)
     t_clear_context();
 }
 
-/* ------------------------------------------------------ stub contracts */
+/* ------------------------------------------------------ write contract */
 
-static void test_unimplemented_operations_do_not_touch_the_bus(void)
+static void test_write_reaches_the_bus_and_lands_on_the_card(void)
 {
-    /* write_blocks is still declared but unimplemented. Pin what it promises
-     * today so a future implementation has to change the test deliberately,
-     * and prove it refuses before it reaches the bus. */
+    /* Until 2026-09 this case pinned write_blocks as a NOT_IMPLEMENTED stub
+     * that never touched the bus. The write path exists now; the protocol
+     * detail lives in test_sd_writes.c, and this case keeps the one promise
+     * a caller of this layer needs: OK means the card holds the data. */
     sd_fixture_t fx;
     sd_card_desc_t desc = sd_fx_card_sdhc();
     T_CHECK(sd_fx_require_init(&fx, &desc));
@@ -1029,10 +1030,15 @@ static void test_unimplemented_operations_do_not_touch_the_bus(void)
     memset(payload, 0x5AU, sizeof(payload));
 
     const size_t bytes_before = pico_mock_spi_transfer_count();
-    T_EQ_RESULT(BLOCK_DEVICE_RESULT_NOT_IMPLEMENTED,
+    T_EQ_RESULT(BLOCK_DEVICE_RESULT_OK,
         block_device_write_blocks(fx.device, 0U, payload, 1U));
-    T_EQ_U(bytes_before, pico_mock_spi_transfer_count());
-    /* The stub must not have disturbed the device either. */
+    T_CHECK(pico_mock_spi_transfer_count() > bytes_before);
+    T_EQ_U(0U, sd_card_protocol_errors());
+
+    uint8_t stored[SD_FX_BLOCK];
+    T_CHECK(sd_card_get_block(0U, stored));
+    T_CHECK(memcmp(stored, payload, sizeof(payload)) == 0);
+    T_CHECK(sd_fx_check_bus_quiescent(&fx) == NULL);
     T_CHECK(sd_fx_check_recovers(&fx, 11U) == NULL);
 }
 
@@ -1076,8 +1082,8 @@ static void test_get_info_matches_the_card_model(void)
          * forcing it where READ_BL_LEN says otherwise. */
         T_EQ_U(SD_FX_BLOCK, info.block_size_bytes);
         T_EQ_U(sd_card_block_count(), info.block_count);
-        /* Pins today's behaviour: writable is hardcoded true even though
-         * write_blocks is still NOT_IMPLEMENTED. */
+        /* Pins today's behaviour: writable is hardcoded true; no
+         * write-protect state is ever read. */
         T_CHECK(info.writable);
 
         /* One past the advertised end is out of range, and rejected without
@@ -1145,7 +1151,7 @@ int main(void)
     t_run(test_csd_structure_and_field_rejection, "CSD structure and READ_BL_LEN rejection");
     t_run(test_idle_clocks_precede_the_first_command, "74-clock bring-up requirement");
     t_run(test_bus_is_released_after_every_outcome, "bus released after every outcome");
-    t_run(test_unimplemented_operations_do_not_touch_the_bus, "unimplemented operation contracts");
+    t_run(test_write_reaches_the_bus_and_lands_on_the_card, "a write reaches the bus and lands on the card");
     t_run(test_get_info_matches_the_card_model, "get_info matches the card model across variants");
     t_run(test_get_info_after_removal_is_rejected, "get_info after removal reports INVALID_DEVICE");
     return t_summary("sd_protocol");

@@ -121,16 +121,17 @@ change what a currently-accepted configuration does.
 ### 3.2 Argument validation order differs between read and write
 
 `sd_spi_device_read_blocks()` validates its arguments and then checks
-usability; `sd_spi_device_write_blocks()` checks usability first and never
-validates `buffer` or `block_count` at all. Called through `block_device_*` the
-difference is hidden, because the wrapper validates first. Called directly
-through the operations table — which the block-device abstraction permits — the
-same bad call returns `INVALID_ARGUMENT` from one and `NOT_INITIALIZED` from the
-other.
+usability; `sd_spi_device_write_blocks()` checks usability and range first and
+validates `buffer` and `block_count` last. Both backends now refuse a null
+buffer and a zero count on their own (`test_argument_validation_costs_no_bus_traffic`
+in `test_sd_writes.c` calls the write backend through the operations table to
+pin that). Called through `block_device_*` the ordering is hidden, because the
+wrapper validates first. Called directly, the same bad call on an uninitialised
+device returns `INVALID_ARGUMENT` from one backend and `NOT_INITIALIZED` from
+the other.
 
-*Decision needed:* whether the backend's own contract is "the wrapper has
-already validated" or "validate independently". The write path is a stub, so
-this is cheap to settle now and expensive to settle after it is implemented.
+*Decision needed:* whether the two orders should be made identical. Nothing
+depends on the difference today.
 
 ### 3.3 `deinit` returns OK for a device that was never initialised
 
@@ -171,12 +172,25 @@ generic error is least helpful.
 - **`SIM_CLOCK_POLL_TICK` is kept.** It preserves the artifact deliberately, so
   the suite can be run under both models and any dependence on it is exposed.
   Keeping it costs one CTest case and prevents a silent regression.
-- **The block overlay holds eight explicit blocks.** Everything else is
-  generated. A test needing more distinct explicit blocks must raise
-  `SD_MODEL_OVERLAY_BLOCKS`.
-- **The write path is modelled but untested against production**, because there
-  is no production write path. When one is written, the model is ready; the
-  tests are not written speculatively.
+- **The block overlay holds thirty-two explicit blocks.** Everything else is
+  generated. A multiple-block write stores one entry per block, so this is the
+  longest write whose every block a test can read back; raise
+  `SD_MODEL_OVERLAY_BLOCKS` for more.
+- **The model forgets a pending write when chip select is released.** A real
+  card that has answered R1 to CMD24/CMD25 and not yet seen a start-block
+  token stays in its receive-data state across a deselect; it does not parse
+  command frames there, and it may swallow a later argument byte that happens
+  to be `0xFC` as a start token. The model goes idle instead, so a driver that
+  abandons a write after an unrecognised data-response byte (the driver's own
+  TODO) looks recoverable here and may not be on hardware. That specific
+  sequence - unknown token, release, next command - needs a bus capture from a
+  real card.
+- **Data-response and busy timing are idealised.** The model answers the
+  data-response token on the byte after the CRC and, unless
+  `sd_card_set_stop_tran_busy()` says otherwise, asserts busy on the very next
+  byte; real cards vary within the specification's windows. The N_BR case is
+  covered by one test with a one-byte delay; N_CR and N_AC variation on the
+  write commands is not swept.
 - **Removal cannot be injected between two instructions.** Faults land during
   an SPI transfer or at a phase boundary. One defensive check in
   `sd_spi_stop_transmission()` guards exactly that window and is therefore

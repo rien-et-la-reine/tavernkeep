@@ -282,6 +282,116 @@ rather than a detected error, which is worth deciding on deliberately.
 proves the corruption reaches the caller; `sd_gap_data-crc` asserts the desired
 behaviour and fails.
 
+## P-13 — write data packets: start-block tokens and the N_WR idle byte
+
+**Rule.** A single-block write (CMD24) sends its block behind the `0xFE` start
+token, the same token reads use; a multiple-block write (CMD25) sends each
+block behind `0xFC` and ends the transfer with the `0xFD` stop-tran token
+(specification §7.3.3.2). The host must clock at least one idle byte between
+the command's R1 and the first start token (N_WR, §7.5 timing values); a
+block is the token, 512 data bytes and the 16-bit CRC of P-12 computed by the
+host, which the card verifies whenever CMD59 has enabled checking (§7.2.2).
+
+**Implementation.** `sd_spi_device_write_blocks()` sends the token each
+command requires after one `0xFF`, computes `crc_helper_16()` over the block
+in the caller's buffer, and ends CMD25 with `0xFD`. An earlier draft sent
+`0xFC` for CMD24 and passed, because the model then accepted either token for
+either command; the model now insists on the right one.
+
+**Tests.** `test_single_block_write_stores_the_data_on_every_card_kind` and
+`test_multi_block_write_stores_every_block_in_order` check the token per block
+from the trace, the data the card holds (including an all-zero block whose CRC
+is `0x0000`, an all-`0xFF` block whose CRC is the published `0x7FA1`, and a
+block containing every token byte), and `sd_card_protocol_errors() == 0`,
+which is where a missing N_WR byte or a wrong token surfaces. Mutations
+`single-write-multi-token`, `multi-write-single-token`, `*-nwr-gap-dropped`,
+`write-crc16-end-bit`, `write-crc16-short`, `write-source-stride`.
+
+## P-14 — the data-response token
+
+**Rule.** Every written block is answered with one byte of the form
+`xxx0sss1` (§7.3.3.1): `sss = 010` accepted, `101` rejected for CRC error,
+`110` rejected for write error; the upper three bits are don't-care, and real
+cards commonly drive them high (`0xE5`). It is positional - the byte after the
+second CRC byte - and is followed by busy while the card programs. In a
+multiple-block write, any rejection is to be followed by CMD12 from the host;
+ACMD22 then reports how many blocks were written and CMD13 the cause. For a
+single-block write there is no transfer to stop.
+
+**Implementation.** The driver masks the byte with `0x1F`, treats `0x05` as
+acceptance, `0x0B`/`0x0D` as rejection (waits out busy, sends CMD12 for
+CMD25 only, reports `IO_ERROR`) and anything else as an unknown response
+(`IO_ERROR`, no further blocks). It does not use ACMD22 or CMD13.
+
+**Tests.** `test_data_response_upper_bits_are_dont_care` (`0x05`, `0xE5`,
+`0x25`, `0xC5`), `test_rejected_data_response_is_an_error` (both codes with
+both bit patterns; asserts CMD12 once for CMD25 and never for CMD24, and that
+stop-tran is not sent instead), `test_rejection_mid_stream_stops_the_transfer`,
+`test_rejection_followed_by_busy_is_waited_out`,
+`test_unknown_data_response_is_an_error`. Mutations `multi-write-response-mask`,
+`*-rejection-ignored`, `*-unknown-token-accepted`, `multi-write-cmd12-dropped`,
+`multi-write-error-mapping-precedence`.
+
+## P-15 — programming busy after a block and after stop-tran, and N_BR
+
+**Rule.** After the data-response token, and after the stop-tran token, the
+card holds DataOut low while it programs; the host must not send the next
+block until that busy ends, and a write is not complete until the last busy
+ends. After stop-tran the card may answer up to one idle byte before it
+asserts busy (N_BR, §7.5), so a host that polls for "not busy" on the very
+next byte can mistake that idle byte for completion. The write timeout the
+specification gives (§4.6.2.2) is 250 ms for SDHC, with later revisions
+quoting 500 ms for SDXC - confirm against the revision in hand; the driver
+budgets 1 s for every programming wait, which covers either.
+
+**Implementation.** The driver waits (up to 1 s) after every accepted block,
+clocks one `0xFF` after `0xFD` before polling, and waits again before
+releasing chip select; a wait that expires is `BUSY_TIMEOUT`, never `OK`.
+
+**Tests.** `test_programming_busy_is_awaited_between_blocks_and_before_release`
+asserts from the trace that every token after the first follows a busy end
+and that chip select rises after the last one;
+`test_stop_tran_busy_that_starts_one_byte_late_is_still_awaited` uses
+`sd_card_set_stop_tran_busy(1, ...)` for the N_BR case; the two
+`*_beyond_the_budget_is_a_busy_timeout` cases pin the overrun result and its
+timing. Mutations `stop-tran-nbr-gap-dropped`, `final-busy-wait-ignored`,
+`inter-block-busy-wait-ignored`, `stop-tran-dropped`.
+
+## P-16 — the pre-command ready wait is a driver convention, not a specification value
+
+**Rule.** The specification bounds operations: read access (N_AC), programming
+(§4.6.2.2, 250 ms for SDHC), erase. It does not define how long a host should
+wait for DataOut to return high before sending its *next* command; that wait
+exists to absorb whatever busy the previous operation left behind, and its
+length is the host's choice. ChaN's reference driver uses 500 ms for it.
+
+**Implementation.** Two budgets, both the driver's own. `sd_spi_command()`
+waits up to **500 ms** for a ready card before every frame it sends
+(`sd_spi_wait_ready_timeout(sd, 500)`). Everything else that waits for a
+ready card without sending a command - teardown, the wait after CMD12's R1b in
+`sd_spi_stop_transmission()`, the read path's R1-error cleanup - goes through
+`sd_spi_wait_ready()` at **250 ms**. Programming waits in the write path are
+a separate 1 s budget (P-15). History: the generic wait was 1 s until
+`4629e1d` cut it to 250 ms; the pre-command wait was split out at 500 ms on
+2026-09-11, and the tests that had encoded 1 s were updated at the same time.
+
+**Consequence worth knowing.** The pre-command wait is the safety net for a
+busy the driver did *not* wait out itself - after a write's `BUSY_TIMEOUT`,
+the next command has 500 ms to absorb the rest of that programming. A card
+that needs longer than 1.5 s in total fails twice.
+
+**Tests.** Each wait is pinned from both sides (`>= budget` and
+`< 2 x budget`) so the two cannot be confused: `test_initialization_reports_busy_timeout`
+and `test_read_command_reports_busy_timeout` (pre-command);
+`test_deinit_timeout_preserves_resources`,
+`test_stop_transmission_reports_busy_timeout`,
+`test_error_cleanup_reports_busy_timeout` (generic), all in `test_sd_spi.c`;
+`test_busy_at_each_phase_is_bounded` (one row of each) and
+`test_deinit_busy_timeout_can_be_retried` in `test_sd_faults.c`. The budgets
+are named `DRIVER_COMMAND_READY_WAIT_US` and `DRIVER_READY_WAIT_US` in both
+suites and `COMMAND_READY_WAIT_US` in `test_sd_writes.c`; change them together
+with the driver.
+
 ## Discrepancies found between documentation and code
 
 - The root `README.md` states that "Storage and filesystem entry points

@@ -22,6 +22,15 @@ enum {
     SDSC_C_SIZE = 1023,
     SDSC_C_SIZE_MULT = 7,
     SDSC_BLOCK_COUNT = (SDSC_C_SIZE + 1) * (1 << (SDSC_C_SIZE_MULT + 2)),
+    /* Busy budgets the driver declares, in microseconds. sd_spi_command()
+     * waits for a ready card before every frame it sends; every other wait
+     * (teardown, the wait after CMD12's R1b, the read-path R1-error cleanup)
+     * goes through sd_spi_wait_ready(). Neither value comes from the
+     * specification, which bounds operations rather than the pre-command
+     * wait; they are the driver's own contract and are pinned from both sides
+     * below so a change to one cannot be mistaken for the other. */
+    DRIVER_COMMAND_READY_WAIT_US = 500000,
+    DRIVER_READY_WAIT_US = 250000,
 };
 
 static int failures;
@@ -751,7 +760,9 @@ static void test_deinit_timeout_preserves_resources(void)
     pico_mock_sd_set_busy_forever();
     const uint64_t start_us = pico_mock_now_us();
     CHECK_EQ(BLOCK_DEVICE_RESULT_BUSY_TIMEOUT, block_device_deinit(device));
-    CHECK(pico_mock_now_us() - start_us >= UINT64_C(1000000));
+    const uint64_t elapsed_us = pico_mock_now_us() - start_us;
+    CHECK(elapsed_us >= DRIVER_READY_WAIT_US);
+    CHECK(elapsed_us < 2U * DRIVER_READY_WAIT_US);
     CHECK(sd.initialized);
     CHECK(pico_mock_spi_is_initialized());
     CHECK(pico_mock_gpio_level(PIN_CHIP_SELECT));
@@ -1304,21 +1315,34 @@ static void test_read_range_uses_csd_capacity(void)
     CHECK_EQ(0U, pico_mock_sd_command_count(17U));
 }
 
-static void test_unimplemented_operations_contract(void)
+static void test_write_blocks_is_implemented(void)
 {
-    uint8_t block[SD_BLOCK_SIZE] = { 0 };
+    /* This case used to pin write_blocks as a NOT_IMPLEMENTED stub that never
+     * reached the bus. The write path exists now (its protocol behaviour is
+     * covered in test_sd_writes.c); here the card model answers the one
+     * command bring-up did not script, and the block must land. */
+    uint8_t block[SD_BLOCK_SIZE];
+    for (size_t i = 0U; i < sizeof(block); ++i) {
+        block[i] = (uint8_t)(0x5AU ^ i);
+    }
 
     pico_mock_reset();
     sd_spi_t sd = { 0 };
     block_device_t *const device = initialize_sdhc(&sd);
     CHECK(device != NULL);
+    sd_card_set_response_policy(SD_RESPONSE_MODELLED);
     const size_t transfers_before = pico_mock_spi_transfer_count();
 
-    /* write_blocks is the only remaining stub. It must refuse before it
-     * reaches the bus, so a caller cannot mistake a no-op for a write. */
-    CHECK_EQ(BLOCK_DEVICE_RESULT_NOT_IMPLEMENTED,
+    CHECK_EQ(BLOCK_DEVICE_RESULT_OK,
         block_device_write_blocks(device, 9U, block, 1U));
-    CHECK_EQ(transfers_before, pico_mock_spi_transfer_count());
+    CHECK(pico_mock_spi_transfer_count() > transfers_before);
+    CHECK_EQ(1U, pico_mock_sd_command_count(24U));
+    CHECK_EQ(9U, pico_mock_sd_last_argument(24U));
+
+    uint8_t stored[SD_BLOCK_SIZE];
+    CHECK(sd_card_get_block(9U, stored));
+    CHECK(memcmp(stored, block, sizeof(block)) == 0);
+    CHECK(pico_mock_gpio_level(PIN_CHIP_SELECT));
 }
 
 /*
@@ -1345,9 +1369,8 @@ static void test_get_info_reports_card_geometry(void)
     CHECK_EQ(transfers_before, pico_mock_spi_transfer_count());
     CHECK_EQ((uint64_t)SDHC_BLOCK_COUNT, info.block_count);
     CHECK_EQ((uint32_t)SD_BLOCK_SIZE, info.block_size_bytes);
-    /* Pins today's behaviour: the driver hardcodes writable = true even
-     * though write_blocks is still NOT_IMPLEMENTED and no write-protect
-     * state is ever read. */
+    /* Pins today's behaviour: the driver hardcodes writable = true; no
+     * write-protect state is ever read. */
     CHECK(info.writable);
 
     /* One block past the advertised end must be rejected, and rejected before
@@ -1409,8 +1432,10 @@ static void test_initialization_reports_busy_timeout(void)
     const uint64_t start_us = pico_mock_now_us();
     CHECK_EQ(BLOCK_DEVICE_RESULT_BUSY_TIMEOUT,
         block_device_init(sd_spi_as_block_device(&sd)));
-    /* The ready wait ahead of CMD0 owns a 1000 ms budget. */
-    CHECK(pico_mock_now_us() - start_us >= UINT64_C(1000000));
+    /* The ready wait ahead of CMD0 is sd_spi_command()'s pre-frame wait. */
+    const uint64_t elapsed_us = pico_mock_now_us() - start_us;
+    CHECK(elapsed_us >= DRIVER_COMMAND_READY_WAIT_US);
+    CHECK(elapsed_us < 2U * DRIVER_COMMAND_READY_WAIT_US);
     CHECK(!sd.initialized);
     CHECK(pico_mock_gpio_level(PIN_CHIP_SELECT));
 }
@@ -1428,7 +1453,9 @@ static void test_read_command_reports_busy_timeout(void)
     const uint64_t start_us = pico_mock_now_us();
     CHECK_EQ(BLOCK_DEVICE_RESULT_BUSY_TIMEOUT,
         block_device_read_blocks(device, 0U, block, 1U));
-    CHECK(pico_mock_now_us() - start_us >= UINT64_C(1000000));
+    const uint64_t elapsed_us = pico_mock_now_us() - start_us;
+    CHECK(elapsed_us >= DRIVER_COMMAND_READY_WAIT_US);
+    CHECK(elapsed_us < 2U * DRIVER_COMMAND_READY_WAIT_US);
     /* A busy card must block the command, not have it sent anyway. */
     CHECK_EQ(0U, pico_mock_sd_command_count(17U));
     CHECK(pico_mock_gpio_level(PIN_CHIP_SELECT));
@@ -1453,7 +1480,11 @@ static void test_stop_transmission_reports_busy_timeout(void)
     const uint64_t start_us = pico_mock_now_us();
     CHECK_EQ(BLOCK_DEVICE_RESULT_BUSY_TIMEOUT,
         block_device_read_blocks(device, 0U, blocks, 2U));
-    CHECK(pico_mock_now_us() - start_us >= UINT64_C(1000000));
+    /* The wait after CMD12's R1b is the generic ready wait, not the longer
+     * pre-command one. */
+    const uint64_t elapsed_us = pico_mock_now_us() - start_us;
+    CHECK(elapsed_us >= DRIVER_READY_WAIT_US);
+    CHECK(elapsed_us < 2U * DRIVER_READY_WAIT_US);
     CHECK_EQ(1U, pico_mock_sd_command_count(12U));
     CHECK(pico_mock_gpio_level(PIN_CHIP_SELECT));
 }
@@ -1475,7 +1506,11 @@ static void test_error_cleanup_reports_busy_timeout(void)
     const uint64_t start_us = pico_mock_now_us();
     CHECK_EQ(BLOCK_DEVICE_RESULT_BUSY_TIMEOUT,
         block_device_read_blocks(device, 0U, blocks, 2U));
-    CHECK(pico_mock_now_us() - start_us >= UINT64_C(1000000));
+    /* The wait after CMD12's R1b is the generic ready wait, not the longer
+     * pre-command one. */
+    const uint64_t elapsed_us = pico_mock_now_us() - start_us;
+    CHECK(elapsed_us >= DRIVER_READY_WAIT_US);
+    CHECK(elapsed_us < 2U * DRIVER_READY_WAIT_US);
     CHECK_EQ(1U, pico_mock_sd_command_count(12U));
     CHECK(pico_mock_gpio_level(PIN_CHIP_SELECT));
 }
@@ -2109,8 +2144,8 @@ int main(int argc, char **argv)
         "multiple-block stop failure sent once");
     run_test(test_read_range_uses_csd_capacity,
         "CSD capacity read range");
-    run_test(test_unimplemented_operations_contract,
-        "unimplemented operation contracts");
+    run_test(test_write_blocks_is_implemented,
+        "write_blocks is implemented");
     run_test(test_get_info_reports_card_geometry,
         "get_info reports CSD geometry without bus traffic");
     run_test(test_get_info_before_initialization_leaves_output_untouched,

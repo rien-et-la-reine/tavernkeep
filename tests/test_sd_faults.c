@@ -16,9 +16,13 @@
 #include "test_harness.h"
 
 /* Budgets the driver declares for itself, in microseconds. Any single read
- * must finish inside the sum of the waits it can legitimately perform. */
+ * must finish inside the sum of the waits it can legitimately perform.
+ * sd_spi_command() waits for a ready card before every frame; teardown, the
+ * wait after CMD12's R1b and the R1-error cleanup use the shorter generic
+ * wait. Neither is a specification value; see PROTOCOL.md P-16. */
 enum {
-    DRIVER_READY_WAIT_US = 1000000,
+    DRIVER_COMMAND_READY_WAIT_US = 500000,
+    DRIVER_READY_WAIT_US = 250000,
     DRIVER_DATA_WAIT_US = 100000,
 };
 
@@ -108,9 +112,12 @@ static void sweep_read_faults(size_t blocks)
                 const uint64_t elapsed_us = pico_mock_now_us() - start_us;
 
                 /* 1. The call returns, and inside the budgets the driver
-                 *    declares: at most one ready wait plus one data wait per
-                 *    block plus one stop, with slack for the release clocks. */
-                const uint64_t budget = (uint64_t)DRIVER_READY_WAIT_US * 3U
+                 *    declares: one pre-command wait, at most two generic
+                 *    waits (after CMD12, and the R1-error cleanup), one data
+                 *    wait per block plus one stop, with slack for the release
+                 *    clocks. */
+                const uint64_t budget = (uint64_t)DRIVER_COMMAND_READY_WAIT_US
+                    + (uint64_t)DRIVER_READY_WAIT_US * 2U
                     + (uint64_t)DRIVER_DATA_WAIT_US * (blocks + 1U)
                     + UINT64_C(10000);
                 T_CHECK(elapsed_us <= budget);
@@ -283,7 +290,7 @@ static void test_busy_at_each_phase_is_bounded(void)
         uint64_t min_us;
     } rows[] = {
         { "before the read command", SD_PHASE_NONE, SD_ANY_COMMAND,
-          BLOCK_DEVICE_RESULT_BUSY_TIMEOUT, DRIVER_READY_WAIT_US },
+          BLOCK_DEVICE_RESULT_BUSY_TIMEOUT, DRIVER_COMMAND_READY_WAIT_US },
         { "during the stop response", SD_PHASE_R1, 12U,
           BLOCK_DEVICE_RESULT_BUSY_TIMEOUT, DRIVER_READY_WAIT_US },
     };
@@ -337,7 +344,9 @@ static void test_deinit_busy_timeout_can_be_retried(void)
     const uint64_t start_us = pico_mock_now_us();
     T_EQ_RESULT(BLOCK_DEVICE_RESULT_BUSY_TIMEOUT,
         block_device_deinit(fx.device));
-    T_CHECK(pico_mock_now_us() - start_us >= UINT64_C(1000000));
+    const uint64_t elapsed_us = pico_mock_now_us() - start_us;
+    T_CHECK(elapsed_us >= (uint64_t)DRIVER_READY_WAIT_US);
+    T_CHECK(elapsed_us < (uint64_t)DRIVER_READY_WAIT_US * 2U);
 
     /* Nothing was released. */
     T_CHECK(fx.sd.initialized);

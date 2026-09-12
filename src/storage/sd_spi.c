@@ -528,9 +528,6 @@ static block_device_result_t sd_spi_device_write_blocks(
     size_t block_count)
 {
     sd_spi_t *const sd = context;
-    (void)first_lba;
-    (void)buffer;
-    (void)block_count;
 
     if (sd == NULL || !sd->configured) {
         return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
@@ -542,13 +539,14 @@ static block_device_result_t sd_spi_device_write_blocks(
     if (first_lba >= sd->block_count || (uint64_t)block_count > sd->block_count - first_lba) {
         return BLOCK_DEVICE_RESULT_OUT_OF_RANGE;
     }
-    if (block_count == 0) {
-        return BLOCK_DEVICE_RESULT_OK;
+    if (block_count == 0 || buffer == NULL) {
+        return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
     }
 
     uint8_t r1, token;
     const uint8_t *buf = buffer;
     block_device_result_t result;
+    uint16_t byte_counter, crc;
 
     //adjust block address to byte address for sdsc cards
     if (!sd->card_type_hcxc) {
@@ -559,43 +557,187 @@ static block_device_result_t sd_spi_device_write_blocks(
     sd_spi_capture_bus(sd);
 
     //requested block count check to determine command
-    if (block_count != 1) {
+    if (block_count > 1) {
         //multiblock write cmd25
-        //issue command
-        //check removal latch
+        //issue command and check block device result
+        result = sd_spi_command(sd, 25, (uint32_t)first_lba, &r1);
+        if (result != BLOCK_DEVICE_RESULT_OK) {
+            sd_spi_release_bus(sd);
+            return result;
+        }
         //check r1
-        //repeat for block_count number of blocks
-            //transmit start block token + data block (check removal latch after every byte transmitted)
-            //read data response token
-                //if error, send stop tran token
-                //wait ready (NOTE: this is longer than the standard wait period, sd_spi_wait_ready_timeout(sd, 1000)
-                //release bus
-                //check removal latch
-                //return io error
-            //wait ready (NOTE: this is longer than the standard wait period, sd_spi_wait_ready_timeout(sd, 1000)
-        //transmit stop tran token
+        if (r1 == 0x00) {
+            size_t sent_blocks = 0;
+            //spec mandated byte gap
+            sd_spi_transfer(sd, 0xFF);
+            do {
+                //reset byte counter
+                byte_counter = 0;
+                //transmit start block token (0b11111100 for multi block write) + load data block into transmit buffer
+                sd_spi_transfer(sd, 0b11111100);
+                do {
+                    //transmit byte
+                    sd_spi_transfer(sd, buf[(sent_blocks * 512) + (byte_counter)]);
+                    //increment byte counter
+                    byte_counter++;
+                    if (sd_spi_removal_latched(sd)) {
+                        sd_spi_release_bus(sd);
+                        return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
+                    }
+                } while (byte_counter < 512);
+                //transmit CRC
+                crc = crc_helper_16((buf + (sent_blocks * 512)), 512);
+                sd_spi_transfer(sd, (uint8_t) (crc >> 8));
+                sd_spi_transfer(sd, (uint8_t) crc);
+                //read data response token (which is the byte immediately following last CRC byte transmission with no gap)
+                token = sd_spi_transfer(sd, 0xFF) & 0x1F; //mask out upper three bits, from spec
+                if (sd_spi_removal_latched(sd)) {
+                    sd_spi_release_bus(sd);
+                    return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
+                }
+                if ((token == 0b00001011) || (token == 0b00001101)) { //data CRC or data write error
+                    //ensure card not busy
+                    if (!sd_spi_wait_ready_timeout(sd, 1000)) {
+                        sd_spi_release_bus(sd);
+                        return sd_spi_removal_latched(sd)
+                            ? BLOCK_DEVICE_RESULT_INVALID_DEVICE
+                            : BLOCK_DEVICE_RESULT_BUSY_TIMEOUT;
+                    }
+                    //data error token, stop transmission with cmd12 (according to spec)
+                    result = sd_spi_stop_transmission(sd);
+                    //TODO: optional implement CMD13 or ACMD22 later if needed
+                    //release chip select
+                    sd_spi_release_bus(sd);
+                    //check latch
+                    if (sd_spi_removal_latched(sd)) {
+                        return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
+                    }
+                    if (result == BLOCK_DEVICE_RESULT_INVALID_DEVICE || result == BLOCK_DEVICE_RESULT_BUSY_TIMEOUT) {
+                        return result;
+                    }
+                    return BLOCK_DEVICE_RESULT_IO_ERROR;
+                }
+                if (!(token == 0b00000101)) {
+                    //unknown token, TODO: robust cleanup procedure, card likely never recieved data start token
+                    sd_spi_release_bus(sd);
+                    return sd_spi_removal_latched(sd)
+                        ? BLOCK_DEVICE_RESULT_INVALID_DEVICE
+                        : BLOCK_DEVICE_RESULT_IO_ERROR;
+                }
+                //wait ready (NOTE: this is longer than the standard wait period)
+                if (!sd_spi_wait_ready_timeout(sd, 1000)) {
+                    sd_spi_release_bus(sd);
+                    return sd_spi_removal_latched(sd)
+                        ? BLOCK_DEVICE_RESULT_INVALID_DEVICE
+                        : BLOCK_DEVICE_RESULT_BUSY_TIMEOUT;
+                }
+            } while(++sent_blocks < block_count); //repeat for block_count number of blocks
+            //stop transmission token (0b11111101)
+            sd_spi_transfer(sd, 0b11111101);
+            //spec mandated byte gap
+            sd_spi_transfer(sd, 0xFF);
+            if (sd_spi_removal_latched(sd)) {
+                sd_spi_release_bus(sd);
+                return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
+            }
+        } else {
+            //r1 error
+            if (!sd_spi_wait_ready_timeout(sd, 1000)) {
+                sd_spi_release_bus(sd);
+                return sd_spi_removal_latched(sd)
+                    ? BLOCK_DEVICE_RESULT_INVALID_DEVICE
+                    : BLOCK_DEVICE_RESULT_BUSY_TIMEOUT;
+            }
+            sd_spi_release_bus(sd);
+            return BLOCK_DEVICE_RESULT_IO_ERROR;
+        }
     } else {
         //single block write cmd24
-        //issue command
-        //check removal latch
+        //issue command and check block device result
+        result = sd_spi_command(sd, 24, (uint32_t)first_lba, &r1);
+        if (result != BLOCK_DEVICE_RESULT_OK) {
+            sd_spi_release_bus(sd);
+            return result;
+        }
         //check r1
-        //transmit start block token + data block (check removal latch after every byte transmitted)
-        //read data response token
-            //if error, wait ready (NOTE: this is longer than the standard wait period, sd_spi_wait_ready_timeout(sd, 1000)
-            //release bus
-            //check removal latch
-            //return io error
+        if (r1 == 0x00) {
+            //spec mandated byte gap
+            sd_spi_transfer(sd, 0xFF);
+            //reset byte counter
+            byte_counter = 0;
+            //transmit start block token (0b11111110 for single block write)
+            sd_spi_transfer(sd, 0b11111110);
+            do {
+                //transmit byte + increment counter
+                sd_spi_transfer(sd, buf[byte_counter++]);
+                //check latch
+                if (sd_spi_removal_latched(sd)) {
+                    sd_spi_release_bus(sd);
+                    return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
+                }
+            } while (byte_counter < 512);
+            //transmit crc
+            crc = crc_helper_16(buf, 512);
+            sd_spi_transfer(sd, (uint8_t) (crc >> 8));
+            sd_spi_transfer(sd, (uint8_t) crc);
+
+            //data response token
+            token = sd_spi_transfer(sd, 0xFF) & 0x1F; //mask out upper three bits, from spec
+            if (sd_spi_removal_latched(sd)) {
+                sd_spi_release_bus(sd);
+                return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
+            }
+            if ((token == 0b00001011) || (token == 0b00001101)) { //data CRC or data write error
+                //ensure card not busy
+                if (!sd_spi_wait_ready_timeout(sd, 1000)) {
+                    sd_spi_release_bus(sd);
+                    return sd_spi_removal_latched(sd)
+                        ? BLOCK_DEVICE_RESULT_INVALID_DEVICE
+                        : BLOCK_DEVICE_RESULT_BUSY_TIMEOUT;
+                }
+                //data error token
+                //release chip select
+                sd_spi_release_bus(sd);
+                //check latch
+                if (sd_spi_removal_latched(sd)) {
+                    return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
+                }
+                return BLOCK_DEVICE_RESULT_IO_ERROR;
+            }
+            if (!(token == 0b00000101)) {
+                //unknown token, TODO: robust cleanup procedure, card likely never recieved data start token
+                sd_spi_release_bus(sd);
+                return sd_spi_removal_latched(sd)
+                    ? BLOCK_DEVICE_RESULT_INVALID_DEVICE
+                    : BLOCK_DEVICE_RESULT_IO_ERROR;
+            }
+        } else {
+            //r1 error
+            if (!sd_spi_wait_ready_timeout(sd, 1000)) {
+                sd_spi_release_bus(sd);
+                return sd_spi_removal_latched(sd)
+                    ? BLOCK_DEVICE_RESULT_INVALID_DEVICE
+                    : BLOCK_DEVICE_RESULT_BUSY_TIMEOUT;
+            }
+            sd_spi_release_bus(sd);
+            return BLOCK_DEVICE_RESULT_IO_ERROR;
+        }
     }
-    //wait ready (NOTE: this is longer than the standard wait period, sd_spi_wait_ready_timeout(sd, 1000)
+    //wait ready (NOTE: this is longer than the standard wait period)
+    if (!sd_spi_wait_ready_timeout(sd, 1000)) {
+        sd_spi_release_bus(sd);
+        return sd_spi_removal_latched(sd)
+            ? BLOCK_DEVICE_RESULT_INVALID_DEVICE
+            : BLOCK_DEVICE_RESULT_BUSY_TIMEOUT;
+    }
     //release chip select
+    sd_spi_release_bus(sd);
     //check latch
+    if (sd_spi_removal_latched(sd)) {
+        return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
+    }
     //return ok
-
-    //todo: see if the "release chip, check latch, return result" in the multiblock error, single block error, and success paths can be collapsed together
-
-    /* TODO(owner): Implement bounded-time SD SPI block writes, preserving the
-     * sd_spi_require_usable() check at each operation entry. */
-    return BLOCK_DEVICE_RESULT_NOT_IMPLEMENTED;
+    return BLOCK_DEVICE_RESULT_OK;
 }
 
 static block_device_result_t sd_spi_device_get_info(
@@ -896,7 +1038,7 @@ static block_device_result_t sd_spi_command(
     }
 
     //ensure card is ready and preserve a distinct busy-timeout result
-    if (!sd_spi_wait_ready(sd)) {
+    if (!sd_spi_wait_ready_timeout(sd, 500)) {
         return sd_spi_removal_latched(sd)
             ? BLOCK_DEVICE_RESULT_INVALID_DEVICE
             : BLOCK_DEVICE_RESULT_BUSY_TIMEOUT;

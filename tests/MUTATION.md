@@ -3,7 +3,7 @@
 Coverage says which lines ran. It says nothing about whether the suite would
 notice those lines being wrong. This is the evidence that it would.
 
-`tools/mutations.txt` holds 56 deliberate mistakes in `src/storage/sd_spi.c` and
+`tools/mutations.txt` holds 78 deliberate mistakes in `src/storage/sd_spi.c` and
 `src/platform/gpio_irq.c`, one per record, chosen to span the failure classes
 that matter for this driver: wrong constants, reversed conditions, removed
 validation, incorrect bit masks, truncated integer widths, off-by-one range
@@ -51,8 +51,92 @@ mutation testing exists to find.
 
 **Mutation runs need a green baseline.** The script records which executables
 failed, so any case already failing counts as a false kill for every mutation.
-The enabled suite is green again as of 2026-09-09, so a full re-run is
-unblocked; it has not been performed.
+Between `4629e1d` (which cut `sd_spi_wait_ready()` from 1 s to 250 ms) and
+2026-09-11, seven cases asserting the old 1 s wait were failing and the script
+correctly refused to run. The budgets were settled on 2026-09-11 (500 ms before
+a command, 250 ms elsewhere; PROTOCOL.md P-16), the tests updated, and the
+catalogue re-run in full - see "Result, 2026-09-11" below.
+
+## Write path, 2026-09-11
+
+Twenty-two records were added with the write implementation
+(`sd_spi_device_write_blocks()`, CMD24/CMD25). Each stands for a mistake the
+implementation actually made, or nearly made, during review. They were first
+confirmed by applying each mutation, rebuilding `sd_writes_host_tests` alone
+and running it, then by the full catalogue run recorded in "Result,
+2026-09-11" below. "Detected by" names cases in `sd_writes`; the full run adds
+`sd_spi` and `sd_protocol` for `write-crc16-short` and
+`single-write-multi-token` (their "write is implemented" cases store a block
+and read it out of the model) and `sd_protocol` for
+`single-write-nwr-gap-dropped` (its zero-protocol-error assertion).
+
+| Mutation | Class | Detected by (cases in `sd_writes`) |
+| --- | --- | --- |
+| `write-crc16-end-bit` | wrong framing | 13 cases, first `CMD25 stores every block in order` (the all-zero block) |
+| `write-crc16-short` | wrong length | `CMD24 stores the data`, `writes and reads interleave` |
+| `write-source-stride` | wrong indexing | 13 cases |
+| `single-write-multi-token` | wrong constant | 11 cases |
+| `multi-write-single-token` | wrong constant | 14 cases |
+| `multi-write-only-first-block` | loop exit | 14 cases |
+| `multi-write-nwr-gap-dropped` | missing timing gap | 10 cases, via `sd_card_protocol_errors() == 0` |
+| `single-write-nwr-gap-dropped` | missing timing gap | 7 cases, via `sd_card_protocol_errors() == 0` |
+| `stop-tran-nbr-gap-dropped` | missing timing gap | `N_BR: busy that starts one byte after stop-tran is awaited` only |
+| `stop-tran-dropped` | missing token | 6 cases |
+| `final-busy-wait-ignored` | ignored result | the two `BUSY_TIMEOUT` cases |
+| `inter-block-busy-wait-ignored` | ignored result | `programming busy beyond the budget is BUSY_TIMEOUT` only |
+| `multi-write-cmd12-dropped` | skipped recovery step | the two rejection cases |
+| `multi-write-error-mapping-precedence` | operator precedence | the two rejection cases |
+| `multi-write-unknown-token-accepted` | missing validation | `unknown data-response byte`, multi-block fault sweep |
+| `single-write-unknown-token-accepted` | missing validation | `unknown data-response byte`, single-block fault sweep |
+| `multi-write-response-mask` | incorrect bit mask | `upper bits are don't-care`, `rejected data-response token` |
+| `multi-write-rejection-ignored` | delayed error recognition | the two rejection cases |
+| `single-write-rejection-ignored` | delayed error recognition | `a rejection followed by busy is waited out` only |
+| `write-payload-removal-check-dropped` | delayed cancellation | `removal injected at each write phase` only |
+| `write-sdsc-byte-address-dropped` | missing conversion | `CMD24 stores the data`, `CMD25 stores every block` |
+| `write-range-check-off-by-one` | off-by-one | *equivalent, argument in the record* |
+
+Four of these are killed by exactly one case. That is deliberate rather than
+thin: each of those cases exists because an earlier draft of the suite let the
+mutation survive, and the case was written to pin the one observable
+difference (a one-byte busy delay, a busy overrun between blocks, a busy after
+a write error, how soon after an eject the driver stops clocking). Deleting
+any of them reopens a hole the catalogue now documents.
+
+Three older records were disambiguated at the same time because the write
+path duplicated their target lines: `command-crc-frame-length` now carries the
+`sd_spi_command()` frame-builder context (the same line in
+`sd_spi_stop_transmission()` is left unmutated), and `sdsc-byte-address-dropped`
+/ `-inverted` now name the read path; the write path's copy has its own record.
+
+## Result, 2026-09-11, GCC 15.2.0 (MSYS2), Release
+
+**73 of 78 detected. 3 documented equivalent mutants. 1 documented as out of
+this harness' reach. 1 survivor of the Release run**, the same
+`irq-bounds-check-removed` as before, still caught only under the sanitizer
+configuration (see "The one survivor"). Every record in the catalogue applied
+and compiled.
+
+```sh
+python3 tests/tools/mutate.py --build-dir tests/build-mutation \
+    "--cmake-arg=-GUnix Makefiles" \
+    "--cmake-arg=-DCMAKE_C_COMPILER=C:/msys64/mingw64/bin/gcc.exe"
+```
+
+Changes against the 2026-09-05 table: the three `get-info-*` records and the
+twenty-two write-path records are now in the measured set; `command-crc-frame-length`
+is caught by ten executables (it was two), because every suite now brings a
+card up through the CRC-checked frame builder; `wait-ready-ignores-removal`
+gained `sd_writes` as a killer; and the write-path column above is a floor
+that the full run only widened.
+
+One thing learned the hard way about the catalogue format: a comment block
+placed *between* records is not skipped - the parser splits records only at a
+blank line followed by `id:`, so comment lines are appended to the previous
+record's replacement text and that mutation stops compiling. The first full
+run reported `get-info-skips-usability-check` as "did not compile" for exactly
+that reason; the comment was removed and the record re-run (killed by three
+executables, as recorded). Put commentary in a record's `why:` continuation
+lines or at the top of the file, never between records.
 
 ## Earlier additions
 

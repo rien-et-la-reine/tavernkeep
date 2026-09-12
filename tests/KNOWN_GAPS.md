@@ -1,6 +1,6 @@
 # Production contract gaps
 
-Gaps that are still open, and the four that were fixed. Each open gap has a
+Gaps that are still open, and the five that were fixed. Each open gap has a
 registered regression that asserts the behaviour the driver *should* have and
 therefore fails against the current source. They are disabled by default, so a
 green default run is not evidence that they are resolved.
@@ -11,22 +11,23 @@ cmake --build tests/build
 ctest --test-dir tests/build -L known-gap --output-on-failure
 ```
 
-Four of the five currently fail; `sd_gap_command-crc` passes now that SD-006 is
+Three of the four currently fail; `sd_gap_command-crc` passes now that SD-006 is
 fixed and can be promoted out of the label when convenient.
 `-DTAVERNKEEP_TEST_KNOWN_GAPS=OFF` restores the default; `ctest -L host` selects
 the enabled coverage alone.
 
-SD-007 describes work that is planned rather than deferred: it is the acceptance
-test for the write path, written ahead of the implementation so the target is
-fixed before the code is. SD-006 was the same for per-frame command CRC7 and is
-now closed; see "Fixed during this work".
+SD-007 was the acceptance test for the write path, written ahead of the
+implementation so the target was fixed before the code was. The write path
+exists now and its cases were promoted into the enabled suite
+(`sd_writes_host_tests`); see "Fixed during this work". SD-006 was the same for
+per-frame command CRC7.
 
 ## Order of work
 
 1. ~~**SD-006** - CMD12's placeholder CRC.~~ Done 2026-09-09.
-2. **SD-007** — writes. The current priority. One-shot
-   `crc_helper_16()` over the contiguous source buffer is sufficient for this;
-   the write path does not need the resumable form below.
+2. ~~**SD-007** — writes.~~ Implemented 2026-09-11 with one-shot
+   `crc_helper_16()` over the contiguous source buffer, as planned; the
+   resumable form below was not needed for it.
 3. **Resumable CRC16, together with transfer pipelining.** See the note under
    "CRC16: interleaving versus pipelining" below for why these are one item and
    not two, and why neither belongs ahead of writes.
@@ -215,45 +216,6 @@ widening a tolerance is the owner's call and wants bus captures from real cards
 to size properly. `test_response_latency_boundary` pins the current boundary
 exactly from both sides, so whatever is chosen has to be chosen deliberately.
 
-### SD-007 — writes are unimplemented
-
-Affected code: `sd_spi_device_write_blocks()` in `src/storage/sd_spi.c`, marked
-TODO in the source.
-
-**This is the next substantial piece of work after SD-006.** See "Order of work"
-above.
-
-```sh
-ctest --test-dir tests/build -R sd_gap_writes --output-on-failure
-```
-
-The backend validates its arguments and then returns `NOT_IMPLEMENTED`. The
-card model has implemented the full write path since the harness overhaul —
-CMD24/CMD25, data tokens, the data-response token, stop-tran and programming
-busy — so the acceptance tests can be written against it now.
-
-Three cases, deliberately narrow, covering only what the block-device contract
-and the specification already settle:
-
-1. a single-block write stores exactly the bytes given, verified by reading the
-   block out of the model directly rather than back through the driver, so a
-   driver that writes and reads the same wrong thing cannot agree with itself;
-2. an LBA at or past the capacity, or a count that runs past the end, is
-   refused before any frame reaches the bus, and the last block is writable;
-3. a data-response token of `0x0B` (CRC error) or `0x0D` (write error) surfaces
-   as `IO_ERROR` and leaves the driver usable.
-
-Multiple-block writes, pre-erase (ACMD23), partial-failure semantics and write
-protection are deliberately **not** asserted yet: they need design decisions
-that are the owner's to make. See VALIDATION_PLAN.md.
-
-**Model change made for this:** the card now validates the CRC16 the host
-appends to each written block and answers `0x0B` without storing anything when
-it does not match, which is what a real card does. Previously it consumed the
-two bytes and stored the block regardless, so a write path computing the CRC
-wrongly would have looked correct. `sd_card_set_write_crc_check(false)` opts
-out where a test needs to isolate something else.
-
 ---
 
 ## Fixed during this work
@@ -335,6 +297,47 @@ card's checking off and CMD12's bad CRC was therefore never examined. Asserting
 `sd_card_protocol_errors() == 0` rather than a return code is what made the real
 defect visible. Mutation `cmd59-crc-disabled` reproduces that exact trap.
 
+### SD-007 — writes were unimplemented
+
+Implemented 2026-09-11. `sd_spi_device_write_blocks()` issues CMD24 for one
+block and CMD25 for more, converts to byte addresses on standard-capacity
+cards, sends the start-block token the command requires after the N_WR idle
+byte, appends a real CRC16 from `crc_helper_16()`, decodes the data-response
+token under the specification's `xxx0sss1` mask, waits out programming busy
+between blocks and after stop-tran (with the N_BR idle byte in between),
+sends CMD12 after a rejected block of CMD25 as 7.3.3.1 requires, and reports
+`BUSY_TIMEOUT` when a programming wait outlives its 1 s budget.
+
+The three acceptance cases that lived in `test_sd_gaps.c` were promoted into
+`sd_writes_host_tests` (`test_sd_writes.c`) together with the rest of the write
+coverage: every card kind, multiple-block writes up to sixteen blocks read back
+out of the model, don't-care bits in the data-response token, rejections and
+unknown response bytes, R1 errors, busy handling and overrun, removal at every
+write phase, a fault sweep whose central invariant is that `OK` is only ever
+reported when the card holds every block, and argument validation. Twenty-one
+mutations in `tools/mutations.txt` under "write path" reproduce the mistakes
+the implementation made or nearly made on the way; all are killed by that suite
+(first verified per mutation against `sd_writes_host_tests` alone while
+the catalogue runner was blocked on an unrelated baseline failure, then by the
+full `tools/mutate.py` run recorded in MUTATION.md).
+
+**Model changes made for this:** the card now insists on `0xFE` for CMD24 and
+`0xFC` for CMD25 (it previously accepted either for both, which is how a CMD24
+sent with `0xFC` passed), records a start token sent with no idle byte after
+R1, resumes waiting for the next token after per-block programming busy in a
+CMD25 transfer instead of going idle, accepts a command frame while waiting for
+a token so CMD12 mid-write is decoded, and takes `sd_card_set_stop_tran_busy()`
+to delay busy by N_BR bytes after stop-tran and to size the final programming
+busy independently. The block overlay grew to 32 entries so a sixteen-block
+write can be read back in full.
+
+Still not asserted, by design: pre-erase (ACMD23), CMD13/ACMD22 after a write
+error, partial-failure semantics beyond "the blocks before the rejection are on
+the card", and write protection. The "unknown token" exits release the card
+without terminating the transfer; the driver marks this TODO and the model
+cannot represent the stuck state (it forgets a pending write on chip-select
+release, see RESIDUAL_RISK.md), so that is hardware-validation territory.
+
 ## Other limits recorded during this review
 
 Not reproduced failures; scope and unfinished work.
@@ -349,12 +352,15 @@ Not reproduced failures; scope and unfinished work.
   `test_get_info_after_removal_is_rejected` in `test_sd_protocol.c`, the
   latter checked against the model's own block count rather than the driver's
   cached field.
-- `get_info()` reports `writable = true` unconditionally, while
-  `write_blocks()` returns `NOT_IMPLEMENTED` and no write-protect state is
-  ever read. The tests pin the current value with a comment rather than
-  blessing it; settling it is a contract decision. See SD-007.
-- Filesystem mount/unmount are stubs. Writes are stubs too and now have
-  acceptance tests: see SD-007.
+- `get_info()` reports `writable = true` unconditionally; no write-protect
+  state is ever read. The tests pin the current value with a comment rather
+  than blessing it; settling it is a contract decision.
+- Filesystem mount/unmount are stubs.
+- `tools/mutate.py` requires the enabled suite to pass before it runs the
+  catalogue. Seven cases asserting a 1 s ready wait had been failing since
+  commit `4629e1d` cut `sd_spi_wait_ready()` to 250 ms; resolved 2026-09-11
+  by settling the budgets (500 ms before a command, 250 ms elsewhere - see
+  PROTOCOL.md P-16) and updating the tests to name them.
 - `sd_spi_configure()` does not validate GPIO numbers or reject duplicate pin
   assignments. See [RESIDUAL_RISK.md](RESIDUAL_RISK.md) section 3.1.
 - Argument validation order differs between the read and write backends. See

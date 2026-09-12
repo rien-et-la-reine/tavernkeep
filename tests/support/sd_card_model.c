@@ -60,6 +60,7 @@ typedef enum {
     ST_WRITE_PAYLOAD,
     ST_WRITE_CRC,
     ST_WRITE_RESPONSE,
+    ST_STOP_TRAN_GAP, /* the N_BR idle bytes between stop-tran and busy */
 } model_state_t;
 
 typedef struct {
@@ -125,6 +126,18 @@ static uint8_t write_response_token;
 static uint16_t host_write_crc;
 static bool write_crc_check_enabled = true;
 static bool write_crc_rejected;
+/* The specification requires at least one idle byte (N_WR) between a write
+ * command's R1 and the first start-block token. Set when R1 has just been
+ * answered so the very next byte can be checked. */
+static bool write_gap_required;
+/* A multiple-block write is still in progress when the per-block programming
+ * busy ends: the card goes back to waiting for a token, not to idle. */
+static bool resume_write_after_busy;
+/* Stop-tran behaviour; see sd_card_set_stop_tran_busy(). */
+static size_t stop_tran_delay_bytes;
+static size_t stop_tran_delay_remaining;
+static uint64_t stop_tran_program_us;
+static bool stop_tran_busy_overridden;
 
 static uint64_t busy_until_us;
 static size_t global_busy_bytes;
@@ -143,6 +156,7 @@ static overlay_block_t overlay[SD_MODEL_OVERLAY_BLOCKS];
 
 static sd_fault_t faults[SD_MODEL_MAX_FAULTS];
 static uint32_t fault_activations[SD_MODEL_MAX_FAULTS];
+static uint64_t fault_activation_bytes[SD_MODEL_MAX_FAULTS];
 static size_t fault_count;
 static uint32_t phase_entries[SD_PHASE_COUNT];
 /* Entries into a phase while a given command is active. A fault that names a
@@ -429,6 +443,7 @@ void sd_card_clear_faults(void)
 {
     memset(faults, 0, sizeof(faults));
     memset(fault_activations, 0, sizeof(fault_activations));
+    memset(fault_activation_bytes, 0, sizeof(fault_activation_bytes));
     fault_count = 0U;
 }
 
@@ -440,6 +455,7 @@ bool sd_card_add_fault(const sd_fault_t *fault)
     }
     faults[fault_count] = *fault;
     fault_activations[fault_count] = 0U;
+    fault_activation_bytes[fault_count] = 0U;
     fault_count++;
     return true;
 }
@@ -447,6 +463,11 @@ bool sd_card_add_fault(const sd_fault_t *fault)
 uint32_t sd_card_fault_activations(size_t index)
 {
     return index < SD_MODEL_MAX_FAULTS ? fault_activations[index] : 0U;
+}
+
+uint64_t sd_card_fault_activation_byte(size_t index)
+{
+    return index < SD_MODEL_MAX_FAULTS ? fault_activation_bytes[index] : 0U;
 }
 
 uint32_t sd_card_phase_entries(sd_phase_t phase)
@@ -490,6 +511,13 @@ static void go_idle(void)
     state = ST_IDLE;
     stream_active = false;
     data_length = 0U;
+    resume_write_after_busy = false;
+    write_gap_required = false;
+}
+
+static uint64_t stop_tran_busy_us(void)
+{
+    return stop_tran_busy_overridden ? stop_tran_program_us : card.program_us;
 }
 
 static int match_fault(void)
@@ -515,6 +543,7 @@ static int match_fault(void)
             continue;
         }
         fault_activations[i]++;
+        fault_activation_bytes[i] = bytes_clocked;
         return (int)i;
     }
     return -1;
@@ -1013,6 +1042,12 @@ void sd_card_reset(const sd_card_desc_t *desc)
     host_write_crc = 0U;
     write_crc_check_enabled = true;
     write_crc_rejected = false;
+    write_gap_required = false;
+    resume_write_after_busy = false;
+    stop_tran_delay_bytes = 0U;
+    stop_tran_delay_remaining = 0U;
+    stop_tran_program_us = 0U;
+    stop_tran_busy_overridden = false;
     busy_until_us = 0U;
     global_busy_bytes = 0U;
     sd_card_script_clear();
@@ -1088,7 +1123,16 @@ void sd_card_resume(void)
     stop_stuff_sent = false;
     data_length = 0U;
     stream_active = false;
+    resume_write_after_busy = false;
+    write_gap_required = false;
     state = ST_IDLE;
+}
+
+void sd_card_set_stop_tran_busy(size_t delay_bytes, uint64_t program_us)
+{
+    stop_tran_delay_bytes = delay_bytes;
+    stop_tran_program_us = program_us;
+    stop_tran_busy_overridden = true;
 }
 
 void sd_card_set_stop_residual_bytes(size_t bytes)
@@ -1221,9 +1265,27 @@ static uint8_t produce_byte(uint8_t mosi)
         if (sim_clock_now_us() >= busy_until_us) {
             trace_simple(SD_EV_BUSY_END, 0U, 0U);
             busy_until_us = 0U;
-            go_idle();
+            if (resume_write_after_busy) {
+                /* Programming of one block of a CMD25 transfer finished; the
+                 * card is still in the transfer and expects the next start
+                 * token or stop-tran. */
+                resume_write_after_busy = false;
+                state = ST_WRITE_WAIT_TOKEN;
+            } else {
+                go_idle();
+            }
         } else {
             return emit(SD_PHASE_BUSY, 0x00U);
+        }
+    }
+
+    /* A card waiting for the next block of a CMD25 transfer still decodes
+     * command frames: the specification's error recovery for a rejected block
+     * is CMD12, sent from exactly this state. */
+    if (state == ST_WRITE_WAIT_TOKEN
+            && (frame_active || (mosi & 0xC0U) == 0x40U)) {
+        if (absorb_frame_byte(mosi)) {
+            return emit(SD_PHASE_COMMAND, 0xFFU);
         }
     }
 
@@ -1325,6 +1387,7 @@ static uint8_t produce_byte(uint8_t mosi)
             state = ST_READ_WAIT;
         } else if (active_command == 24U || active_command == 25U) {
             state = ST_WRITE_WAIT_TOKEN;
+            write_gap_required = true;
         } else if (card.program_us > 0U && active_command == 12U) {
             begin_busy_us(card.program_us);
         } else {
@@ -1365,26 +1428,67 @@ static uint8_t produce_byte(uint8_t mosi)
     case ST_STREAM_GAP:
         return stream_byte();
 
-    case ST_WRITE_WAIT_TOKEN:
-        if (mosi == 0xFEU || mosi == 0xFCU) {
+    case ST_WRITE_WAIT_TOKEN: {
+        /* Specification 7.3.3.2: 0xFE starts the block of a single-block
+         * write, 0xFC starts each block of a multiple-block write, and 0xFD
+         * ends a multiple-block write. A card scans for its own token and
+         * ignores every other byte, so a host that sends the wrong one is
+         * not answered - it is recorded here so a test can see it. */
+        const bool first_after_r1 = write_gap_required;
+        write_gap_required = false;
+        const uint8_t expected = write_multiple ? 0xFCU : 0xFEU;
+        if (mosi == expected) {
+            if (first_after_r1) {
+                note_protocol_error(
+                    "start-block token sent with no N_WR idle byte after R1");
+            }
             trace_simple(SD_EV_WRITE_TOKEN, mosi, 0U);
             data_index = 0U;
             state = ST_WRITE_PAYLOAD;
             return emit(SD_PHASE_WRITE_TOKEN, 0xFFU);
         }
+        if (mosi == 0xFEU || mosi == 0xFCU) {
+            note_protocol_error(write_multiple
+                ? "0xFE sent in a multiple-block write; 0xFC is required"
+                : "0xFC sent in a single-block write; 0xFE is required");
+            return emit(SD_PHASE_WRITE_TOKEN, 0xFFU);
+        }
         if (mosi == 0xFDU) {
+            if (!write_multiple) {
+                note_protocol_error("stop-tran token in a single-block write");
+                return emit(SD_PHASE_WRITE_TOKEN, 0xFFU);
+            }
             trace_simple(SD_EV_STOP_TRAN, mosi, 0U);
             const uint8_t value = emit(SD_PHASE_WRITE_TOKEN, 0xFFU);
             if (!state_overridden) {
-                if (card.program_us > 0U) {
-                    begin_busy_us(card.program_us);
-                } else {
+                const uint64_t program_us = stop_tran_busy_us();
+                if (program_us == 0U) {
                     go_idle();
+                } else if (stop_tran_delay_bytes > 0U) {
+                    stop_tran_delay_remaining = stop_tran_delay_bytes;
+                    state = ST_STOP_TRAN_GAP;
+                } else {
+                    begin_busy_us(program_us);
                 }
             }
             return value;
         }
         return emit(SD_PHASE_WRITE_TOKEN, 0xFFU);
+    }
+
+    case ST_STOP_TRAN_GAP: {
+        /* N_BR: the card has accepted stop-tran but has not asserted busy
+         * yet. It answers idle, and a host that stops waiting here releases
+         * a card that is about to start programming. */
+        const uint8_t value = emit(SD_PHASE_WRITE_BUSY, 0xFFU);
+        if (state_overridden) {
+            return value;
+        }
+        if (--stop_tran_delay_remaining == 0U) {
+            begin_busy_us(stop_tran_busy_us());
+        }
+        return value;
+    }
 
     case ST_WRITE_PAYLOAD: {
         const uint8_t value = emit(SD_PHASE_WRITE_PAYLOAD, 0xFFU);
@@ -1436,6 +1540,7 @@ static uint8_t produce_byte(uint8_t mosi)
         }
         trace_simple(SD_EV_WRITE_RESPONSE, value, 0U);
         if (card.program_us > 0U) {
+            resume_write_after_busy = write_multiple;
             begin_busy_us(card.program_us);
         } else if (write_multiple) {
             state = ST_WRITE_WAIT_TOKEN;

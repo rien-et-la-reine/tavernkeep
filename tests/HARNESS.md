@@ -24,6 +24,8 @@ tests/
   test_sd_spi.c               the original suite, on the new engine
   test_sd_protocol.c          protocol conformance and boundary matrices
   test_sd_faults.c            fault injection, partial operations, recovery
+  test_sd_writes.c            CMD24/CMD25: data on the card, tokens, CRC16,
+                              busy, rejections, removal, a write fault sweep
   test_sd_property.c          property and fuzz tests (seeded)
   test_sd_gaps.c              regressions for gaps that are still open
   tools/mutate.py             mutation harness
@@ -76,7 +78,21 @@ The model enforces things a real card enforces and the old fake did not:
 - chip select gates everything: a deselected card answers 0xFF and forgets any
   partial command or pending response;
 - a CMD18 stream continues until CMD12, from a generated block store, so a
-  multiple-block read has no length limit.
+  multiple-block read has no length limit;
+- a written block is stored only when its CRC16 matches, and is answered with
+  `0x0B` otherwise; the start-block token must be the one the command requires
+  (`0xFE` for CMD24, `0xFC` for CMD25), a token sent with no idle byte after R1
+  is recorded as a protocol error, and a CMD25 transfer stays open across
+  per-block programming busy, so `sd_card_protocol_errors() == 0` on a write
+  is load-bearing too.
+
+For writes, `card.program_us` is the busy after every accepted block and after
+stop-tran; `sd_card_set_stop_tran_busy(delay_bytes, program_us)` sizes the
+final busy separately and can insert the N_BR idle byte a real card may answer
+before it asserts busy. `sd_card_get_block()` reads what the card holds, which
+is how a write test avoids trusting the driver's own read path. The overlay
+holds 32 explicit blocks, so that is the longest write that can be read back in
+full.
 
 `sd_card_set_raw_csd()` overrides the synthesised CSD with a literal register.
 Use it to drive the parser with dumps captured from real cards — the model's
@@ -114,6 +130,10 @@ T_CHECK(sd_card_add_fault(&fault));
 **Always assert `sd_card_fault_activations(i)`.** A fault that never fires
 turns an adversarial test into a happy-path test that quietly passes. Several
 cases here would have been worthless without that check.
+`sd_card_fault_activation_byte(i)` gives the bus byte at which it fired, for
+"the driver stopped within N bytes of the eject" assertions — a return code
+alone cannot distinguish a driver that noticed the removal at once from one
+that clocked the rest of the block into an absent card first.
 
 Fault kinds cover: stalling, permanent busy, substituted R1, data error tokens,
 single-byte corruption, bit flips, truncation, corrupted data CRC, card
@@ -219,6 +239,11 @@ python3 tests/tools/mutate.py --build-dir tests/build-mutation \
 worried about making. If it survives, the test you just wrote does not check
 what you think it checks.
 
+Keep commentary inside a record's `why:` lines or at the top of the file.
+Records are split only at a blank line followed by `id:`, so a comment block
+placed between two records is appended to the earlier record's replacement
+text and silently turns it into a mutation that does not compile.
+
 A mutation that cannot be killed by any test because no reachable input
 distinguishes it gets an `equivalent:` field carrying the argument for why.
 Do not use that field to retire a mutation you simply could not catch — write
@@ -247,8 +272,9 @@ the test instead, or move the behaviour into KNOWN_GAPS.md.
    around it.
 6. **Coverage numbers are per target and must not be summed.** `gcov`
    overwrites reports that share a basename.
-7. **A green default run does not mean there are no known gaps.** Three
-   regressions are registered and disabled; see [KNOWN_GAPS.md](KNOWN_GAPS.md).
+7. **A green default run does not mean there are no known gaps.** Four
+   regressions are registered and disabled, three of them still failing; see
+   [KNOWN_GAPS.md](KNOWN_GAPS.md).
 
 ## Adding a test: the short version
 

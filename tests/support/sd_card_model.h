@@ -47,7 +47,10 @@ enum {
     SD_MODEL_BLOCK_SIZE = 512,
     SD_MODEL_MAX_FAULTS = 8,
     SD_MODEL_TRACE_CAPACITY = 4096,
-    SD_MODEL_OVERLAY_BLOCKS = 8,
+    /* Blocks the overlay can hold. A multiple-block write stores one entry per
+     * block, so this bounds the longest write whose every block a test can
+     * read back out of the model. */
+    SD_MODEL_OVERLAY_BLOCKS = 32,
     SD_MODEL_SCRIPT_COMMANDS = 64,
     SD_MODEL_SCRIPT_PAYLOAD = 4096,
 };
@@ -102,8 +105,11 @@ typedef enum {
     SD_PHASE_STOP_STUFF,     /* the CMD12 stuff byte */
     SD_PHASE_BUSY,           /* an R1b busy window */
     SD_PHASE_WRITE_TOKEN,    /* host-sent 0xFE / 0xFC / 0xFD */
-    SD_PHASE_WRITE_PAYLOAD,
+    SD_PHASE_WRITE_PAYLOAD,  /* the 512 data bytes and the two CRC bytes */
     SD_PHASE_WRITE_RESPONSE, /* the data-response token */
+    /* The N_BR window: idle bytes a card may answer after the stop-tran token
+     * before it asserts busy. Only entered when a test asks for one via
+     * sd_card_set_stop_tran_busy(); programming busy itself is SD_PHASE_BUSY. */
     SD_PHASE_WRITE_BUSY,
     SD_PHASE_RELEASE,        /* bytes clocked while chip select is high */
     SD_PHASE_COUNT
@@ -223,6 +229,10 @@ bool sd_card_add_fault(const sd_fault_t *fault);
 /* How many times a fault has actually fired. A test that injects a fault and
  * sees zero activations is testing nothing. */
 uint32_t sd_card_fault_activations(size_t index);
+/* The bus byte count (as sd_card_bytes_clocked() reports it) at which the
+ * fault last fired, so a test can bound how much further the driver kept
+ * clocking after, say, the card was ejected. Zero if it never fired. */
+uint64_t sd_card_fault_activation_byte(size_t index);
 
 /* How many times the model has entered a phase so far. Pass this as a fault's
  * `occurrence` to mean "the next time this happens", which is far more robust
@@ -309,6 +319,17 @@ void sd_card_set_write_response_token(uint8_t token);
  * because real cards always check the data CRC in SPI mode; turn it off only
  * to isolate a test from the write CRC deliberately. */
 void sd_card_set_write_crc_check(bool enabled);
+
+/* What the card does after the host's stop-tran token (0xFD). By default it
+ * asserts busy immediately for the description's program_us, which is the
+ * idealised card. The specification's N_BR allows a card up to one byte of
+ * idle (0xFF) before busy begins, and a host that polls for "not busy" right
+ * after the token can read that idle byte, conclude programming is over, and
+ * release the card mid-program. `delay_bytes` inserts that window; `program_us`
+ * is how long the final programming busy lasts, independent of the per-block
+ * value, so a test can make only the stop-tran busy exceed the driver's
+ * budget. Reset by sd_card_reset(). */
+void sd_card_set_stop_tran_busy(size_t delay_bytes, uint64_t program_us);
 
 /* Blocks the card has actually streamed for the current/last read. Lets a
  * test prove the driver consumed exactly the blocks it asked for. */

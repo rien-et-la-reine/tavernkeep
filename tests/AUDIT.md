@@ -138,7 +138,9 @@ the CRC guard exists to catch.
   occurrence and byte offsets.
 - Card ejection injected at a phase rather than a byte index.
 - The complete write path — CMD24/CMD25, host data tokens, data-response
-  tokens, stop-tran, programming busy — which no production code uses yet.
+  tokens, stop-tran, programming busy — which no production code used at the
+  time; the production write path landed 2026-09-11 and is covered by
+  `sd_writes_host_tests`.
 - Arbitrary and pseudo-random card responses, for parser fuzzing.
 - Command CRC7 enforcement, application-command state, and framing validation.
 - A full protocol trace, queryable by kind and ordinal, dumped on any failure.
@@ -193,10 +195,10 @@ severities and what would close each one is in
   card that is out of specification, or specified in a way this reading gets
   wrong, is not represented. The only defence used here is the CSD vectors from
   real cards.
-- **Write, filesystem, DMA and PIO behaviour.** The harness can represent write
-  transactions; there is no production write path to test. Nothing here says
-  anything about FatFs, DMA cancellation, RP2350-E5 abort ordering or USB media
-  ownership.
+- **Filesystem, DMA and PIO behaviour.** (Writes were in this list when the
+  audit was written; the production write path and its suite came later.)
+  Nothing here says anything about FatFs, DMA cancellation, RP2350-E5 abort
+  ordering or USB media ownership.
 - **The model is shared with the tests that use it.** If the model
   misunderstands the protocol in the same way the driver does, both agree and
   the suite is silent. The CSD vectors from real cards, the independently

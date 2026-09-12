@@ -108,6 +108,16 @@ add_host_test(sd_faults_host_tests test_sd_faults.c
     ../src/storage/sd_spi.c
     ../src/storage/sd_crc.c)
 
+# The write path: CMD24/CMD25 against the card model, which validates the
+# data CRC16, the start-block token each command requires, the N_WR idle byte
+# and keeps a CMD25 transfer open across programming busy. Includes the
+# former SD-007 acceptance cases, promoted out of the known-gap label.
+add_host_test(sd_writes_host_tests test_sd_writes.c
+    support/gpio_irq_mock.c
+    ${TAVERNKEEP_HARNESS_SOURCES} ${TAVERNKEEP_FIXTURE_SOURCES}
+    ../src/storage/sd_spi.c
+    ../src/storage/sd_crc.c)
+
 add_executable(sd_property_host_tests test_sd_property.c
     support/gpio_irq_mock.c
     ${TAVERNKEEP_HARNESS_SOURCES} ${TAVERNKEEP_FIXTURE_SOURCES}
@@ -204,7 +214,7 @@ add_executable(sd_gaps_host_tests test_sd_gaps.c
     ../src/storage/sd_crc.c)
 tavernkeep_configure_target(sd_gaps_host_tests)
 
-foreach(gap IN ITEMS data-crc stop-residual r1-tolerance command-crc writes)
+foreach(gap IN ITEMS data-crc stop-residual r1-tolerance command-crc)
     add_test(NAME sd_gap_${gap} COMMAND sd_gaps_host_tests --gap-${gap})
     set_tests_properties(sd_gap_${gap} PROPERTIES TIMEOUT 60 LABELS "known-gap")
     if(NOT TAVERNKEEP_TEST_KNOWN_GAPS)

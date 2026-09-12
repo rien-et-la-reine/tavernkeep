@@ -21,7 +21,7 @@ storage work. Requirements/architecture describe intentions, not proof.
 | GPIO dispatcher | One SDK callback on the owning core, per-pin handlers and masks | Validation, wrong-core operations, two GPIO users, callback filtering/self-removal and nested critical sections; real SD integration |
 | Block-device API | Validation and backend dispatch | Every wrapper and missing callback; context/buffer/LBA/count forwarding including 64-bit extremes; all eight result categories |
 | SD SPI | Debounced active-low availability; rollback; legacy/v2 initialization; CSD v1/v2 capacity; single/multiple 512-byte reads; bounded waits; removal latch and cleanup | Four suites against a stateful card model: card-variant matrix, command ordering, CRC7 and application-command enforcement, the R1 poll boundary, all 128 R1 values, all 15 error tokens with immediacy bounds, multiple-block reads of arbitrary length, addressing and capacity boundaries, CSD registers from real cards, phase-based fault injection with recovery assertions, and seeded property and fuzz tests |
-| SD info/writes | Internal capacity parsed; public info/writes remain stubs | `NOT_IMPLEMENTED`, preconditions and no SPI activity; no write success claim |
+| SD info/writes | Public info from the cached CSD; CMD24/CMD25 writes with byte addressing, CRC16, data-response decoding, programming busy, stop-tran and CMD12 recovery | `sd_writes_host_tests` against the card model: data read back out of the model on every card kind, token and timing-gap rules, rejections and unknown bytes, busy bounds and `BUSY_TIMEOUT`, removal at every phase, a no-false-success fault sweep. Host evidence only; no real-card write has been captured |
 | Filesystem | Prepare/bind state; mount/unmount stubs | Validation, state preservation, rebinding, repeat stub calls and no backend invocation |
 | Other product subsystems | Planned | Acceptance matrix below; no passing feature placeholders |
 
@@ -41,8 +41,9 @@ machine-instruction races or of multicore execution.
 
 The three disabled regressions in [KNOWN_GAPS.md](KNOWN_GAPS.md) are failed
 contract evidence and must accompany any report of a passing enabled suite.
-Read data CRC validation, writes and public capacity reporting remain
-explicitly unimplemented.
+Read data CRC validation remains explicitly unimplemented. Writes are
+implemented and host-tested; the real-card evidence in the FR-009 row below is
+still outstanding.
 
 ## Future acceptance matrix
 
@@ -129,12 +130,12 @@ which is exactly the vector to compare a sniffer result against.
 
 ## Card recovery policy
 
-**Status: undecided, and deliberately deferred.** The intended order of work is
-SD-007 (writes) first - SD-006 closed on 2026-09-09 - then this. Writes are major
-functionality that has been left unimplemented while several hardening passes
-went ahead of it; recovery is another hardening pass and should not jump the
-queue again. Settle this before the SD driver is called finished, not before
-writes exist.
+**Status: undecided, and deliberately deferred.** The intended order of work was
+SD-006 (closed 2026-09-09), then SD-007 writes (implemented 2026-09-11), then
+this. Writes now exist, so recovery is next in line; settle it before the SD
+driver is called finished. The write path's "unknown data-response byte" exit,
+which releases the card without terminating the transfer, is one of the
+inputs to this policy.
 
 It is recorded here rather than in [KNOWN_GAPS.md](KNOWN_GAPS.md) because no
 regression can be written until the policy is chosen.

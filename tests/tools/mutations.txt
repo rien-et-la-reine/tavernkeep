@@ -16,9 +16,22 @@
 id: command-crc-frame-length
 file: src/storage/sd_spi.c
 why: wrong length - the CRC7 must cover all five bytes of the command frame
+     (sd_spi_command; sd_spi_stop_transmission builds its CMD12 frame the same way)
 ---
+    transmit_buffer[4] = (uint8_t) (arg);
+    //send command index and args
+    for (i = 0; i < 5; i++) {
+        sd_spi_transfer(sd, transmit_buffer[i]);
+    }
+    //send CRC7
     sd_spi_transfer(sd, (crc_helper_7(transmit_buffer, 5) << 1)| 0x01);
 ===
+    transmit_buffer[4] = (uint8_t) (arg);
+    //send command index and args
+    for (i = 0; i < 5; i++) {
+        sd_spi_transfer(sd, transmit_buffer[i]);
+    }
+    //send CRC7
     sd_spi_transfer(sd, (crc_helper_7(transmit_buffer, 4) << 1)| 0x01);
 
 id: cmd59-crc-disabled
@@ -100,24 +113,41 @@ why: removed validation - a card still powering up is accepted
 
 id: sdsc-byte-address-dropped
 file: src/storage/sd_spi.c
-why: wrong addressing conversion - byte-addressed cards sent block addresses
+why: wrong addressing conversion - byte-addressed cards sent block addresses on reads
+     (the write path has its own copy; see write-sdsc-byte-address-dropped)
 ---
+    uint8_t *buf = buffer;
+    block_device_result_t result;
+
+    //adjust block address to byte address for sdsc cards
     if (!sd->card_type_hcxc) {
         first_lba *= 512U;
     }
 ===
+    uint8_t *buf = buffer;
+    block_device_result_t result;
+
+    //adjust block address to byte address for sdsc cards
     if (false) {
         first_lba *= 512U;
     }
 
 id: sdsc-byte-address-inverted
 file: src/storage/sd_spi.c
-why: wrong addressing conversion - the conversion applied to the wrong type
+why: wrong addressing conversion - the conversion applied to the wrong type on reads
 ---
+    uint8_t *buf = buffer;
+    block_device_result_t result;
+
+    //adjust block address to byte address for sdsc cards
     if (!sd->card_type_hcxc) {
         first_lba *= 512U;
     }
 ===
+    uint8_t *buf = buffer;
+    block_device_result_t result;
+
+    //adjust block address to byte address for sdsc cards
     if (sd->card_type_hcxc) {
         first_lba *= 512U;
     }
@@ -673,3 +703,226 @@ why: removed validation - geometry answered from stale cache after removal or be
     info->block_count = sd->block_count;
 ===
     info->block_count = sd->block_count;
+
+id: write-crc16-end-bit
+file: src/storage/sd_spi.c
+why: wrong framing - the CRC7 end-bit habit applied to the data CRC16; every block whose
+     true CRC has bit 0 clear is rejected by the card
+---
+                crc = crc_helper_16((buf + (sent_blocks * 512)), 512);
+===
+                crc = crc_helper_16((buf + (sent_blocks * 512)), 512) | 0x0001;
+
+id: write-crc16-short
+file: src/storage/sd_spi.c
+why: wrong length - the data CRC must cover all 512 bytes of the block
+---
+            crc = crc_helper_16(buf, 512);
+===
+            crc = crc_helper_16(buf, 511);
+
+id: write-source-stride
+file: src/storage/sd_spi.c
+why: wrong indexing - block n sent from a stride-(n+1) sample of the source instead of
+     its own 512 bytes; correct for block 0 only
+---
+                    sd_spi_transfer(sd, buf[(sent_blocks * 512) + (byte_counter)]);
+===
+                    sd_spi_transfer(sd, buf[(sent_blocks + 1) * byte_counter]);
+
+id: single-write-multi-token
+file: src/storage/sd_spi.c
+why: wrong constant - CMD24 needs the 0xFE start token; 0xFC is only for CMD25
+---
+            sd_spi_transfer(sd, 0b11111110);
+===
+            sd_spi_transfer(sd, 0b11111100);
+
+id: multi-write-single-token
+file: src/storage/sd_spi.c
+why: wrong constant - CMD25 blocks need the 0xFC start token
+---
+                sd_spi_transfer(sd, 0b11111100);
+===
+                sd_spi_transfer(sd, 0b11111110);
+
+id: multi-write-only-first-block
+file: src/storage/sd_spi.c
+why: loop exit after the first accepted block - stop-tran sent with N-1 blocks unsent,
+     reported as success
+---
+            } while(++sent_blocks < block_count); //repeat for block_count number of blocks
+===
+            } while(false); //repeat for block_count number of blocks
+
+id: multi-write-nwr-gap-dropped
+file: src/storage/sd_spi.c
+why: missing timing gap - the start token follows R1 with no N_WR idle byte
+---
+            //spec mandated byte gap
+            sd_spi_transfer(sd, 0xFF);
+            do {
+===
+            do {
+
+id: single-write-nwr-gap-dropped
+file: src/storage/sd_spi.c
+why: missing timing gap - the start token follows R1 with no N_WR idle byte
+---
+            //spec mandated byte gap
+            sd_spi_transfer(sd, 0xFF);
+            //reset byte counter
+===
+            //reset byte counter
+
+id: stop-tran-nbr-gap-dropped
+file: src/storage/sd_spi.c
+why: missing timing gap - busy is polled on the byte right after stop-tran, where N_BR lets
+     the card still answer idle, so a card that starts busy one byte late is released
+     mid-program
+---
+            sd_spi_transfer(sd, 0b11111101);
+            //spec mandated byte gap
+            sd_spi_transfer(sd, 0xFF);
+===
+            sd_spi_transfer(sd, 0b11111101);
+
+id: stop-tran-dropped
+file: src/storage/sd_spi.c
+why: missing token - a CMD25 transfer is never terminated
+---
+            //stop transmission token (0b11111101)
+            sd_spi_transfer(sd, 0b11111101);
+            //spec mandated byte gap
+===
+            //stop transmission token (0b11111101)
+            //spec mandated byte gap
+
+id: final-busy-wait-ignored
+file: src/storage/sd_spi.c
+why: ignored result - a programming busy that outlives the budget is reported as OK
+---
+    //wait ready (NOTE: this is longer than the standard wait period)
+    if (!sd_spi_wait_ready_timeout(sd, 1000)) {
+===
+    //wait ready (NOTE: this is longer than the standard wait period)
+    if (!sd_spi_wait_ready_timeout(sd, 1000) && false) {
+
+id: inter-block-busy-wait-ignored
+file: src/storage/sd_spi.c
+why: ignored result - the next block is pushed into a card that is still programming
+---
+                //wait ready (NOTE: this is longer than the standard wait period)
+                if (!sd_spi_wait_ready_timeout(sd, 1000)) {
+===
+                //wait ready (NOTE: this is longer than the standard wait period)
+                if (!sd_spi_wait_ready_timeout(sd, 1000) && false) {
+
+id: multi-write-cmd12-dropped
+file: src/storage/sd_spi.c
+why: skipped recovery step - 7.3.3.1 requires CMD12 after a rejected block of CMD25
+---
+                    //data error token, stop transmission with cmd12 (according to spec)
+                    result = sd_spi_stop_transmission(sd);
+===
+                    //data error token, stop transmission with cmd12 (according to spec)
+                    result = BLOCK_DEVICE_RESULT_OK;
+
+id: multi-write-error-mapping-precedence
+file: src/storage/sd_spi.c
+why: operator precedence - the right operand is a non-zero constant, so a rejected block
+     whose CMD12 succeeded is reported as OK
+---
+                    if (result == BLOCK_DEVICE_RESULT_INVALID_DEVICE || result == BLOCK_DEVICE_RESULT_BUSY_TIMEOUT) {
+===
+                    if (result == BLOCK_DEVICE_RESULT_INVALID_DEVICE || BLOCK_DEVICE_RESULT_BUSY_TIMEOUT) {
+
+id: multi-write-unknown-token-accepted
+file: src/storage/sd_spi.c
+why: missing validation - any byte that is not a rejection is treated as acceptance
+---
+                if (!(token == 0b00000101)) {
+===
+                if (false) {
+
+id: single-write-unknown-token-accepted
+file: src/storage/sd_spi.c
+why: missing validation - any byte that is not a rejection is treated as acceptance
+---
+            }
+            if (!(token == 0b00000101)) {
+===
+            }
+            if (false) {
+
+id: multi-write-response-mask
+file: src/storage/sd_spi.c
+why: incorrect bit mask - the token's upper three bits are don't-care and real cards
+     drive them high
+---
+                token = sd_spi_transfer(sd, 0xFF) & 0x1F; //mask out upper three bits, from spec
+===
+                token = sd_spi_transfer(sd, 0xFF) & 0xFF; //mask out upper three bits, from spec
+
+id: multi-write-rejection-ignored
+file: src/storage/sd_spi.c
+why: delayed error recognition - a rejection falls into the unknown-token path with no CMD12
+---
+                if ((token == 0b00001011) || (token == 0b00001101)) { //data CRC or data write error
+===
+                if (false) { //data CRC or data write error
+
+id: single-write-rejection-ignored
+file: src/storage/sd_spi.c
+why: delayed error recognition - a rejection falls into the unknown-token path, which
+     releases the card without waiting out the busy a write error can be followed by
+---
+            }
+            if ((token == 0b00001011) || (token == 0b00001101)) { //data CRC or data write error
+===
+            }
+            if (false) { //data CRC or data write error
+
+id: write-payload-removal-check-dropped
+file: src/storage/sd_spi.c
+why: delayed cancellation - the whole block is clocked into an absent card before the
+     removal is noticed at the response byte
+---
+                    byte_counter++;
+                    if (sd_spi_removal_latched(sd)) {
+===
+                    byte_counter++;
+                    if (false) {
+
+id: write-sdsc-byte-address-dropped
+file: src/storage/sd_spi.c
+why: missing conversion - a standard-capacity card is given a block number where it
+     expects a byte address
+---
+    //adjust block address to byte address for sdsc cards
+    if (!sd->card_type_hcxc) {
+        first_lba *= 512U;
+    }
+
+    //assert chip select
+    sd_spi_capture_bus(sd);
+
+    //requested block count check to determine command
+    if (block_count > 1) {
+===
+    //assert chip select
+    sd_spi_capture_bus(sd);
+
+    //requested block count check to determine command
+    if (block_count > 1) {
+
+id: write-range-check-off-by-one
+file: src/storage/sd_spi.c
+why: off-by-one - the first comparison alone would admit first_lba == block_count
+equivalent: the second comparison (block_count > capacity - first_lba) rejects
+     first_lba == capacity for every block_count >= 1, and block_count == 0 is refused by
+     the wrapper and by the backend's own argument check before any frame is sent.
+---
+    if (first_lba >= sd->block_count || (uint64_t)block_count > sd->block_count - first_lba) {
+===
+    if (first_lba > sd->block_count || (uint64_t)block_count > sd->block_count - first_lba) {
