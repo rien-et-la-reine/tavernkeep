@@ -51,21 +51,45 @@ option(TAVERNKEEP_STDIO_RTT "Enable Pico SDK RTT stdio" ON)
 set(TAVERNKEEP_SOURCES
     src/main.c
     src/platform/board.c
+    src/platform/clock.c
     src/platform/debug.c
     src/platform/gpio_irq.c
+    src/storage/diskio.c
     src/storage/filesystem.c
     src/storage/sd_spi.c
     src/storage/sd_crc.c
 )
 
-add_executable(tavernkeep ${TAVERNKEEP_SOURCES})
+# FatFs, vendored under third_party/fatfs. Its own diskio.c is a stub and is
+# deliberately not compiled: src/storage/diskio.c implements the disk I/O
+# contract over the block-device interface. ffsystem.c is not needed at the
+# configured FF_USE_LFN (2) and FF_FS_REENTRANT (0); add it if either changes.
+# Configuration lives in third_party/fatfs/source/ffconf.h; the options changed
+# from upstream are listed in third_party/README.md.
+set(TAVERNKEEP_FATFS_SOURCES
+    third_party/fatfs/source/ff.c
+    third_party/fatfs/source/ffunicode.c
+)
+
+add_executable(tavernkeep ${TAVERNKEEP_SOURCES} ${TAVERNKEEP_FATFS_SOURCES})
 
 pico_set_program_name(tavernkeep "Tavernkeep")
 pico_set_program_version(tavernkeep "${PROJECT_VERSION}")
 
 target_include_directories(tavernkeep PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fatfs/source
 )
+
+# FF_USE_LFN=2 keeps each FatFs call's long-file-name working buffer
+# (~512 bytes) on the caller's stack, on top of FatFs's own frames, so the
+# SDK default of 2 KB is not enough. 4 KB is the most the default RP2350
+# memory map allows: memmap_default.ld places core 0's stack in the 4 KB
+# SCRATCH_Y bank (and core 1's in SCRATCH_X), and a larger value fails to
+# link with "region SCRATCH_Y overflowed". Going beyond this means a custom
+# linker script that puts the stack in main SRAM, which is also what a
+# core 1 decoder with a large stack will need; see docs/architecture.md.
+target_compile_definitions(tavernkeep PRIVATE PICO_STACK_SIZE=0x1000)
 
 target_link_libraries(tavernkeep PRIVATE
     pico_stdlib

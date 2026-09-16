@@ -110,7 +110,7 @@ The final physical control scheme has not yet been selected. Two rotary encoders
 
 USB mass-storage access to Tome's removable storage is a required feature.
 
-The detailed USB architecture, including coordination between local filesystem access and USB host access to the same storage medium, has not yet been defined.
+USB mass storage is an exclusive operating mode: while a USB host has the storage, no local reading or playback runs, and vice versa. Coordination with local filesystem access is therefore a mode transition, not concurrent sharing; see "Operating Modes and Storage Ownership". The USB class implementation itself has not yet been defined.
 
 **Power / System Operation**
 
@@ -228,9 +228,15 @@ Detailed buffering and concurrency behavior remain to be designed.
 
 **USB storage**
 
-USB mass-storage operation will expose Tome's removable storage to an attached USB host.
+USB mass-storage operation will expose Tome's removable storage to an attached USB host as raw blocks, write-through, with no local filesystem mounted for the duration:
 
-Ownership and coordination rules between USB mass storage and Tavernkeep's own filesystem access remain unresolved.
+USB host
+→ mass-storage class
+→ block-device interface
+→ physical SD transport
+→ SD card
+
+Ownership and coordination rules are defined under "Operating Modes and Storage Ownership".
 
 ## Resource Ownership
 
@@ -254,17 +260,43 @@ Future ownership rules will be required for:
 
 - shared buffers
 
-- logical removable-media availability and cancellation of storage consumers
-
 - display resources
 
 - audio buffers and peripherals
 
-- removable-storage ownership during USB mass-storage operation
-
 - switchable peripheral power domains
 
-These have not yet been assigned.
+These have not yet been assigned. Logical removable-media ownership, including during USB mass-storage operation, is assigned in the next section.
+
+## Operating Modes and Storage Ownership
+
+Tavernkeep runs in exactly one of three operating modes at a time:
+
+| Mode | Storage owner | Hard real-time work | Other work |
+| --- | --- | --- | --- |
+| Reader | filesystem layer (FatFs over the block device) | none; user-interface responsiveness only | input, display, storage |
+| Audio | filesystem layer, through the storage coordinator | keeping the I2S output fed | input, occasional display updates, storage, persistent-state writes at defined points |
+| USB mass storage | the USB mass-storage class, holding the bare block device | servicing the USB stack promptly | charging/status display only |
+
+Reading and playback never run concurrently. (Audiobook read-along, if ever implemented, would be the one exception and would be designed as a fourth mode rather than by relaxing this rule.) USB mass storage runs with every other function stopped: a plugged-in cable means either a host is using the storage or the device is in use while charging, never both. The consequence for the rest of the system is that **no mode ever has more than one hard-deadline domain**, which is what lets the cooperative execution model stand without an RTOS (see Concurrency).
+
+**Storage has one owner at a time.** The owner is the filesystem layer in reader and audio modes and the mass-storage class in USB mode. Higher layers obtain storage only through the filesystem; the `block_device_t` is held by the filesystem adapter and, in USB mode, by the mass-storage glue, and by nothing else. This is what makes ownership enforceable rather than conventional.
+
+**Every change of ownership is the same transition.** A card removal, entering USB mode, leaving USB mode, and a future mode switch all pass through one storage coordinator path that:
+
+1. cancels cooperative storage consumers and invalidates open handles, cached sectors and bookmarks in memory;
+2. flushes nothing to media that may be absent - persistent state is written at its defined save points before the transition, never during it;
+3. waits for any in-flight backend operation to unwind;
+4. unmounts or hands over the block device;
+5. on the way back, treats the medium as new: a fresh mount, no reuse of any cached state, because a USB host may have changed anything and a reinserted card may be a different card.
+
+From the filesystem layer's point of view, entering USB mode is indistinguishable from a removal and leaving it is indistinguishable from a reinsertion. The filesystem layer must therefore be written so that unmount is safe against an absent card and mount assumes a changed medium - not as if it will own the card for the lifetime of the firmware.
+
+**USB mode is write-through.** The mass-storage class maps host reads and writes directly onto block-device operations with no caching layer in between, so a host "synchronize cache" has nothing to flush. Block-device failure results map to the corresponding medium-not-present and write-error conditions. Hot removal during USB mode is handled by the same latch as everywhere else: every block operation fails, the class reports the medium gone, and the host ejects.
+
+**Persistent-state writes happen at named save points behind one function.** Bookmarks and settings are written when the user explicitly bookmarks and automatically at chapter transitions; nowhere else, and never from within the mode transition above. In reader mode the chapter transition coincides with a full display refresh, so the write is issued once the frame has been sent to the panels and completes during the panels' own refresh time, which is much longer than a typical write. In audio mode the same rule bounds when a card write - with its programming-busy budget - can stall the storage coordinator, which sizes the audio buffering. Before entering USB mode the pending state is written and the write is confirmed complete before the handover.
+
+**How USB mode is selected** - automatically on host enumeration, by prompt, or by menu - is an open product decision (`requirements.md`, OPEN-002). It decides whether reader or audio mode can be interrupted by a cable, in which case the interruption is one more caller of the ownership transition above.
 
 ## Removable-Media Detection and Hot Removal
 
@@ -346,7 +378,7 @@ The initial storage implementation intentionally uses polling rather than DMA.
 
 DMA is planned for bulk storage transfers after the polling implementation has been validated.
 
-Interrupt-driven or asynchronous operation will be introduced where required by later subsystems, but a complete system-wide execution and scheduling model has not yet been defined.
+Interrupt-driven or asynchronous operation will be introduced where required by later subsystems, but a complete system-wide execution and scheduling model has not yet been defined beyond the following rule: each core runs one cooperative loop of bounded-work steps, and no operating mode places more than one hard-deadline domain on a core (see "Operating Modes and Storage Ownership"). Audio is the only current domain with a hard deadline; its decoder is written as a bounded step reading compressed data from a ring the storage coordinator fills, so whether it runs in the core 0 loop or on the second core is a launch-time placement decision sized by measurement (chiefly the display driver's blocking time), not a structural one. The no-RTOS decision is to be re-evaluated if a mode ever needs two hard-deadline domains on one core, or if long operations start acquiring hand-written yield points.
 
 Audio playback is expected to impose stronger real-time data-flow requirements than the current storage work, but the mechanism by which audio, display updates, storage access, user input, and other work will coexist has not yet been selected.
 
