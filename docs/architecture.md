@@ -142,6 +142,8 @@ Current block-device result categories include:
 
 - I/O error
 
+- busy timeout (a card that stayed busy past the driver's declared budget; the device stays initialized so the operation can be retried)
+
 - invalid device
 
 - not implemented
@@ -152,15 +154,19 @@ INVALID_DEVICE represents the state in which no usable writable SD card is avail
 
 sd_spi_t contains both the fixed configuration required to communicate with an SD card and runtime state learned while communicating with the card.
 
-Static configuration includes the SPI peripheral and relevant GPIO configuration.
+Static configuration includes the SPI peripheral, the data rate after bring-up, the relevant GPIO assignments, and the sense of the card-detect switch (`card_detect_active_high`).
 
 Runtime state currently includes:
 
-- initialization state
+- whether the object has been configured, and initialization state
 
 - whether the card follows the legacy SD initialization path
 
 - whether the card uses SDHC/SDXC block addressing
+
+- the block count decoded from the CSD, which `get_info` reports without touching the bus
+
+- the atomic removal latch set by the card-detect interrupt
 
 Card type is maintained per device rather than globally.
 
@@ -262,11 +268,11 @@ These have not yet been assigned.
 
 **Availability signal and debounce**
 
-The final socket presents card-detect and write-protect information through one active-low availability signal. A low level means usable media may be present; a high level means the storage device must be treated as unavailable, whether the physical cause is card removal or write protection.
+The final socket presents card-detect and write-protect information through one availability signal. The sense of that signal is a property of the socket, not of the firmware: a switch that closes to ground when a card is present gives an active-low signal (low means usable media may be present), and one that closes to ground when the socket is empty gives an active-high one. The SPI backend takes the sense as configuration (`card_detect_active_high`), defaulting to active-low; the current development breakout is active-high. In either sense the pad is pulled up, so the switch's open state reads high and only the meaning of each level and the direction of the removal edge change. Whatever the physical cause - card removal or write protection - the "absent" level means the storage device must be treated as unavailable.
 
-The current SPI backend debounces its preliminary initialization check before touching the SD bus. It requires ten consecutive low samples taken one millisecond apart within a maximum of thirty samples. The pad's internal pull-up is selected before GPIO initialization enables the input buffer. The board-level external pull-up remains required to define the signal before firmware begins executing and while the RP2350 pad is still in its reset state.
+The SPI backend debounces its preliminary initialization check before touching the SD bus. It requires ten consecutive samples at the present level, taken one millisecond apart, within a maximum of thirty samples. The pad's internal pull-up is selected before GPIO initialization enables the input buffer. The board-level external pull-up remains required to define the signal before firmware begins executing and while the RP2350 pad is still in its reset state. After the interrupt is armed the level is read once more, so a card that went away between the debounce and the arming is refused rather than left with a latch nothing will set.
 
-A future hot-removal interrupt should use the rising edge rather than a continuously asserted high-level interrupt. The first edge must conservatively make storage unavailable immediately. Further events may be disabled while foreground code confirms a sustained high level, preventing mechanical contact bounce from producing an interrupt storm. A transaction interrupted by even an unconfirmed removal edge must fail and must not resume; if the signal settles low again, the card must be reinitialized before further access.
+The hot-removal interrupt is armed on the removal edge for the configured sense (rising for active-low, falling for active-high) rather than on a level. The first edge conservatively makes storage unavailable immediately and disables further edges until a fresh initialization, so mechanical contact bounce cannot produce an interrupt storm. A transaction interrupted by even an unconfirmed removal edge fails and does not resume; if the signal settles back to the present level, the card must be reinitialized before further access. The insertion edge is ignored.
 
 **Interrupt and foreground responsibilities**
 
@@ -290,7 +296,7 @@ Once removal is latched, new block operations must return INVALID_DEVICE without
 
 An interrupted read buffer is entirely invalid, regardless of how many bytes or blocks were transferred before removal. This follows the block-device contract that the requested destination contents are unspecified after any non-successful read. A late transfer-completion event must never change a cancelled request into success.
 
-Surprise removal is not a clean filesystem unmount. Higher layers must invalidate cached state and open handles without attempting to flush data to an absent card. Once write support exists, firmware can limit further damage but cannot guarantee that an interrupted write left either the filesystem or the card contents consistent.
+Surprise removal is not a clean filesystem unmount. Higher layers must invalidate cached state and open handles without attempting to flush data to an absent card. Firmware can limit further damage but cannot guarantee that an interrupted write left either the filesystem or the card contents consistent.
 
 Normal deinitialization and removal teardown have different semantics. Normal deinitialization may communicate with a present card and wait for it to become ready. Removal teardown must be idempotent, must not send SD commands or poll the absent card, and must release local hardware resources after the interrupted operation has stopped. If removal occurs during a multi-block transfer, no CMD12 is sent to the absent card.
 
@@ -330,9 +336,11 @@ Broader error-handling and recovery policy for other Tavernkeep subsystems remai
 
 Tavernkeep does not use an RTOS.
 
-Current SD communication is synchronous and blocking. Individual SPI transfers and SD commands complete in the caller's execution context.
+Current SD communication is synchronous and blocking. Individual SPI transfers and SD commands complete in the caller's execution context. The data CRC16 is computed one byte at a time as each payload byte leaves or enters the SPI peripheral; with the blocking per-byte transfer this costs throughput rather than hiding it, and a pipelined transfer loop is the future work that would recover it.
 
 The initial storage implementation intentionally uses polling rather than DMA.
+
+`src/main.c` is the demo of the highest layer that currently works, replaced as each layer lands: today it exercises the SD driver end to end and reports each step over RTT before falling into the heartbeat loop. The same `main.c` is compiled into a host test that runs it against the card model with the real driver and dispatcher underneath, so every demo is proven on the host before it is flashed and the host and hardware logs are directly comparable.
 
 DMA is planned for bulk storage transfers after the polling implementation has been validated.
 
@@ -431,9 +439,9 @@ Current development uses a Raspberry Pi Pico 2.
 
 The final Tome hardware uses a full-size SD card socket.
 
-Current development uses a microSD breakout accessed through SPI.
+Current development uses an Adafruit MicroSD card breakout board+ on a breadboard, accessed through SPI1. That breakout carries no pull-ups on any SD line, its 74AHC125 level shifter sits on DI, CLK and CS, and its socket's detect switch is active-high. Until the final board's discrete pull-ups exist, `main.c` enables the RP2350 internal pull-ups on DO and CS: the card leaves DO undriven until CMD0 moves it into SPI mode, and without a pull-up the driver's pre-command ready wait sees a floating line and reports BUSY_TIMEOUT before CMD0 is ever sent.
 
-The current SD implementation begins communication at approximately 400 kHz and increases SPI speed only after successful card initialization.
+The current SD implementation begins communication at approximately 400 kHz and increases SPI speed only after successful card initialization. 1 MHz is the only post-initialization rate demonstrated on hardware so far.
 
 Tome operates SD cards from a 3.3 V interface.
 
@@ -483,7 +491,7 @@ The current firmware architecture is incomplete because development is still con
 
 At the current stage:
 
-- only the SPI SD transport is being actively implemented
+- only the SPI SD transport exists; it is functionally complete against the block-device contract and has one real-card run at 1 MHz behind it
 
 - the planned 4-bit SD backend does not yet exist
 
