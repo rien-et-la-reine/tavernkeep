@@ -1,6 +1,7 @@
 # Third-party code
 
 External source dependencies belong here and should retain their upstream
-licenses. FatFs may later be added at `third_party/fatfs/`; it is intentionally
-not vendored by this scaffold.
+licenses. FatFs is vendored at `third_party/fatfs/` with its upstream license
+and documentation; it is not yet built by either CMake tree or adapted to the
+block-device interface.
 

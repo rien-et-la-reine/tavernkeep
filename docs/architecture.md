@@ -38,7 +38,7 @@ For example, SD-specific response values remain within the SD implementation whi
 
 The platform layer owns board-level initialization and low-level facilities shared by other Tavernkeep subsystems.
 
-Current scaffolded responsibilities include board support and debugging/logging support.
+Current responsibilities include board support, debugging/logging support, and the GPIO interrupt dispatcher that owns the Pico SDK's shared GPIO callback and routes edge events to registered subsystem handlers on the core that initialized it.
 
 The exact long-term boundary of this layer has not yet been finalized.
 
@@ -178,7 +178,7 @@ Interfaces between the filesystem, EPUB, display, input, audio, USB, and power-m
 
 ## Data Flow
 
-**Storage reads**
+**Storage reads/writes**
 
 The intended storage read path is:
 
@@ -195,6 +195,8 @@ The block-device layer operates in logical 512-byte blocks.
 For SDHC/SDXC cards, logical block addresses are transmitted directly to applicable SD commands.
 
 For SDSC cards, logical block addresses are converted to byte addresses before being sent to the card.
+
+Writes take the same path in reverse.
 
 **Book content**
 

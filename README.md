@@ -10,11 +10,11 @@ functional SPI SD card driver.
 Current status: bring-up firmware plus an SPI SD driver, with CRC checking. The
 firmware initializes Pico SDK stdio, prints a startup banner, runs a hardware
 demo/test suite, and then blinks the Pico 2 status LED when the selected board
-defines one, and owns a GPIO interrupt dispatcher. The SD backend implements card 
-detection with debounce, SDSC/SDHC/SDXC initialization, CSD capacity parsing, 
+defines one. The SD backend implements card detection with debounce, 
+SDSC/SDHC/SDXC initialization, CSD capacity parsing, 
 single- and multiple-block reads and writes with bounded timeouts, 
 latched hot-removal handling, and CRC checking for reads/writes and commands.
-The filesystem entry points still return not-implemented. and the driver has
+The filesystem entry points still return not-implemented. The driver has
 been hardware validated for an 8GB SDHC card at 1MHz.
 
 Planned work, none of which is implemented yet:
