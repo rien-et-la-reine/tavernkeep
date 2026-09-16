@@ -8,6 +8,13 @@ typedef struct spi_inst {
     unsigned int id;
 } spi_inst_t;
 
+/* The SDK's instance names. The fake keys nothing on the pointer; these exist
+ * so production code that says `spi0` compiles against the fake. */
+extern spi_inst_t pico_mock_spi0_instance;
+extern spi_inst_t pico_mock_spi1_instance;
+#define spi0 (&pico_mock_spi0_instance)
+#define spi1 (&pico_mock_spi1_instance)
+
 unsigned int spi_init(spi_inst_t *spi, unsigned int baudrate);
 void spi_deinit(spi_inst_t *spi);
 unsigned int spi_set_baudrate(spi_inst_t *spi, unsigned int baudrate);

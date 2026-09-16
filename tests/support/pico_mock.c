@@ -17,6 +17,8 @@ enum {
 };
 
 static bool gpio_levels[MOCK_PIN_COUNT];
+static pico_mock_sleep_hook_t sleep_hook;
+static void *sleep_hook_context;
 static bool gpio_pull_ups[MOCK_PIN_COUNT];
 static bool gpio_pulled_up_at_init[MOCK_PIN_COUNT];
 static bool gpio_initialized[MOCK_PIN_COUNT];
@@ -43,6 +45,7 @@ static size_t spi_tx_count;
 
 static unsigned int chip_select_pin;
 static unsigned int card_detect_pin;
+static bool card_detect_active_high;
 
 static bool scheduled_gpio_irq;
 static size_t scheduled_gpio_irq_transfer;
@@ -77,6 +80,8 @@ void pico_mock_reset(void)
     sim_clock_reset();
     sim_clock_set_mode(mode);
     sd_card_reset(NULL);
+    sleep_hook = NULL;
+    sleep_hook_context = NULL;
 
     memset(gpio_levels, 0, sizeof(gpio_levels));
     memset(gpio_pull_ups, 0, sizeof(gpio_pull_ups));
@@ -105,6 +110,7 @@ void pico_mock_reset(void)
 
     chip_select_pin = MOCK_PIN_COUNT;
     card_detect_pin = MOCK_PIN_COUNT;
+    card_detect_active_high = false;
     scheduled_gpio_irq = false;
     scheduled_gpio_irq_transfer = 0U;
     scheduled_gpio_irq_pin = 0U;
@@ -129,8 +135,11 @@ static uint8_t transfer_byte(uint8_t tx)
     if (sd_card_eject_requested()) {
         sd_card_clear_eject_request();
         if (valid_pin(card_detect_pin)) {
-            gpio_levels[card_detect_pin] = true;
-            (void)pico_mock_gpio_irq_fire(card_detect_pin, GPIO_IRQ_EDGE_RISE);
+            /* Removal takes the line to its "absent" level for the configured
+             * sense and fires the matching edge. */
+            gpio_levels[card_detect_pin] = !card_detect_active_high;
+            (void)pico_mock_gpio_irq_fire(card_detect_pin,
+                card_detect_active_high ? GPIO_IRQ_EDGE_FALL : GPIO_IRQ_EDGE_RISE);
         }
     }
 
@@ -259,10 +268,22 @@ bool time_reached(absolute_time_t target)
     return sim_clock_time_reached(target);
 }
 
+void pico_mock_set_sleep_hook(pico_mock_sleep_hook_t hook, void *context)
+{
+    sleep_hook = hook;
+    sleep_hook_context = context;
+}
+
 void sleep_ms(uint32_t milliseconds)
 {
     sim_clock_sleep_ms(milliseconds);
+    if (sleep_hook != NULL) {
+        sleep_hook(milliseconds, sleep_hook_context);
+    }
 }
+
+spi_inst_t pico_mock_spi0_instance = { 0U };
+spi_inst_t pico_mock_spi1_instance = { 1U };
 
 /* -------------------------------------------------------------- queries */
 
@@ -374,6 +395,16 @@ void pico_mock_sd_use_chip_select(unsigned int pin)
 void pico_mock_sd_use_card_detect(unsigned int pin)
 {
     card_detect_pin = pin;
+}
+
+void pico_mock_sd_set_card_detect_active_high(bool active_high)
+{
+    card_detect_active_high = active_high;
+}
+
+bool pico_mock_sd_card_detect_active_high(void)
+{
+    return card_detect_active_high;
 }
 
 bool pico_mock_spi_tx_chip_select_high(size_t index)

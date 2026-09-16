@@ -392,4 +392,19 @@ Not reproduced failures; scope and unfinished work.
   PIO and DMA cancellation, and low-power operation are not implemented.
 - Host fakes cannot validate physical SPI completion, GPIO pad state,
   electrical removal, RP2350 errata, multicore memory ordering or real card
-  compatibility. See RESIDUAL_RISK.md.
+  compatibility. See RESIDUAL_RISK.md. One real-card run exists
+  (VALIDATION_RESULTS.md, 2026-09-15).
+- **The pre-command ready wait runs before CMD0, where it cannot mean
+  "busy".** `sd_spi_command()` waits up to 500 ms for `0xFF` on MISO before
+  every frame. Before CMD0 the card is still in SD native mode and leaves
+  DAT0 undriven, so on a board with no pull-up on DO the line floats and
+  `init` fails with `BUSY_TIMEOUT` without ever sending CMD0 - a misleading
+  signature, met on the first hardware run. The specification's bring-up is
+  74+ clocks with CS high, then CS low and CMD0; no ready wait is defined
+  before it. Three ways to settle it, not yet chosen: skip the wait for CMD0;
+  have `init` enable the RP2350 pull-up on `pin_controller_in` so the idle
+  level is defined regardless of the board (the spec puts the DAT0 pull-up on
+  the host, and an external resistor may still be stronger); or leave it to
+  the board and document the signature. The host model always answers `0xFF`
+  when idle, so no host test sees this; a test would need the SPI fake to
+  return an undriven-line value before CMD0 and pin whichever choice is made.

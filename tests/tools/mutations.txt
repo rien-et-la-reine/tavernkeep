@@ -1037,3 +1037,55 @@ equivalent: the second comparison (block_count > capacity - first_lba) rejects
     if (first_lba >= sd->block_count || (uint64_t)block_count > sd->block_count - first_lba) {
 ===
     if (first_lba > sd->block_count || (uint64_t)block_count > sd->block_count - first_lba) {
+
+id: card-detect-debounce-ignores-sense
+file: src/storage/sd_spi.c
+why: hard-coded polarity - the presence debounce treats low as present regardless of
+     card_detect_active_high, so an active-high socket reads as empty
+---
+        if (gpio_get(sd->config.pin_card_available) == sd_spi_card_present_level(sd)) {
+===
+        if (!gpio_get(sd->config.pin_card_available)) {
+
+id: card-detect-recheck-ignores-sense
+file: src/storage/sd_spi.c
+why: hard-coded polarity - the level re-check after arming the interrupt treats high as
+     absent regardless of the configured sense
+---
+    const bool card_unavailable =
+        gpio_get(sd->config.pin_card_available) != sd_spi_card_present_level(sd);
+===
+    const bool card_unavailable = gpio_get(sd->config.pin_card_available);
+
+id: card-detect-armed-edge-ignores-sense
+file: src/storage/sd_spi.c
+why: hard-coded polarity - the removal interrupt is always armed on the rising edge, so
+     an active-high socket's removal (falling) never latches and an insertion would
+---
+            sd->config.pin_card_available,
+            sd_spi_card_removal_edge(sd),
+            sd_spi_card_available_irq,
+===
+            sd->config.pin_card_available,
+            GPIO_IRQ_EDGE_RISE,
+            sd_spi_card_available_irq,
+
+id: card-detect-callback-edge-ignores-sense
+file: src/storage/sd_spi.c
+why: hard-coded polarity - the callback only latches on a rising edge, so with an
+     active-high socket the armed falling edge is delivered and ignored
+---
+            || (events & sd_spi_card_removal_edge(sd)) == 0U) {
+===
+            || (events & GPIO_IRQ_EDGE_RISE) == 0U) {
+
+id: card-detect-pull-removed
+file: src/storage/sd_spi.c
+why: missing pull - with no pull-up the open switch floats, so the detect line is
+     undefined in the "open" state of either sense (present for active-high, absent
+     for active-low)
+---
+    gpio_pull_up(sd->config.pin_card_available);
+    //setup the card detect/write protect pin
+===
+    //setup the card detect/write protect pin

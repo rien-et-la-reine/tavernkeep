@@ -48,6 +48,30 @@ void sd_fx_begin(sd_fixture_t *fx, const sd_card_desc_t *desc);
 block_device_result_t sd_fx_init(sd_fixture_t *fx);
 bool sd_fx_require_init(sd_fixture_t *fx, const sd_card_desc_t *desc);
 
+/* ------------------------------------------------- card-detect polarity */
+
+/* Sense of the card-detect line for every fixture begun after this call:
+ * false (the default) is the active-low switch the driver assumes for a
+ * zeroed config, true is a switch that closes to ground when the socket is
+ * empty. sd_fx_begin() wires the driver config, the SPI fake's eject path and
+ * the initial "present" level to match, so a suite can be run under both
+ * senses from one source. Suites that take --card-detect=active-high call
+ * this from main(). */
+void sd_fx_set_card_detect_active_high(bool active_high);
+bool sd_fx_card_detect_active_high(void);
+/* Drive the line to the level that means present/absent for the current
+ * sense. Does not fire an edge. */
+void sd_fx_set_card_present(bool present);
+/* The edge that means removal for the current sense. */
+uint32_t sd_fx_removal_edge(void);
+/* Drive the line to absent and fire the removal edge, as a real removal
+ * would. Returns whether the edge was delivered (false when the driver has
+ * no handler armed). */
+bool sd_fx_remove_card(void);
+/* Parse one --card-detect=<active-low|active-high> argument for suites that
+ * run under both senses. Returns false for an unrecognised argument. */
+bool sd_fx_parse_card_detect_arg(const char *arg);
+
 /* ------------------------------------------------------ guarded buffers */
 
 typedef struct {

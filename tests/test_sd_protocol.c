@@ -338,7 +338,7 @@ static void test_high_capacity_card_needs_hcs_to_leave_idle(void)
     sd_card_reset(&desc);
     sd_card_set_response_policy(SD_RESPONSE_MODELLED);
     pico_mock_sd_use_chip_select(SD_FX_PIN_CS);
-    pico_mock_gpio_set_input(SD_FX_PIN_CARD_DETECT, false);
+    sd_fx_set_card_present(true);
 
     const uint64_t start_us = pico_mock_now_us();
     T_EQ_RESULT(BLOCK_DEVICE_RESULT_IO_ERROR, sd_fx_init(&fx));
@@ -1112,10 +1112,8 @@ static void test_get_info_after_removal_is_rejected(void)
     memset(&info, 0xEEU, sizeof(info));
     memset(&untouched, 0xEEU, sizeof(untouched));
 
-    /* Card-detect is active low: the line going high is the removal edge. */
-    pico_mock_gpio_set_input(SD_FX_PIN_CARD_DETECT, true);
-    T_CHECK(pico_mock_gpio_irq_fire(SD_FX_PIN_CARD_DETECT,
-        GPIO_IRQ_EDGE_RISE));
+    /* The line goes to its absent level and the removal edge fires. */
+    T_CHECK(sd_fx_remove_card());
 
     const size_t bytes_before = pico_mock_spi_transfer_count();
     T_EQ_RESULT(BLOCK_DEVICE_RESULT_INVALID_DEVICE,

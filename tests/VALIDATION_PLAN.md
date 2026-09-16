@@ -21,7 +21,7 @@ storage work. Requirements/architecture describe intentions, not proof.
 | GPIO dispatcher | One SDK callback on the owning core, per-pin handlers and masks | Validation, wrong-core operations, two GPIO users, callback filtering/self-removal and nested critical sections; real SD integration |
 | Block-device API | Validation and backend dispatch | Every wrapper and missing callback; context/buffer/LBA/count forwarding including 64-bit extremes; all eight result categories |
 | SD SPI | Debounced active-low availability; rollback; legacy/v2 initialization; CSD v1/v2 capacity; single/multiple 512-byte reads; bounded waits; removal latch and cleanup | Four suites against a stateful card model: card-variant matrix, command ordering, CRC7 and application-command enforcement, the R1 poll boundary, all 128 R1 values, all 15 error tokens with immediacy bounds, multiple-block reads of arbitrary length, addressing and capacity boundaries, CSD registers from real cards, phase-based fault injection with recovery assertions, and seeded property and fuzz tests |
-| SD info/writes | Public info from the cached CSD; CMD24/CMD25 writes with byte addressing, CRC16, data-response decoding, programming busy, stop-tran and CMD12 recovery | `sd_writes_host_tests` against the card model: data read back out of the model on every card kind, token and timing-gap rules, rejections and unknown bytes, busy bounds and `BUSY_TIMEOUT`, removal at every phase, a no-false-success fault sweep. Host evidence only; no real-card write has been captured |
+| SD info/writes | Public info from the cached CSD; CMD24/CMD25 writes with byte addressing, CRC16, data-response decoding, programming busy, stop-tran and CMD12 recovery | `sd_writes_host_tests` against the card model: data read back out of the model on every card kind, token and timing-gap rules, rejections and unknown bytes, busy bounds and `BUSY_TIMEOUT`, removal at every phase, a no-false-success fault sweep. One real-card run at 1 MHz: CMD24 and five CMD25 transfers accepted with CRC checking on and read back byte-for-byte (VALIDATION_RESULTS.md, 2026-09-15); no bus capture yet |
 | Filesystem | Prepare/bind state; mount/unmount stubs | Validation, state preservation, rebinding, repeat stub calls and no backend invocation |
 | Other product subsystems | Planned | Acceptance matrix below; no passing feature placeholders |
 
@@ -42,8 +42,10 @@ machine-instruction races or of multicore execution.
 The two disabled regressions in [KNOWN_GAPS.md](KNOWN_GAPS.md) are failed
 contract evidence and must accompany any report of a passing enabled suite.
 Read data CRC validation is implemented and host-tested for CMD17/CMD18 and
-for the CSD register; no real card has yet been read with checking on. Writes are implemented and host-tested; the real-card evidence in
-the FR-009 row below is still outstanding.
+for the CSD register. Bring-up, CRC-checked reads and single and
+multiple-block writes were exercised once on a real 8 GB SDHC card at 1 MHz
+(VALIDATION_RESULTS.md, 2026-09-15). The FR-009 row below still lacks the
+higher-rate captures, hot-removal and SDSC evidence.
 
 ## Future acceptance matrix
 

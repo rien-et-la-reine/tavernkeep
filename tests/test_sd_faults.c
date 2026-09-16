@@ -8,6 +8,7 @@
  * permanently unusable would pass a return-code-only suite.
  */
 #include <inttypes.h>
+#include <stdatomic.h>
 #include <string.h>
 
 #include "hardware/gpio.h"
@@ -540,11 +541,11 @@ static void test_reinsertion_requires_fresh_initialization(void)
         block_device_read_blocks(fx.device, 0U, sd_fx_guard_data(&buffer), 1U));
     T_CHECK(sd_fx_check_removed_and_teardown_once(&fx) == NULL);
 
-    /* Media comes back: the availability line goes low again. */
+    /* Media comes back: the availability line returns to its present level. */
     sd_card_clear_faults();
     sd_card_reset(&desc);
     sd_card_set_response_policy(SD_RESPONSE_MODELLED);
-    pico_mock_gpio_set_input(SD_FX_PIN_CARD_DETECT, false);
+    sd_fx_set_card_present(true);
 
     T_EQ_RESULT(BLOCK_DEVICE_RESULT_OK, block_device_init(fx.device));
     T_CHECK(!atomic_load(&fx.sd.removal_latched));
@@ -715,10 +716,125 @@ static void test_read_data_crc_mismatch_stops_the_stream_only_once(void)
     T_CHECK(sd_fx_check_recovers(&fx, 20U) == NULL);
 }
 
+/* ---------------------------------------------- card-detect polarity */
+
+/*
+ * The card-detect line's sense is a configuration choice: an active-low
+ * socket switch closes to ground when a card is present (the default for a
+ * zeroed config), an active-high one closes to ground when the socket is
+ * empty. Both are run here from one description of the contract, so a driver
+ * that inverts one read but not another, or the debounce but not the edge,
+ * cannot pass. Every read of the line in the driver is exercised: the
+ * debounce, the level check after the interrupt is armed, the registered
+ * edge, and the callback's edge filter.
+ *
+ * This case sets the polarity itself and restores the suite's setting, so it
+ * checks both senses regardless of which one the executable was launched
+ * under.
+ */
+static void check_card_detect_sense(bool active_high)
+{
+    const char *const sense = active_high ? "active-high" : "active-low";
+    const uint32_t removal = active_high ? GPIO_IRQ_EDGE_FALL : GPIO_IRQ_EDGE_RISE;
+    const uint32_t insertion = active_high ? GPIO_IRQ_EDGE_RISE : GPIO_IRQ_EDGE_FALL;
+    sd_fx_set_card_detect_active_high(active_high);
+
+    /* 1. The absent level is refused before the bus is touched, and the pull
+     *    is a pull-up in both senses. */
+    {
+        sd_fixture_t fx;
+        sd_card_desc_t desc = sd_fx_card_sdhc();
+        t_context("%s: line at the absent level", sense);
+        sd_fx_begin(&fx, &desc);
+        sd_fx_set_card_present(false);
+        T_EQ_RESULT(BLOCK_DEVICE_RESULT_INVALID_DEVICE, sd_fx_init(&fx));
+        T_CHECK(!pico_mock_spi_is_initialized());
+        T_EQ_U(0U, pico_mock_spi_transfer_count());
+        T_CHECK(pico_mock_gpio_was_pulled_up_at_init(SD_FX_PIN_CARD_DETECT));
+        T_CHECK(!pico_mock_gpio_irq_is_registered(SD_FX_PIN_CARD_DETECT));
+    }
+
+    /* 2. The present level brings the card up, and the interrupt is armed on
+     *    the removal edge for this sense only. */
+    {
+        sd_fixture_t fx;
+        sd_card_desc_t desc = sd_fx_card_sdhc();
+        t_context("%s: line at the present level", sense);
+        T_CHECK(sd_fx_require_init(&fx, &desc));
+        T_CHECK(pico_mock_gpio_was_pulled_up_at_init(SD_FX_PIN_CARD_DETECT));
+        T_CHECK(pico_mock_gpio_irq_is_registered(SD_FX_PIN_CARD_DETECT));
+        T_EQ_U(removal, pico_mock_gpio_irq_events(SD_FX_PIN_CARD_DETECT));
+
+        /* 3. The insertion edge (a bounce back towards present, or the wrong
+         *    sense compiled in) must not be taken as a removal. */
+        t_context("%s: insertion edge is not a removal", sense);
+        const bool delivered = pico_mock_gpio_irq_fire(SD_FX_PIN_CARD_DETECT, insertion);
+        T_CHECK(!delivered || !atomic_load(&fx.sd.removal_latched));
+        T_CHECK(!atomic_load(&fx.sd.removal_latched));
+        sd_guarded_buffer_t buffer;
+        sd_fx_guard_init(&buffer, 1U);
+        T_EQ_RESULT(BLOCK_DEVICE_RESULT_OK, block_device_read_blocks(
+            fx.device, 3U, sd_fx_guard_data(&buffer), 1U));
+        T_CHECK(sd_fx_guard_matches_card(&buffer, 3U));
+
+        /* 4. The removal edge latches, and everything after it is refused
+         *    with exactly one teardown. */
+        t_context("%s: removal edge latches", sense);
+        T_CHECK(sd_fx_remove_card());
+        T_CHECK(atomic_load(&fx.sd.removal_latched));
+        const char *problem = sd_fx_check_removed_and_teardown_once(&fx);
+        if (problem != NULL) {
+            t_context("%s: %s", sense, problem);
+        }
+        T_CHECK(problem == NULL);
+    }
+
+    /* 5. The line reads present through the debounce and then absent by the
+     *    time the level is re-checked after arming: the card went away in
+     *    the gap, and bring-up must fail rather than proceed with a latch
+     *    that nothing will ever set. Ten present samples satisfy the
+     *    debounce; the eleventh read is the post-arming check. */
+    {
+        sd_fixture_t fx;
+        sd_card_desc_t desc = sd_fx_card_sdhc();
+        t_context("%s: removed between debounce and arming", sense);
+        sd_fx_begin(&fx, &desc);
+        bool samples[11];
+        for (size_t i = 0U; i < 10U; ++i) {
+            samples[i] = active_high;      /* present */
+        }
+        samples[10] = !active_high;        /* absent */
+        T_CHECK(pico_mock_gpio_set_input_sequence(
+            SD_FX_PIN_CARD_DETECT, samples, 11U));
+        T_EQ_RESULT(BLOCK_DEVICE_RESULT_INVALID_DEVICE, sd_fx_init(&fx));
+        T_CHECK(!pico_mock_spi_is_initialized());
+        T_CHECK(!pico_mock_gpio_irq_is_registered(SD_FX_PIN_CARD_DETECT));
+    }
+}
+
+static void test_card_detect_polarity(void)
+{
+    const bool suite_setting = sd_fx_card_detect_active_high();
+    check_card_detect_sense(false);
+    check_card_detect_sense(true);
+    sd_fx_set_card_detect_active_high(suite_setting);
+    t_clear_context();
+}
+
 /* --------------------------------------------------------------- main */
 
-int main(void)
+int main(int argc, char **argv)
 {
+    for (int i = 1; i < argc; ++i) {
+        if (!sd_fx_parse_card_detect_arg(argv[i])) {
+            (void)fprintf(stderr,
+                "usage: %s [--card-detect=active-low|active-high]\n", argv[0]);
+            return 2;
+        }
+    }
+    (void)printf("sd_faults: card detect %s\n",
+        sd_fx_card_detect_active_high() ? "active-high" : "active-low");
+
     t_run(test_single_block_fault_sweep, "fault sweep across single-block read phases");
     t_run(test_multi_block_fault_sweep, "fault sweep across multi-block read phases");
     t_run(test_failure_after_partial_success, "error after N good blocks of a stream");
@@ -729,6 +845,8 @@ int main(void)
     t_run(test_removal_during_the_release_clock, "removal during the release clock cancels success");
     t_run(test_ocr_reports_card_still_powering_up, "OCR power-up status is checked");
     t_run(test_reinsertion_requires_fresh_initialization, "reinsertion needs a fresh init");
+    t_run(test_card_detect_polarity,
+        "card-detect sense: level, edge and bounce under both polarities");
     t_run(test_read_data_crc_is_validated, "read data CRC is validated on CMD17 and CMD18");
     t_run(test_read_data_crc_mismatch_stops_the_stream_only_once,
         "a mid-stream CRC mismatch is aborted with exactly one CMD12");

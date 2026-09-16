@@ -107,6 +107,12 @@ add_host_test(sd_faults_host_tests test_sd_faults.c
     ${TAVERNKEEP_HARNESS_SOURCES} ${TAVERNKEEP_FIXTURE_SOURCES}
     ../src/storage/sd_spi.c
     ../src/storage/sd_crc.c)
+# The card-detect line's sense is configurable (sd_spi_config_t
+# .card_detect_active_high). The default run above is the active-low switch;
+# this run is the active-high one, so every removal case in the suite is
+# exercised under both senses.
+add_test(NAME sd_faults_active_high_host_tests
+    COMMAND sd_faults_host_tests --card-detect=active-high)
 
 # The write path: CMD24/CMD25 against the card model, which validates the
 # data CRC16, the start-block token each command requires, the N_WR idle byte
@@ -117,6 +123,8 @@ add_host_test(sd_writes_host_tests test_sd_writes.c
     ${TAVERNKEEP_HARNESS_SOURCES} ${TAVERNKEEP_FIXTURE_SOURCES}
     ../src/storage/sd_spi.c
     ../src/storage/sd_crc.c)
+add_test(NAME sd_writes_active_high_host_tests
+    COMMAND sd_writes_host_tests --card-detect=active-high)
 
 add_executable(sd_property_host_tests test_sd_property.c
     support/gpio_irq_mock.c
@@ -178,7 +186,15 @@ add_host_test(sd_irq_integration_host_tests test_sd_irq_integration.c
     support/gpio_irq_integration_bridge.c
     ../src/storage/sd_spi.c ../src/storage/sd_crc.c ../src/platform/gpio_irq.c)
 
-add_host_test(main_host_tests test_main.c support/main_under_test.c)
+# The firmware entry point against the card model: main.c runs with the real
+# SD driver, CRC helpers and GPIO dispatcher underneath it, so whatever demo
+# main.c currently carries is exercised on the host before it is flashed. Only
+# the SDK, the board and the debug sink are faked. See test_main.c for the
+# contract a demo has to meet.
+add_host_test(main_host_tests test_main.c support/main_under_test.c
+    ${TAVERNKEEP_HARNESS_SOURCES} support/gpio_irq_hardware_mock.c
+    support/gpio_irq_integration_bridge.c
+    ../src/storage/sd_spi.c ../src/storage/sd_crc.c ../src/platform/gpio_irq.c)
 foreach(mode IN ITEMS no-led debug-failure irq-failure)
     add_test(NAME main_${mode}_host_tests COMMAND main_host_tests ${mode})
 endforeach()

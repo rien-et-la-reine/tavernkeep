@@ -18,6 +18,13 @@ typedef struct {
     uint8_t pin_chip_select;
 
     uint8_t pin_card_available;
+    /* Sense of the card-available line. false (the default for a zeroed
+     * config): the socket switch closes to ground when a card is present, so
+     * low means present and a rising edge is a removal. true: the switch
+     * closes to ground when the socket is empty, so high means present and a
+     * falling edge is a removal. The line is pulled up in both cases; only the
+     * level that means "present" and the edge that means "removed" change. */
+    bool card_detect_active_high;
 } sd_spi_config_t;
 
 /* Caller-owned state; must be zero-initialized before first sd_spi_configure(). */

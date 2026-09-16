@@ -28,6 +28,8 @@ tests/
                               busy, rejections, removal, a write fault sweep
   test_sd_property.c          property and fuzz tests (seeded)
   test_sd_gaps.c              regressions for gaps that are still open
+  test_main.c                 src/main.c on the host: the current demo run
+                              against the card model, contract in the header
   tools/mutate.py             mutation harness
   tools/mutations.txt         the mutation catalogue
   tools/run_diagnostics.sh    sanitizers, strict warnings, coverage, mutation
@@ -272,9 +274,28 @@ the test instead, or move the behaviour into KNOWN_GAPS.md.
    around it.
 6. **Coverage numbers are per target and must not be summed.** `gcov`
    overwrites reports that share a basename.
-7. **A green default run does not mean there are no known gaps.** Four
-   regressions are registered and disabled, three of them still failing; see
+7. **A green default run does not mean there are no known gaps.** Three
+   regressions are registered and disabled, two of them still failing; see
    [KNOWN_GAPS.md](KNOWN_GAPS.md).
+8. **Never hard-code the card-detect level or edge in a test.** The driver's
+   sense is configurable and the fixture runs under both; use
+   `sd_fx_set_card_present()` and `sd_fx_remove_card()` (or
+   `sd_fx_removal_edge()`), and the model's `SD_FAULT_EJECT` follows the
+   configured sense on its own. A test that writes `set_input(pin, true)` or
+   fires `GPIO_IRQ_EDGE_RISE` directly is correct under one sense only. The
+   legacy scripted suite (`test_sd_spi.c`) and the integration executable
+   still do this deliberately and run only under the default active-low sense.
+9. **`main.c` is a demo that ratchets upward, and `test_main.c` is how each
+   step runs on the host first.** The test links the real driver and
+   dispatcher under `main()` with the card model behind them, captures every
+   `debug_log()` line, and asserts only the contract in its header: result
+   lines are `PASS `/`FAIL `, no `FAIL` against the model, the loop is
+   reached, the bus is released, no protocol error. It does not assert the
+   order or number of startup calls, so replacing the demo does not mean
+   rewriting the test - only its chip-select and card-detect pin constants
+   have to match the demo's `sd_spi_config_t`. A demo on the wrong
+   chip-select pin is diagnosed explicitly, because the SPI fake treats an
+   undriven pin as selected and would otherwise let it pass.
 
 ## Adding a test: the short version
 

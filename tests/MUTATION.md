@@ -57,6 +57,24 @@ correctly refused to run. The budgets were settled on 2026-09-11 (500 ms before
 a command, 250 ms elsewhere; PROTOCOL.md P-16), the tests updated, and the
 catalogue re-run in full - see "Result, 2026-09-11" below.
 
+## Card-detect polarity, 2026-09-15
+
+`card_detect_active_high` touches four reads of the detect line in
+`sd_spi.c` plus the pull selection. One record per touch point restores the
+old hard-coded form; each was confirmed by hand against `sd_faults_host_tests`
+under both `--card-detect` senses (not a full catalogue run). Every one is
+killed in *both* runs, because `test_card_detect_polarity` sets each sense
+itself; the active-high run additionally kills the first two through every
+removal case in the suite.
+
+| Mutation | Class | Confirmed against |
+| --- | --- | --- |
+| `card-detect-debounce-ignores-sense` | hard-coded polarity | active-low 1 check, active-high 25 checks |
+| `card-detect-recheck-ignores-sense` | hard-coded polarity | active-low 1 check, active-high 25 checks |
+| `card-detect-armed-edge-ignores-sense` | hard-coded polarity | active-low 1 check, active-high 4 checks |
+| `card-detect-callback-edge-ignores-sense` | hard-coded polarity | active-low 1 check, active-high 4 checks |
+| `card-detect-pull-removed` | missing pull | 2 checks under each sense |
+
 ## Read data CRC, 2026-09-12
 
 Read CRC validation changed the text of `sd_spi_device_read_blocks()`, which

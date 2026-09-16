@@ -49,6 +49,14 @@ static bool sd_spi_is_data_error_token(uint8_t token) {
     return (token & 0xF0U) == 0U
         && (token & 0x0FU) != 0U;
 }
+//the level the card-available line reads when a card is present, per the configured sense
+static bool sd_spi_card_present_level(const sd_spi_t *sd) {
+    return sd->config.card_detect_active_high;
+}
+//the edge on the card-available line that means the card was removed, per the configured sense
+static uint32_t sd_spi_card_removal_edge(const sd_spi_t *sd) {
+    return sd->config.card_detect_active_high ? GPIO_IRQ_EDGE_FALL : GPIO_IRQ_EDGE_RISE;
+}
 static block_device_result_t sd_spi_device_init(void *context);
 static block_device_result_t sd_spi_device_deinit(void *context);
 static block_device_result_t sd_spi_device_read_blocks(
@@ -120,6 +128,8 @@ static block_device_result_t sd_spi_device_init(void *context)
     sd->block_count = 0U;
 
     //select the pull-up before gpio_init enables the input buffer on RP2350
+    //the pull-up is correct for both senses of the switch: in each case the open state must read high,
+    //only which state means "present" differs (card_detect_active_high)
     gpio_pull_up(sd->config.pin_card_available);
     //setup the card detect/write protect pin (again, validate hardware slot's truth table to ensure WP can serve both functions)
     gpio_init(sd->config.pin_card_available);
@@ -133,10 +143,10 @@ static block_device_result_t sd_spi_device_init(void *context)
     //clear the latch
     atomic_store_explicit(&sd->removal_latched, false, memory_order_relaxed);
 
-    //register the rising edge interrupt
+    //register the removal edge interrupt (rising for an active-low switch, falling for active-high)
     if (!platform_gpio_irq_register(
             sd->config.pin_card_available,
-            GPIO_IRQ_EDGE_RISE,
+            sd_spi_card_removal_edge(sd),
             sd_spi_card_available_irq,
             sd)) {
         gpio_deinit(sd->config.pin_card_available);
@@ -145,7 +155,8 @@ static block_device_result_t sd_spi_device_init(void *context)
 
     //handle removal after the debounced presence check but before registration;
     //the latch also catches an edge that bounced low before this level check
-    const bool card_unavailable = gpio_get(sd->config.pin_card_available);
+    const bool card_unavailable =
+        gpio_get(sd->config.pin_card_available) != sd_spi_card_present_level(sd);
     if (card_unavailable) {
         atomic_store_explicit(&sd->removal_latched, true, memory_order_relaxed);
     }
@@ -997,7 +1008,7 @@ static bool sd_spi_card_available(const sd_spi_t *sd)
 
     for (uint8_t sample = 0U;
             sample < SD_SPI_CARD_DETECT_MAX_SAMPLES; ++sample) {
-        if (!gpio_get(sd->config.pin_card_available)) {
+        if (gpio_get(sd->config.pin_card_available) == sd_spi_card_present_level(sd)) {
             stable_samples++;
             if (stable_samples == SD_SPI_CARD_DETECT_STABLE_SAMPLES) {
                 return true;
@@ -1022,10 +1033,10 @@ static void sd_spi_card_available_irq(
     //pull the sd card object
     sd_spi_t *const sd = context;
 
-    //if sd card object does not exist, the triggering gpio is not it's card detect/write protect pin, or the triggering event was not a rising edge, do nothing
+    //if sd card object does not exist, the triggering gpio is not it's card detect/write protect pin, or the triggering event was not the removal edge for the configured sense, do nothing
     if (sd == NULL
             || gpio != sd->config.pin_card_available
-            || (events & GPIO_IRQ_EDGE_RISE) == 0U) {
+            || (events & sd_spi_card_removal_edge(sd)) == 0U) {
         return;
     }
 

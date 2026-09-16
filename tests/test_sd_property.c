@@ -517,10 +517,8 @@ static void test_random_operation_sequences(void)
                 initialized = false;
                 irq_armed = false; /* teardown unregisters the handler */
             } else if (action == 3U) { /* removal edge */
-                pico_mock_gpio_set_input(SD_FX_PIN_CARD_DETECT, true);
                 media_present = false;
-                const bool fired = pico_mock_gpio_irq_fire(
-                    SD_FX_PIN_CARD_DETECT, GPIO_IRQ_EDGE_RISE);
+                const bool fired = sd_fx_remove_card();
                 T_EQ_U(irq_armed ? 1U : 0U, fired ? 1U : 0U);
                 if (fired) {
                     latched = true;
@@ -532,7 +530,7 @@ static void test_random_operation_sequences(void)
                     pico_mock_gpio_irq_is_enabled(SD_FX_PIN_CARD_DETECT)
                         ? 1U : 0U);
             } else { /* reinsertion */
-                pico_mock_gpio_set_input(SD_FX_PIN_CARD_DETECT, false);
+                sd_fx_set_card_present(true);
                 sd_card_reset(&desc);
                 sd_card_set_response_policy(SD_RESPONSE_MODELLED);
                 media_present = true;

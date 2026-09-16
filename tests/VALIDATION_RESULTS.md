@@ -1,7 +1,8 @@
 # Host validation record
 
-Runs are recorded oldest first. The 2026-09-05 record below is the original; a
-later run is appended at the end.
+Runs are recorded oldest first. The 2026-09-05 record below is the original;
+later runs are appended at the end. The 2026-09-15 record is the first with
+hardware evidence.
 
 ## Run of 2026-09-05
 
@@ -187,3 +188,96 @@ see [MUTATION.md](MUTATION.md). The green baseline a full run needs now exists.
 
 No Pico SDK cross-build, no target flashing, no physical card test, no bus
 capture, no hardware validation of any kind.
+
+## Run of 2026-09-15 — first hardware run: SD driver demo on a real card
+
+The first time any of this firmware ran against a physical card. The demo in
+`src/main.c` (also run on the host by `main_host_tests`, see below) reported
+15 of 15 steps `PASS` over RTT.
+
+### Setup
+
+- Raspberry Pi Pico 2 (RP2350, Arm core), Pico SDK 2.3.0, toolchain
+  15.2.Rel1, RTT stdio; flashed and observed through the Debug Probe with
+  OpenOCD 0.12.0+dev and Cortex-Debug.
+- Adafruit MicroSD card breakout board+ (5 V-ready, 74AHC125 level shifter),
+  on a breadboard. SPI1: GPIO 11 MOSI, 12 MISO, 13 CS, 14 SCK; card detect on
+  GPIO 10. Data rate 1 MHz after the 400 kHz bring-up.
+- An 8 GB microSDHC card, formatted (block 0 carries `55 aa`), disposable.
+- The breakout carries no pull-ups. The RP2350 internal pull-ups were enabled
+  on MISO and CS from `main.c` as breadboard stand-ins for the discrete
+  resistors the final board will carry; card detect gets its pull-up from the
+  driver. See "Findings" for why MISO's is not optional.
+- The breakout's detect switch closes to ground when the socket is *empty*,
+  so the driver's new `card_detect_active_high` was set.
+
+### Result
+
+```
+[INFO] PASS configure
+[INFO] PASS init
+[INFO] PASS get_info
+[INFO] card reports 15523840 blocks of 512 bytes, writable=1
+[INFO] PASS reject null buffer
+[INFO] PASS reject zero block count
+[INFO] PASS reject write past end
+[INFO] PASS read block 0
+[INFO] block 0 bytes 510..511: 55 aa (55 aa on a formatted card)
+[INFO] PASS write single block
+[INFO] PASS read back single block
+[INFO] PASS read neighbour block
+[INFO] PASS write multiple blocks
+[INFO] PASS single block untouched by multi-block write
+[INFO] PASS read back multiple blocks
+[INFO] PASS neighbour block untouched by multi-block write
+[INFO] PASS deinit
+```
+
+15,523,840 × 512 = 7.95 GB, consistent with an 8 GB card. The demo writes
+`base = block_count - 64` (one block, CMD24) and `base+1..base+50` (five
+CMD25 transfers of ten blocks, each preceded by ACMD23), then verifies
+`base..base+50` against a per-block pattern carrying the LBA and reads
+`base+51` before and after to prove nothing spilled.
+
+### What this establishes
+
+- Bring-up with command CRC checking enabled (CMD59) on a real card: CMD0,
+  CMD8, CMD59, ACMD41 (inside the 1.2 s budget), CMD58, CMD9, and every R1
+  arriving inside the driver's 8-byte N_CR window with this card.
+- The CSD register's CRC16 validated against a real card, and the capacity
+  decoded from it matches the card.
+- Read-path data CRC16 validation against real data (block 0 signature
+  `55 aa`) and against the driver's own writes.
+- The write path's rolling CRC16 is what the card computes: with checking on,
+  the card accepted every block of both CMD24 and CMD25, and the data read
+  back byte-for-byte.
+- Byte addressing is not exercised (SDHC card); the SDSC path remains
+  host-only.
+- Card detect in the active-high sense, argument rejection with no bus
+  traffic, and a clean `deinit` into the foreground loop.
+
+### Findings on the way to this result
+
+1. **Detect switch sense.** The breakout's socket reads high with a card in.
+   The driver assumed active-low only; it now takes
+   `card_detect_active_high` and the host suites run under both senses.
+2. **A floating DO reports `BUSY_TIMEOUT` before CMD0.** With no pull-up on
+   DO, the first attempt failed `init` with result 5. The driver waits for a
+   ready (`0xFF`) byte before every command frame, including CMD0, while the
+   card is still in SD native mode and leaves DAT0 undriven. The wait
+   exhausted 500 ms on a floating line and reported "busy" for a card that
+   had never been addressed. Enabling the MISO pull-up fixed it. Recorded in
+   KNOWN_GAPS.md as a decision to make: skip the ready wait for CMD0, have
+   the driver own the DAT0 pull-up, or leave it to the board.
+3. **The card model's write overlay was 32 blocks**, found when the demo's
+   51-block sequence read back wrong *on the host* before the hardware run;
+   raised to 64 and the silent-drop behaviour documented in RESIDUAL_RISK.md.
+
+### Not performed in this run
+
+Nothing above 1 MHz; no hot removal (the demo completes in milliseconds and
+the removal interrupt has not fired on hardware); no logic-analyser capture,
+so N_CR, N_AC (the byte after each CRC), CMD12 residual data (SD-004) and
+ACMD23's R1 were not observed; no SDSC card; write-protect is not read. No
+sanitizer or mutation run on the host for this change set - see the host
+record for the polarity change in MUTATION.md.

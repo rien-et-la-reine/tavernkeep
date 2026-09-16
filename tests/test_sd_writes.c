@@ -1197,7 +1197,7 @@ static void test_argument_validation_costs_no_bus_traffic(void)
 
     /* After removal every write is refused before the bus, even in range. */
     t_context("after removal");
-    T_CHECK(pico_mock_gpio_irq_fire(SD_FX_PIN_CARD_DETECT, GPIO_IRQ_EDGE_RISE));
+    T_CHECK(sd_fx_remove_card());
     before = pico_mock_spi_transfer_count();
     T_EQ_RESULT(BLOCK_DEVICE_RESULT_INVALID_DEVICE,
         block_device_write_blocks(fx.device, 5U, payload, 1U));
@@ -1208,8 +1208,18 @@ static void test_argument_validation_costs_no_bus_traffic(void)
 
 /* --------------------------------------------------------------- main */
 
-int main(void)
+int main(int argc, char **argv)
 {
+    for (int i = 1; i < argc; ++i) {
+        if (!sd_fx_parse_card_detect_arg(argv[i])) {
+            (void)fprintf(stderr,
+                "usage: %s [--card-detect=active-low|active-high]\n", argv[0]);
+            return 2;
+        }
+    }
+    (void)printf("sd_writes: card detect %s\n",
+        sd_fx_card_detect_active_high() ? "active-high" : "active-low");
+
     t_run(test_single_block_write_stores_the_data_on_every_card_kind,
         "CMD24 stores the data on every card kind");
     t_run(test_multi_block_write_stores_every_block_in_order,

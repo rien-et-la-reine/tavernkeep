@@ -71,12 +71,23 @@ size_t pico_mock_spi_deinit_count(void);
 uint64_t pico_mock_now_ms(void);
 uint64_t pico_mock_now_us(void);
 void pico_mock_advance_us(uint64_t microseconds);
+/* Called after every sleep_ms() with the requested duration, so a test can
+ * observe a foreground loop or leave one that never returns (longjmp from the
+ * hook is the intended escape). Cleared by pico_mock_reset(). */
+typedef void (*pico_mock_sleep_hook_t)(uint32_t milliseconds, void *context);
+void pico_mock_set_sleep_hook(pico_mock_sleep_hook_t hook, void *context);
 void pico_mock_set_clock_mode(sim_clock_mode_t mode);
 uint64_t pico_mock_poll_count(void);
 
 void pico_mock_sd_use_chip_select(unsigned int pin);
-/* Pin that SD_FAULT_EJECT raises to simulate removal mid-transaction. */
+/* Pin that SD_FAULT_EJECT drives to simulate removal mid-transaction. */
 void pico_mock_sd_use_card_detect(unsigned int pin);
+/* Sense of that pin. false (the default after reset): low means present and
+ * an eject drives it high with a rising edge. true: high means present and an
+ * eject drives it low with a falling edge. Mirrors
+ * sd_spi_config_t.card_detect_active_high. */
+void pico_mock_sd_set_card_detect_active_high(bool active_high);
+bool pico_mock_sd_card_detect_active_high(void);
 bool pico_mock_spi_tx_chip_select_high(size_t index);
 const uint8_t *pico_mock_spi_tx_log(void);
 size_t pico_mock_spi_tx_log_length(void);

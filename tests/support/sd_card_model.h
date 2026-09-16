@@ -49,8 +49,11 @@ enum {
     SD_MODEL_TRACE_CAPACITY = 4096,
     /* Blocks the overlay can hold. A multiple-block write stores one entry per
      * block, so this bounds the longest write whose every block a test can
-     * read back out of the model. */
-    SD_MODEL_OVERLAY_BLOCKS = 32,
+     * read back out of the model. 64 covers the main.c demo's 51 written
+     * blocks with room to spare; a write past the overlay is dropped while
+     * the card still answers "accepted", so keep this above any demo's
+     * footprint. */
+    SD_MODEL_OVERLAY_BLOCKS = 64,
     SD_MODEL_SCRIPT_COMMANDS = 64,
     SD_MODEL_SCRIPT_PAYLOAD = 4096,
 };

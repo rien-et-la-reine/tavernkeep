@@ -172,10 +172,14 @@ generic error is least helpful.
 - **`SIM_CLOCK_POLL_TICK` is kept.** It preserves the artifact deliberately, so
   the suite can be run under both models and any dependence on it is exposed.
   Keeping it costs one CTest case and prevents a silent regression.
-- **The block overlay holds thirty-two explicit blocks.** Everything else is
+- **The block overlay holds sixty-four explicit blocks.** Everything else is
   generated. A multiple-block write stores one entry per block, so this is the
-  longest write whose every block a test can read back; raise
-  `SD_MODEL_OVERLAY_BLOCKS` for more.
+  most distinct blocks a test can write and read back; raise
+  `SD_MODEL_OVERLAY_BLOCKS` for more. A write beyond the overlay is dropped
+  **silently** - the card still answers with an accepted data-response token -
+  so a readback mismatch after a long write sequence should be checked against
+  this limit before it is blamed on the driver. The main.c demo writes 51
+  blocks, which is how the limit was found at its previous value of 32.
 - **The model forgets a pending write when chip select is released.** A real
   card that has answered R1 to CMD24/CMD25 and not yet seen a start-block
   token stays in its receive-data state across a deselect; it does not parse

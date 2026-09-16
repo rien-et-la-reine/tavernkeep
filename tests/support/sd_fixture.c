@@ -6,6 +6,49 @@
 
 enum { SD_FX_FILL = 0xA5 };
 
+static bool card_detect_active_high;
+
+void sd_fx_set_card_detect_active_high(bool active_high)
+{
+    card_detect_active_high = active_high;
+}
+
+bool sd_fx_card_detect_active_high(void)
+{
+    return card_detect_active_high;
+}
+
+void sd_fx_set_card_present(bool present)
+{
+    /* Active-low: present is low. Active-high: present is high. */
+    pico_mock_gpio_set_input(SD_FX_PIN_CARD_DETECT,
+        present == card_detect_active_high);
+}
+
+uint32_t sd_fx_removal_edge(void)
+{
+    return card_detect_active_high ? GPIO_IRQ_EDGE_FALL : GPIO_IRQ_EDGE_RISE;
+}
+
+bool sd_fx_remove_card(void)
+{
+    sd_fx_set_card_present(false);
+    return pico_mock_gpio_irq_fire(SD_FX_PIN_CARD_DETECT, sd_fx_removal_edge());
+}
+
+bool sd_fx_parse_card_detect_arg(const char *arg)
+{
+    if (strcmp(arg, "--card-detect=active-low") == 0) {
+        card_detect_active_high = false;
+        return true;
+    }
+    if (strcmp(arg, "--card-detect=active-high") == 0) {
+        card_detect_active_high = true;
+        return true;
+    }
+    return false;
+}
+
 void sd_fx_begin(sd_fixture_t *fx, const sd_card_desc_t *desc)
 {
     memset(fx, 0, sizeof(*fx));
@@ -16,8 +59,9 @@ void sd_fx_begin(sd_fixture_t *fx, const sd_card_desc_t *desc)
     sd_card_set_response_policy(SD_RESPONSE_MODELLED);
     pico_mock_sd_use_chip_select(SD_FX_PIN_CS);
     pico_mock_sd_use_card_detect(SD_FX_PIN_CARD_DETECT);
-    /* Active-low availability: low means usable media may be present. */
-    pico_mock_gpio_set_input(SD_FX_PIN_CARD_DETECT, false);
+    pico_mock_sd_set_card_detect_active_high(card_detect_active_high);
+    /* Usable media is present at the level the configured sense expects. */
+    sd_fx_set_card_present(true);
 
     fx->config.spi = &fx->spi;
     fx->config.baud_rate_hz = SD_FX_BAUD_HZ;
@@ -26,6 +70,7 @@ void sd_fx_begin(sd_fixture_t *fx, const sd_card_desc_t *desc)
     fx->config.pin_controller_in = SD_FX_PIN_MISO;
     fx->config.pin_chip_select = SD_FX_PIN_CS;
     fx->config.pin_card_available = SD_FX_PIN_CARD_DETECT;
+    fx->config.card_detect_active_high = card_detect_active_high;
 }
 
 block_device_result_t sd_fx_init(sd_fixture_t *fx)
