@@ -1292,7 +1292,13 @@ static uint8_t produce_byte(uint8_t mosi)
     /* The CMD12 stop sequence runs independently of the frame bytes so a
      * card that is still streaming can be modelled honestly. */
     if (state == ST_STOPPING) {
-        (void)absorb_frame_byte(mosi);
+        /* True for every byte of the CMD12 frame including the one that
+         * completes it. The card is still receiving during that byte, so the
+         * stuff byte and the N_CR window start on the byte after the frame,
+         * exactly as ST_NCR does for every other command. Testing frame_active
+         * here instead would emit the stuff byte one position early, which
+         * only shows when N_CR is 0. */
+        const bool frame_byte = absorb_frame_byte(mosi);
         stop_byte_index++;
         if (stop_byte_index <= stop_residual_bytes) {
             /* Residual read data still in flight while the host clocks the
@@ -1300,7 +1306,7 @@ static uint8_t produce_byte(uint8_t mosi)
             return emit(SD_PHASE_BETWEEN_BLOCKS,
                 data_buffer[stop_byte_index % SD_MODEL_BLOCK_SIZE]);
         }
-        if (frame_active) {
+        if (frame_byte) {
             return emit(SD_PHASE_COMMAND, 0xFFU);
         }
         if (!stop_stuff_sent) {

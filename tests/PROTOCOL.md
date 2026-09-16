@@ -91,25 +91,30 @@ its own 1200 ms budget rather than hanging. Mutation `acmd41-hcs-bit` is caught.
 ## P-04 — N_CR, the response window, and the driver's poll limit
 
 **Rule.** The command response time in SPI mode is quoted as 0 to 8 bytes for an
-SD card. `sd_spi_command()` reads at most eight bytes while waiting for a byte
-with bit 7 clear, so it accepts a response at read positions one through eight,
-which is at most **seven** filler bytes.
+SD card. `sd_spi_command()` and `sd_spi_stop_transmission()` each read at most
+`SD_SPI_R1_POLL_LIMIT` = 16 bytes while waiting for a byte with bit 7 clear, so
+they accept a response at read positions one through sixteen, which is at most
+**fifteen** filler bytes.
 
-**Finding.** Under the strictest reading — N_CR counting filler bytes, so a
-worst-case card answers on the ninth read — the driver is one byte short of the
-specified window. Separately, Linux's `mmc_spi` driver raised its own limit from
-8 to 16 after observing real cards that needed 12. The failure mode is a generic
-I/O error during bring-up or a read, with nothing to indicate the cause.
+**Finding.** The limit was 8 reads (7 filler bytes) until 2026-09-15, one byte
+short of the specified window under its strictest reading and well short of
+what real cards have needed: Linux's `mmc_spi` driver raised its own limit from
+8 to 16 after observing cards that needed 12. That was gap **SD-005**.
 
-**Disposition.** Not changed here: widening the window is a tolerance decision
-with hardware-validation consequences, and it is the owner's call. The current
-boundary is pinned exactly from both sides, and the more tolerant behaviour is
-registered as gap **SD-005**.
+**Disposition.** Raised to 16, Linux's number, on 2026-09-15; there was no
+reason to choose differently. The one card run on hardware so far answered
+within the old window. The overrun case still fails fast with `IO_ERROR`
+rather than burning a timeout.
 
-**Tests.** `test_response_latency_boundary` sweeps 0 to 8 filler bytes for both
-bring-up and CMD17, asserts success below the limit and failure at it, and
-asserts the failure is immediate rather than a timeout. Mutation
-`r1-poll-limit-off-by-one` is caught.
+**Tests.** `test_response_latency_boundary` sweeps 0 to 16 filler bytes for
+bring-up and for CMD17, asserts success below the limit and failure at it, and
+asserts the failure is immediate rather than a timeout; a third sweep runs a
+CMD18 stream so CMD12's own poll is covered for every accepted count. Mutations
+`r1-poll-limit-off-by-one`, `r1-poll-limit-old-eight` and
+`cmd12-poll-limit-old-eight` are caught. Adding the CMD12 sweep exposed a
+one-byte error in the card model: it emitted CMD12's stuff byte as the response
+to the last frame byte instead of the byte after it, which only shows at
+N_CR = 0; fixed in `sd_card_model.c` at the same time.
 
 ## P-05 — data error tokens
 

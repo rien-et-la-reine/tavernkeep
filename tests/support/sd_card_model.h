@@ -76,8 +76,9 @@ typedef struct {
     uint8_t read_bl_len;    /* CSD v1 only; 9..11 */
     /* Filler bytes the card sends before R1, so R1 lands on the host's
      * (ncr_bytes + 1)-th read after the command frame. The specification's
-     * N_CR window for an SD card in SPI mode is 0 to 8 bytes; see PROTOCOL.md
-     * finding P-04 for how that lines up with the driver's poll limit. */
+     * N_CR window for an SD card in SPI mode is 0 to 8 bytes; the driver
+     * polls 16 reads (PROTOCOL.md P-04). Applies to CMD12 too, after its
+     * stuff byte. */
     uint32_t ncr_bytes;
     uint32_t read_access_us;/* N_AC: delay before a read data token */
     uint32_t program_us;    /* busy after a write or an erase */

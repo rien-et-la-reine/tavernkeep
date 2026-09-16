@@ -14,7 +14,9 @@
  * The SD-007 write acceptance cases that used to live here were promoted to
  * test_sd_writes.c (sd_writes_host_tests) when the write path was implemented,
  * and the SD-003 read-CRC case to test_sd_faults.c (sd_faults_host_tests)
- * when read data CRC validation was implemented.
+ * when read data CRC validation was implemented. The SD-005 N_CR case was
+ * retired when the R1 poll limit was raised to 16: the enabled boundary sweep
+ * in test_sd_protocol.c now covers the 8..12 filler range it asserted.
  */
 #include <inttypes.h>
 #include <string.h>
@@ -56,29 +58,6 @@ static void gap_stop_transmission_tolerates_in_flight_data(void)
         T_CHECK(sd_fx_guard_matches_card(&buffer, 77U));
         T_EQ_RESULT(BLOCK_DEVICE_RESULT_OK, result);
         T_CHECK(sd_fx_check_bus_quiescent(&fx) == NULL);
-    }
-    t_clear_context();
-}
-
-/* ------------------------------------------------------------- SD-005 */
-
-static void gap_r1_poll_tolerance(void)
-{
-    /* sd_spi_command() reads at most eight bytes while waiting for R1, so it
-     * tolerates at most seven filler bytes. The specification's N_CR window
-     * for an SD card in SPI mode is quoted as 0 to 8 bytes, and Linux's
-     * mmc_spi driver raised its own limit to sixteen after observing real
-     * cards that needed twelve. A card at the specification's worst case, or
-     * a slow real card, fails initialisation here with a generic I/O error
-     * that gives no hint of the cause. */
-    for (uint32_t filler = 8U; filler <= 12U; ++filler) {
-        sd_fixture_t fx;
-        sd_card_desc_t desc = sd_fx_card_sdhc();
-        desc.ncr_bytes = filler;
-        t_context("%u filler byte(s) before R1", (unsigned)filler);
-        sd_fx_begin(&fx, &desc);
-        T_EQ_RESULT(BLOCK_DEVICE_RESULT_OK, sd_fx_init(&fx));
-        T_EQ_U(sd_card_block_count(), fx.sd.block_count);
     }
     t_clear_context();
 }
@@ -146,16 +125,12 @@ int main(int argc, char **argv)
 {
     if (argc != 2) {
         (void)fprintf(stderr,
-            "usage: %s --gap-{stop-residual|r1-tolerance|command-crc}\n",
-            argv[0]);
+            "usage: %s --gap-{stop-residual|command-crc}\n", argv[0]);
         return 2;
     }
     if (strcmp(argv[1], "--gap-stop-residual") == 0) {
         t_run(gap_stop_transmission_tolerates_in_flight_data,
             "SD-004 CMD12 must tolerate in-flight read data");
-    } else if (strcmp(argv[1], "--gap-r1-tolerance") == 0) {
-        t_run(gap_r1_poll_tolerance,
-            "SD-005 R1 wait must cover the specified N_CR window");
     } else if (strcmp(argv[1], "--gap-command-crc") == 0) {
         t_run(gap_every_command_frame_carries_a_valid_crc7,
             "SD-006 every command frame must carry a valid CRC7");

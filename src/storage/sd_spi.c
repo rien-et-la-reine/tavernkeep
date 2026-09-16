@@ -11,6 +11,11 @@ enum {
     SD_SPI_CARD_DETECT_STABLE_SAMPLES = 10,
     SD_SPI_CARD_DETECT_MAX_SAMPLES = 30,
     SD_SPI_CARD_DETECT_SAMPLE_INTERVAL_MS = 1,
+    //bytes read while waiting for an R1 response before giving up. the spec quotes N_CR as 0 to 8 bytes
+    //for an sd card in spi mode; linux's mmc_spi driver raised its limit from 8 to 16 after real cards
+    //were seen needing 12, and there is no reason to choose differently. a response is accepted on any
+    //of these reads, so up to SD_SPI_R1_POLL_LIMIT - 1 filler bytes are tolerated
+    SD_SPI_R1_POLL_LIMIT = 16,
 };
 
 static bool sd_spi_card_available(const sd_spi_t *sd);
@@ -857,7 +862,7 @@ static block_device_result_t sd_spi_stop_transmission(const sd_spi_t *sd)
     }
 
     uint8_t r1 = 0xFFU;
-    for (uint8_t i = 0U; i < 8U; ++i) {
+    for (uint8_t i = 0U; i < SD_SPI_R1_POLL_LIMIT; ++i) {
         r1 = sd_spi_transfer(sd, 0xFFU);
         if (sd_spi_removal_latched(sd)) {
             return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
@@ -1136,7 +1141,7 @@ static block_device_result_t sd_spi_command(
             return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
         }
         i++;
-        if (i > 7) {
+        if (i >= SD_SPI_R1_POLL_LIMIT) {
             return BLOCK_DEVICE_RESULT_IO_ERROR;
         }
     }

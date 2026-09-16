@@ -351,17 +351,18 @@ static void test_high_capacity_card_needs_hcs_to_leave_idle(void)
 
 /* -------------------------------------------------------- N_CR boundary */
 
-enum { SD_DRIVER_R1_POLL_LIMIT = 8 };
+enum { SD_DRIVER_R1_POLL_LIMIT = 16 };
 
 static void test_response_latency_boundary(void)
 {
-    /* P-04: the driver polls at most eight bytes for R1, so it tolerates at
-     * most seven filler bytes before the response. This pins that boundary
-     * exactly from both sides, and pins that overrunning it fails fast rather
-     * than by burning a timeout - the failure mode this suite exists to
-     * distinguish. Whether eight reads is enough tolerance against the
-     * specification's N_CR window and against real cards is a separate
-     * question; see the gap case registered in KNOWN_GAPS.md. */
+    /* P-04: the driver polls at most sixteen bytes for R1, so it tolerates
+     * at most fifteen filler bytes before the response - the limit Linux's
+     * mmc_spi settled on after real cards were seen needing twelve, and past
+     * the specification's quoted 0..8 under any reading. This pins that
+     * boundary exactly from both sides, covers the twelve-byte real-card
+     * case on the way, and pins that overrunning it fails fast rather than
+     * by burning a timeout - the failure mode this suite exists to
+     * distinguish. Formerly gap SD-005. */
     for (uint32_t filler = 0U; filler <= SD_DRIVER_R1_POLL_LIMIT; ++filler) {
         sd_fixture_t fx;
         sd_card_desc_t desc = sd_fx_card_sdhc();
@@ -415,6 +416,28 @@ static void test_response_latency_boundary(void)
             T_CHECK(sd_fx_guard_untouched(&buffer));
         }
         T_CHECK(sd_fx_guard_intact(&buffer));
+        T_CHECK(sd_fx_check_bus_quiescent(&fx) == NULL);
+    }
+
+    /* CMD12 has its own R1 poll in sd_spi_stop_transmission(), and a card's
+     * N_CR applies to it like any other command. A multiple-block read ends
+     * with CMD12, so every filler count the frame poll tolerates must also be
+     * tolerated there - otherwise a slow card streams fine and then fails at
+     * the stop. The limit itself is refused at bring-up already (above), so
+     * only the accepted range is swept here. */
+    for (uint32_t filler = 0U; filler < SD_DRIVER_R1_POLL_LIMIT; ++filler) {
+        sd_fixture_t fx;
+        sd_card_desc_t desc = sd_fx_card_sdhc();
+        desc.ncr_bytes = filler;
+        t_context("CMD18 then CMD12 with %u filler byte(s) before every R1",
+            (unsigned)filler);
+        T_CHECK(sd_fx_require_init(&fx, &desc));
+        sd_guarded_buffer_t buffer;
+        sd_fx_guard_init(&buffer, 3U);
+        T_EQ_RESULT(BLOCK_DEVICE_RESULT_OK, block_device_read_blocks(
+            fx.device, 7U, sd_fx_guard_data(&buffer), 3U));
+        T_CHECK(sd_fx_guard_matches_card(&buffer, 7U));
+        T_EQ_U(0U, sd_card_protocol_errors());
         T_CHECK(sd_fx_check_bus_quiescent(&fx) == NULL);
     }
     t_clear_context();
@@ -1136,7 +1159,7 @@ int main(void)
     t_run(test_cmd8_response_is_matched_exactly, "CMD8 R1 sweep: only 0x01 and 0x05 are meaningful");
     t_run(test_legacy_card_omits_the_hcs_bit, "legacy card ACMD41 omits HCS");
     t_run(test_high_capacity_card_needs_hcs_to_leave_idle, "ACMD41 budget is bounded");
-    t_run(test_response_latency_boundary, "R1 poll boundary: 7 filler bytes accepted, 8 rejected fast");
+    t_run(test_response_latency_boundary, "R1 poll boundary: 15 filler bytes accepted, 16 rejected fast");
     t_run(test_every_nonzero_r1_fails_a_read, "all 128 R1 values on CMD17 and CMD18");
     t_run(test_data_error_tokens_are_recognised_immediately, "all data error tokens, both read paths");
     t_run(test_zero_byte_is_not_a_data_error_token, "0x00 is not a data error token");

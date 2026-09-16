@@ -57,6 +57,20 @@ correctly refused to run. The budgets were settled on 2026-09-11 (500 ms before
 a command, 250 ms elsewhere; PROTOCOL.md P-16), the tests updated, and the
 catalogue re-run in full - see "Result, 2026-09-11" below.
 
+## R1 poll window, 2026-09-15
+
+The window went from 8 to 16 reads (`SD_SPI_R1_POLL_LIMIT`), closing SD-005.
+Confirmed by hand against `sd_protocol` and `sd_spi`, not by a full run.
+
+| Mutation | Class | Confirmed against |
+| --- | --- | --- |
+| `r1-poll-limit-off-by-one` (re-anchored) | off-by-one | `sd_protocol` (boundary sweep), `sd_spi` |
+| `r1-poll-limit-old-eight` | regression to the old window | `sd_protocol`, `sd_spi` |
+| `cmd12-poll-limit-old-eight` | stop command left at the old window | `sd_protocol` only, via the CMD18-then-CMD12 sweep added for it |
+
+The third row is the reason the sweep exists: before it, that mutant survived
+every enabled suite and was noticed only by the disabled SD-004 case.
+
 ## Card-detect polarity, 2026-09-15
 
 `card_detect_active_high` touches four reads of the detect line in
@@ -242,7 +256,7 @@ Every mutation and its killer:
 | `address-truncated-to-16-bits` | truncated integer width | 4 executables |
 | `range-check-off-by-one` | off-by-one range check | *equivalent, see below* |
 | `range-check-count-removed` | removed validation | 3 executables |
-| `r1-poll-limit-off-by-one` | off-by-one | 3 executables |
+| `r1-poll-limit-off-by-one` | off-by-one | 3 executables (re-anchored 2026-09-15 to `SD_SPI_R1_POLL_LIMIT`; see the R1 window record) |
 | `r1-accept-nonzero` | reversed condition | `sd_protocol` |
 | `data-token-constant` | wrong constant | 6 executables |
 | `block-length-511` | off-by-one payload length | 5 executables |

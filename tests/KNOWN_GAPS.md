@@ -36,7 +36,7 @@ per-frame command CRC7.
 
 The reason this is written down: writes are major functionality that has sat
 unimplemented while several hardening and refinement passes went ahead of them.
-SD-004, SD-005 and the recovery policy are all hardening (SD-003 has since
+SD-004 and the recovery policy are all hardening (SD-003 and SD-005 have since
 been closed). Each is worth
 doing and none of them is worth doing before the storage layer can write, so
 they should stop displacing it. A driver that reads reliably and cannot write is
@@ -164,30 +164,6 @@ subsequent command until reset. That is unrecoverable through the command
 channel, so it needs a recovery path the driver does not yet have. Recorded
 with the reset ladder and the open design decisions in
 [VALIDATION_PLAN.md](VALIDATION_PLAN.md) under "Card recovery policy".
-
-### SD-005 — the R1 wait is shorter than the specified response window
-
-Affected code: `sd_spi_command()` in `src/storage/sd_spi.c`.
-
-```sh
-ctest --test-dir tests/build -R sd_gap_r1-tolerance --output-on-failure
-```
-
-The loop reads at most eight bytes while waiting for a byte with bit 7 clear, so
-it tolerates at most **seven** filler bytes before R1. The response window for
-an SD card in SPI mode is quoted as 0 to 8 bytes, which under the strictest
-reading puts a worst-case card's response one byte out of reach. Independently,
-Linux's `mmc_spi` driver raised its own limit from 8 to 16 after observing real
-cards that needed 12
-([patch](https://lkml.iu.edu/hypermail/linux/kernel/0903.1/01387.html)).
-
-The failure mode is a generic `IO_ERROR` during bring-up or a read, with nothing
-to distinguish "this card is slow" from "this card is broken".
-
-**Cost to fix:** one constant. The reason it is not changed here is that
-widening a tolerance is the owner's call and wants bus captures from real cards
-to size properly. `test_response_latency_boundary` pins the current boundary
-exactly from both sides, so whatever is chosen has to be chosen deliberately.
 
 ---
 
@@ -319,6 +295,26 @@ One thing remains and is recorded rather than hidden:
 On a mismatch the driver fails rather than retrying; the bounded-retry policy
 the card's error-recovery model expects is still the open decision recorded in
 [VALIDATION_PLAN.md](VALIDATION_PLAN.md).
+
+### SD-005 — the R1 wait was shorter than the specified response window
+
+Fixed 2026-09-15. Both R1 polls - the command frame's in `sd_spi_command()`
+and CMD12's in `sd_spi_stop_transmission()` - now read up to
+`SD_SPI_R1_POLL_LIMIT` = 16 bytes, tolerating fifteen filler bytes, which is
+the limit Linux's `mmc_spi` settled on after real cards were seen needing
+twelve. The former `sd_gap_r1-tolerance` case (8..12 filler bytes accepted) is
+retired: `test_response_latency_boundary` in the enabled protocol suite now
+sweeps 0..16 for bring-up, CMD17 and a CMD18 stream ending in CMD12, and pins
+the overrun at 16 as an immediate `IO_ERROR`. Mutations
+`r1-poll-limit-off-by-one`, `r1-poll-limit-old-eight` and
+`cmd12-poll-limit-old-eight` are killed by the enabled suites.
+
+Worth remembering: the CMD12 poll had no enabled coverage before this - only
+the disabled SD-004 case noticed a mutant that left it at 8 - and adding the
+coverage found a one-byte timing error in the card model's stop sequence
+(PROTOCOL.md P-04). SD-004 itself is unchanged: with residual data in flight
+the wider window examines more residual bytes, but whether a residual byte is
+mistaken for R1 is still data-dependent.
 
 ### SD-007 — writes were unimplemented
 

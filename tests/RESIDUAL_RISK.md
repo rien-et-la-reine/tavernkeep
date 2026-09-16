@@ -212,14 +212,12 @@ generic error is least helpful.
 
 ## 5. Known gaps that are open
 
-Two regressions assert desired behaviour and fail against the current source.
+One regression asserts desired behaviour and fails against the current source.
 They are registered in CTest and disabled by default; see
 [KNOWN_GAPS.md](KNOWN_GAPS.md). A green default run is not evidence that they
 are resolved.
 
 - **SD-004** — CMD12 can mistake in-flight read data for its own response.
-- **SD-005** — the R1 wait is one byte short of the specified window and well
-  short of what real cards have needed.
 
 One limit of read CRC validation (SD-003, closed) is inherent rather than an
 open gap:

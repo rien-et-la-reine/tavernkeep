@@ -1833,7 +1833,7 @@ static void test_initialization_error_matrix(void)
         case 2: CHECK(pico_mock_sd_set_command(55, 0x04, NULL, 0)); break;
         case 3: CHECK(pico_mock_sd_set_command(41, 0x04, NULL, 0)); break;
         case 4: CHECK(pico_mock_sd_set_command(58, 0x04, NULL, 0)); break;
-        case 5: configure_successful_sdsc_card(); CHECK(pico_mock_sd_set_response_delay(16, 8)); break;
+        case 5: configure_successful_sdsc_card(); CHECK(pico_mock_sd_set_response_delay(16, 16)); break;
         case 6: configure_csd_v1(); break; /* CCS and CSD disagree. */
         case 7: configure_successful_sdsc_card(); configure_csd_v2(); break;
         }
@@ -1863,8 +1863,8 @@ static void test_initialization_error_matrix(void)
 
 static void test_spi_framing_and_response_boundary(void)
 {
-    /* Seven wait bytes put R1 in byte eight; eight wait bytes must time out. */
-    for (size_t delay = 7; delay <= 8; ++delay) {
+    /* Fifteen wait bytes put R1 in byte sixteen; sixteen wait bytes must time out. */
+    for (size_t delay = 15; delay <= 16; ++delay) {
         pico_mock_reset();
         pico_mock_sd_use_chip_select(PIN_CHIP_SELECT);
         sd_spi_t sd = {0};
@@ -1888,10 +1888,10 @@ static void test_spi_framing_and_response_boundary(void)
         make_read_payload(payload, 1, 0x49);
         CHECK(pico_mock_sd_set_command(17, 0, payload, sizeof(payload)));
         CHECK(pico_mock_sd_set_response_delay(17, delay));
-        CHECK_EQ(delay == 7 ? BLOCK_DEVICE_RESULT_OK : BLOCK_DEVICE_RESULT_IO_ERROR,
+        CHECK_EQ(delay == 15 ? BLOCK_DEVICE_RESULT_OK : BLOCK_DEVICE_RESULT_IO_ERROR,
             block_device_read_blocks(device, 0, block, 1));
-        if (delay == 7) { CHECK(buffer_matches(block, 1, 0x49)); }
-        else { CHECK(pico_mock_spi_transfer_count() - before <= 16U); }
+        if (delay == 15) { CHECK(buffer_matches(block, 1, 0x49)); }
+        else { CHECK(pico_mock_spi_transfer_count() - before <= 24U); }
         CHECK(pico_mock_gpio_level(PIN_CHIP_SELECT));
         CHECK_EQ(0U, pico_mock_sd_pending_response_count());
     }

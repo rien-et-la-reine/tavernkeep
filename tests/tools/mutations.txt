@@ -193,9 +193,28 @@ id: r1-poll-limit-off-by-one
 file: src/storage/sd_spi.c
 why: off-by-one - one fewer response byte tolerated
 ---
-        if (i > 7) {
+        if (i >= SD_SPI_R1_POLL_LIMIT) {
 ===
-        if (i > 6) {
+        if (i >= SD_SPI_R1_POLL_LIMIT - 1) {
+
+id: r1-poll-limit-old-eight
+file: src/storage/sd_spi.c
+why: regression to the old 8-byte window - a card answering on reads 9..16 is rejected
+---
+    SD_SPI_R1_POLL_LIMIT = 16,
+===
+    SD_SPI_R1_POLL_LIMIT = 8,
+
+id: cmd12-poll-limit-old-eight
+file: src/storage/sd_spi.c
+why: the stop command's own R1 poll left at the old 8-byte window while the frame
+     poll moved to 16
+---
+    for (uint8_t i = 0U; i < SD_SPI_R1_POLL_LIMIT; ++i) {
+        r1 = sd_spi_transfer(sd, 0xFFU);
+===
+    for (uint8_t i = 0U; i < 8U; ++i) {
+        r1 = sd_spi_transfer(sd, 0xFFU);
 
 id: r1-accept-nonzero
 file: src/storage/sd_spi.c

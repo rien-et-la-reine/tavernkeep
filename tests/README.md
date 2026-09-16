@@ -24,7 +24,7 @@ ctest --test-dir tests/build --output-on-failure
 ```
 
 Generated files stay inside `tests`. There are **27 enabled CTest cases** and
-three disabled ones for gaps that are still open. Checks remain active under
+two disabled ones for gaps that are still open. Checks remain active under
 `NDEBUG`; every case has a real-time timeout.
 
 ## Where to look
@@ -45,7 +45,7 @@ three disabled ones for gaps that are still open. Checks remain active under
 | Suite | Behaviour checked |
 | --- | --- |
 | `sd_spi_host_tests` | 63 groups: SDHC/legacy/v2 SDSC, ACMD41 retries, CSD capacities and rejection, SPI framing, R1 byte limits, all error tokens, reads, canaries, address limits, cleanup, IRQ races, removal sweeps, a refused CMD59, an implemented write and the info contract. Run twice, once under each clock model |
-| `sd_protocol_host_tests` | card variant matrix, command ordering, per-frame CRC7, CMD59 actually enabling the card's command CRC checking, application commands, HCS, the R1 poll boundary, all 128 R1 values, all error tokens, long multiple-block reads, addressing per card type, capacity boundaries, CSD registers from real cards, 74-clock bring-up, bus release after every outcome |
+| `sd_protocol_host_tests` | card variant matrix, command ordering, per-frame CRC7, CMD59 actually enabling the card's command CRC checking, application commands, HCS, the 16-byte R1 poll boundary for bring-up, CMD17 and CMD12, all 128 R1 values, all error tokens, long multiple-block reads, addressing per card type, capacity boundaries, CSD registers from real cards, 74-clock bring-up, bus release after every outcome |
 | `sd_faults_host_tests` | fault injection across every read phase, error after partial success, CMD12 failure after good data, bounded busy periods, removal at each phase and during the release clock, OCR power-up status, reinsertion, the card-detect sense under both polarities (level, armed edge, callback edge, removal between debounce and arming), read data CRC validation on CMD17 and CMD18 (payload and CRC-byte corruption, a bad CRC on an intact payload, exactly one CMD12 on a mid-stream mismatch) and a no-false-success invariant for payload and CRC faults |
 | `sd_faults_active_high_host_tests`, `sd_writes_active_high_host_tests` | the faults and writes suites again with `--card-detect=active-high`, so every removal case runs under the socket sense that closes to ground when empty as well as the default active-low one |
 | `sd_writes_host_tests` | CMD24/CMD25 on every card kind with the data read back out of the card model, byte addressing, the token each command requires, the N_WR idle byte, CRC16 on the wire, stop-tran, data-response tokens with don't-care bits, rejections (CMD12 only for CMD25), unknown response bytes, R1 errors, programming busy between blocks and after stop-tran including the N_BR window, `BUSY_TIMEOUT` on overrun, removal at every write phase and during the release clock, a fault sweep with a no-false-success invariant, and argument validation with no bus traffic |

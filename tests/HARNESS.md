@@ -275,7 +275,7 @@ the test instead, or move the behaviour into KNOWN_GAPS.md.
 6. **Coverage numbers are per target and must not be summed.** `gcov`
    overwrites reports that share a basename.
 7. **A green default run does not mean there are no known gaps.** Three
-   regressions are registered and disabled, two of them still failing; see
+   regressions are registered and disabled, one of them still failing; see
    [KNOWN_GAPS.md](KNOWN_GAPS.md).
 8. **Never hard-code the card-detect level or edge in a test.** The driver's
    sense is configurable and the fixture runs under both; use
