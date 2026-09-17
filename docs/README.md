@@ -9,7 +9,3 @@ the firmware for the Tome embedded device:
   those requirements and the rationale behind important structural choices.
 - [Validation](validation.md) records evidence that implemented functionality
   behaves as intended.
-
-Git history provides the chronological record of implementation. These
-documents describe the project's current requirements, design, and evidence.
-

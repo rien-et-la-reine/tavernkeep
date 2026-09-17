@@ -25,3 +25,5 @@ Thumbs.db
 # Agent instructions
 AGENTS.md
 CLAUDE.md
+# Host test suite is kept locally only
+/tests/
