@@ -38,6 +38,11 @@ typedef struct {
     block_device_result_t (*get_info)(
         void *context,
         block_device_info_t *info);
+    /* Optional; NULL for a device with no presence signal. See
+     * block_device_is_present. */
+    block_device_result_t (*is_present)(
+        void *context,
+        bool *present);
 } block_device_operations_t;
 
 typedef struct {
@@ -110,6 +115,28 @@ static inline block_device_result_t block_device_get_info(
         return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
     }
     return device->operations->get_info(device->context, info);
+}
+
+/* Whether a medium appears to be in the socket right now: one sample of the
+ * presence signal, with no debounce and no bus traffic, so it is cheap enough
+ * to poll. It works whether or not the device is initialized, which is what
+ * makes an insertion visible: an uninitialized device has nothing else that
+ * watches the socket. It is a hint, not a promise - init does the debounced
+ * check and may still refuse with INVALID_DEVICE. It reports the socket, not
+ * the removal latch: after a removal and reinsertion it reads true again while
+ * the device still refuses operations until it is re-initialized.
+ * NOT_IMPLEMENTED for a device without a presence signal. */
+static inline block_device_result_t block_device_is_present(
+    const block_device_t *device,
+    bool *present)
+{
+    if (!block_device_is_valid(device) || present == NULL) {
+        return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
+    }
+    if (device->operations->is_present == NULL) {
+        return BLOCK_DEVICE_RESULT_NOT_IMPLEMENTED;
+    }
+    return device->operations->is_present(device->context, present);
 }
 
 #endif

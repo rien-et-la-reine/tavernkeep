@@ -68,9 +68,9 @@ Filesystem interpretation does not belong to the block-device backend.
 
 **Filesystem**
 
-The filesystem layer will operate above the block-device interface and provide file-level access to removable storage.
+The filesystem layer operates above the block-device interface and provides file-level access to removable storage.
 
-FatFs is planned for this layer but has not yet been integrated into the current Tavernkeep implementation.
+FatFs is vendored, configured and built as this layer's implementation. The layer and its FatFs disk I/O adapter are implemented (see "Filesystem" under Major Interfaces) and have passed a host smoke test over a RAM-backed block device and run on a real card at 1 MHz, including hot removal while idle and during writes and save points (VAL-H02 and VAL-H03 in `docs/validation.md`). They have not yet run against the card model.
 
 The filesystem layer should not depend on whether the underlying SD implementation uses SPI or the planned 4-bit interface.
 
@@ -130,6 +130,8 @@ The SPI SD implementation interprets this context as an already-created and conf
 
 The abstraction exposes generic block-device results rather than SD protocol responses. SD-specific response interpretation remains within the SD backend.
 
+Besides init, deinit, block reads and writes and `get_info`, a device may offer `is_present`: one undebounced sample of the presence signal, with no bus traffic, that works whether or not the device is initialized. It is how an insertion becomes visible, since an uninitialized device has nothing else watching the socket. It is a hint: `init` still does the debounced check. It reports the socket, not the removal latch, so after a removal and reinsertion it reads true while the device still refuses operations until it is re-initialized.
+
 Current block-device result categories include:
 
 - success
@@ -168,13 +170,39 @@ Runtime state currently includes:
 
 - the atomic removal latch set by the card-detect interrupt
 
+- whether the card-detect pin has been claimed as a pulled-up input; once it has, the device keeps it across deinitialization and failed initializations (see Resource Ownership)
+
 Card type is maintained per device rather than globally.
 
 A non-legacy SD card is not assumed to be SDHC/SDXC; version and addressing mode are treated as separate properties.
 
+**Filesystem**
+
+`src/storage/filesystem.h` is the only way above the storage layer to reach removable storage. It is a single module rather than an object: there is one card, FatFs is configured for one volume, and storage has one owner at a time.
+
+- FatFs is private to the layer. No FatFs type, header or result code appears in the interface, and only `filesystem.c` and `diskio.c` are built with the FatFs include path, so an `#include "ff.h"` anywhere else fails to build. FatFs's time seam, `get_fattime()`, is therefore supplied by `filesystem.c`, which packs the generic time from `platform/clock.h`.
+- The FatFs disk I/O adapter (`src/storage/diskio.c`) is part of the layer. Its bind/unbind functions are declared in the private `filesystem_diskio.h`, which nothing above the layer includes.
+- Open files and directories live in fixed pools inside the layer. Callers hold handles made of a slot number and that slot's generation; the generation advances on open, close and every unmount, and 0 is never issued. A stale handle is therefore detected rather than used, and unmount invalidates every handle at once without any I/O.
+- `filesystem_mount` takes an already-initialized block device from the storage coordinator and mounts immediately, so an absent card or a card without a FAT volume is reported at mount. `filesystem_unmount` performs no I/O, flushes nothing and always succeeds. `filesystem_format` creates a new FAT volume on an unmounted card, for cards that arrive formatted as exFAT.
+- The layer is cooperative and single-threaded: it is called only from the core running the storage coordinator, never from an interrupt handler, and has no locking.
+- Open entries are the caller's responsibility. FatFs is built without file locking (`FF_FS_LOCK` 0), so nothing refuses removing or renaming an open file, or opening a file for replacement while another handle has it open, and each of these can corrupt the volume. The rule is cheap to follow because each file has one owning subsystem; it was chosen over enabling FatFs's lock table, which would refuse these operations at the cost of a small table and a check on every open.
+
+**Storage coordinator**
+
+`src/storage/storage.h` is the owner of the removable card. It holds the block device for the life of the firmware and is the only code that initializes or deinitializes it, mounts, unmounts or formats the filesystem, or lends the device to the USB mass-storage class. It runs as `storage_step(now_ms)` in the cooperative loop of the core that also calls the filesystem layer.
+
+Its state is two values. The *owner* is who may use the card: the filesystem layer (local) or the USB mass-storage class. The *medium* is the card's condition for that owner: absent, preparing (being brought up, including waits between attempts), faulty, unformatted (local only: works, but holds no FAT volume), or ready (local: mounted; USB: initialized and lent).
+
+- **Removal** is noticed in the step after the card-detect interrupt latches it: `get_info` then reports `INVALID_DEVICE` without touching the bus. The response is the ownership transition: unmount (no I/O), deinitialize (on a latched device, the driver skips the bus), medium absent. **Insertion** is noticed by polling `is_present` while the device is down. An idle step costs one of these two checks and nothing else.
+- **Bring-up** is one attempt per step: init, then for the local owner mount. A card the socket reports but the debounced check refuses is still being inserted; it is retried at the retry interval without being counted. Any other failure is counted, and after a fixed number of attempts the card is marked faulty, released, and left alone until it leaves the socket. A mount that reports the medium unavailable is a removal only if the device has stopped answering; otherwise the card is one the adapter refuses (sector size, capacity, read-only) and is counted as a failure, so it cannot be brought up again forever.
+- **Requests** - an owner change, a format - are recorded and carried out at the top of a later step, where no consumer is part-way through a call. Callers watch the owner, medium and `storage_request_pending` for the outcome. Formatting needs a confirmed local request and an unformatted or ready card; it is dropped if the card or owner changes first.
+- **The epoch** is a counter that changes whenever something a consumer may have cached stops being valid: whenever the medium stops being ready for its owner, and on every owner change. Consumers record it with what they cache and discard the cache when it differs; it is readable from either core. Stale filesystem handles enforce the same thing as a backstop.
+
+The coordinator is built for the consumers it does not have yet. A consumer that must reach a safe point before a transition - persistent state written before a USB handover, the audio stream stopped - adds that check where requests are carried out, and the request simply stays pending until it passes; the interface does not change. Bounded service work for consumers, such as the audio stream's read-ahead into the decoder's ring, has a marked place at the end of the step, after transitions, so it never runs against a card that is being lost or handed over. The USB mass-storage class will take the device from `storage_usb_device` and compare epochs to report a medium change to the host.
+
 *Other subsystem interfaces*
 
-Interfaces between the filesystem, EPUB, display, input, audio, USB, and power-management subsystems have not yet been finalized and should be documented here as they become concrete.
+Interfaces between the EPUB, display, input, audio, USB, and power-management subsystems have not yet been finalized and should be documented here as they become concrete.
 
 ## Data Flow
 
@@ -248,7 +276,7 @@ Current storage ownership is more clearly defined:
 
 - the SD device structure retains its static configuration across initialization and deinitialization
 
-- successful SD deinitialization releases the SPI peripheral and associated GPIO configuration
+- successful SD deinitialization releases the SPI peripheral and associated GPIO configuration, except the card-detect pin: the SD device claims it as a pulled-up input at its first presence check or initialization and keeps it until it is reconfigured with a different pin, because reading it is the only way to see an insertion while the device is uninitialized
 
 - a failed clean deinitialization may deliberately leave the SD device initialized and its hardware resources configured so that shutdown can be retried or handled by a separate forced-shutdown path
 
@@ -280,7 +308,7 @@ Tavernkeep runs in exactly one of three operating modes at a time:
 
 Reading and playback never run concurrently. (Audiobook read-along, if ever implemented, would be the one exception and would be designed as a fourth mode rather than by relaxing this rule.) USB mass storage runs with every other function stopped: a plugged-in cable means either a host is using the storage or the device is in use while charging, never both. The consequence for the rest of the system is that **no mode ever has more than one hard-deadline domain**, which is what lets the cooperative execution model stand without an RTOS (see Concurrency).
 
-**Storage has one owner at a time.** The owner is the filesystem layer in reader and audio modes and the mass-storage class in USB mode. Higher layers obtain storage only through the filesystem; the `block_device_t` is held by the filesystem adapter and, in USB mode, by the mass-storage glue, and by nothing else. This is what makes ownership enforceable rather than conventional.
+**Storage has one owner at a time.** The owner is the filesystem layer in reader and audio modes and the mass-storage class in USB mode. Higher layers obtain storage only through the filesystem. The `block_device_t` is held by the storage coordinator, which initializes and deinitializes it and alone decides who may use it; by the filesystem adapter while a volume is mounted; and, in USB mode, by the mass-storage glue. Nothing else holds it. This is what makes ownership enforceable rather than conventional.
 
 **Every change of ownership is the same transition.** A card removal, entering USB mode, leaving USB mode, and a future mode switch all pass through one storage coordinator path that:
 
@@ -296,6 +324,8 @@ From the filesystem layer's point of view, entering USB mode is indistinguishabl
 
 **Persistent-state writes happen at named save points behind one function.** Bookmarks and settings are written when the user explicitly bookmarks and automatically at chapter transitions; nowhere else, and never from within the mode transition above. In reader mode the chapter transition coincides with a full display refresh, so the write is issued once the frame has been sent to the panels and completes during the panels' own refresh time, which is much longer than a typical write. In audio mode the same rule bounds when a card write - with its programming-busy budget - can stall the storage coordinator, which sizes the audio buffering. Before entering USB mode the pending state is written and the write is confirmed complete before the handover.
 
+A save point replaces a file rather than editing it in place: it writes the new contents under a temporary name and confirms the close, removes the old file, then renames the temporary into place. An interruption can leave either both files, in which case the temporary may be incomplete and is discarded, or only the temporary, which was confirmed complete before the removal and is renamed into place. Whoever reads a persistent-state file resolves those two cases before using it (`filesystem_rename` in `filesystem.h`).
+
 **How USB mode is selected** - automatically on host enumeration, by prompt, or by menu - is an open product decision (`requirements.md`, OPEN-002). It decides whether reader or audio mode can be interrupted by a cable, in which case the interruption is one more caller of the ownership transition above.
 
 ## Removable-Media Detection and Hot Removal
@@ -306,7 +336,9 @@ The final socket presents card-detect and write-protect information through one 
 
 The SPI backend debounces its preliminary initialization check before touching the SD bus. It requires ten consecutive samples at the present level, taken one millisecond apart, within a maximum of thirty samples. The pad's internal pull-up is selected before GPIO initialization enables the input buffer. The board-level external pull-up remains required to define the signal before firmware begins executing and while the RP2350 pad is still in its reset state. After the interrupt is armed the level is read once more, so a card that went away between the debounce and the arming is refused rather than left with a latch nothing will set.
 
-The hot-removal interrupt is armed on the removal edge for the configured sense (rising for active-low, falling for active-high) rather than on a level. The first edge conservatively makes storage unavailable immediately and disables further edges until a fresh initialization, so mechanical contact bounce cannot produce an interrupt storm. A transaction interrupted by even an unconfirmed removal edge fails and does not resume; if the signal settles back to the present level, the card must be reinitialized before further access. The insertion edge is ignored.
+That debounce rejects contact bounce; it does not wait for the card itself. The detect switch closes before the card's contacts have seated and before the card has powered up, so an initialization attempted the moment the socket reports a card fails on a good card - on every reinsertion in VAL-H02, and on all three attempts of a deliberately slow one. The storage coordinator therefore waits `STORAGE_INSERT_SETTLE_MS` (500 ms) after a card first appears, sampling the socket on every step and restarting the wait on any empty reading, before its first bring-up attempt. The wait applies to every new card, including one present at boot; retries after a failed attempt follow a card that has already settled and do not wait again.
+
+The hot-removal interrupt is armed on the removal edge for the configured sense (rising for active-low, falling for active-high) rather than on a level. The first edge conservatively makes storage unavailable immediately and disables further edges until a fresh initialization, so mechanical contact bounce cannot produce an interrupt storm. A transaction interrupted by even an unconfirmed removal edge fails and does not resume; if the signal settles back to the present level, the card must be reinitialized before further access. The insertion edge is ignored by the interrupt; insertion is noticed by the storage coordinator polling the device's presence signal (`is_present`) while the device is uninitialized.
 
 **Interrupt and foreground responsibilities**
 
@@ -322,7 +354,7 @@ Hot removal uses a two-phase shutdown. The interrupt handler performs only bound
 
 The card-detect interrupt handler must not mount or unmount a filesystem, perform SD commands, wait for a peripheral, sleep, log, allocate memory, acquire a blocking lock, or call normal device deinitialization. In particular, it must not deinitialize a peripheral while interrupted foreground code may still be using that peripheral.
 
-Tavernkeep does not use an RTOS, so "terminating processes" means cooperative cancellation of subsystems with outstanding storage work. The physical SD backend cannot enumerate filesystem, book, audio, display, or USB consumers; a higher-level storage coordinator must own that cancellation policy.
+Tavernkeep does not use an RTOS, so "terminating processes" means cooperative cancellation of subsystems with outstanding storage work. The physical SD backend cannot enumerate filesystem, book, audio, display, or USB consumers; a higher-level storage coordinator must own that cancellation policy. That is `src/storage/storage.h` (see "Storage coordinator" under Major Interfaces); today it tells consumers through its epoch, and the place for consumers that must reach a safe point first is reserved in its step.
 
 **Block-device and filesystem behavior**
 
@@ -374,7 +406,7 @@ Current SD communication is synchronous and blocking. Individual SPI transfers a
 
 The initial storage implementation intentionally uses polling rather than DMA.
 
-`src/main.c` is the demo of the highest layer that currently works, replaced as each layer lands: today it exercises the SD driver end to end and reports each step over RTT before falling into the heartbeat loop. The same `main.c` is compiled into a host test that runs it against the card model with the real driver and dispatcher underneath, so every demo is proven on the host before it is flashed and the host and hardware logs are directly comparable.
+`src/main.c` is the demo of the highest layer that currently works, replaced as each layer lands: today it runs the storage coordinator in the loop, logs every change of owner, medium and epoch, and each time the card becomes ready runs a filesystem demo (label, root listing, a save point with its recovery rule, and a 16 KiB file written and read back in single calls so that FatFs issues multi-block transfers) whose steps are reported over RTT. It never formats a card unless built with `TAVERNKEEP_DEMO_FORMAT=1`. The same `main.c` is compiled into a host test that runs it against the card model with the real driver and dispatcher underneath, so every demo is proven on the host before it is flashed and the host and hardware logs are directly comparable.
 
 DMA is planned for bulk storage transfers after the polling implementation has been validated.
 
@@ -473,7 +505,7 @@ Current development uses a Raspberry Pi Pico 2.
 
 The final Tome hardware uses a full-size SD card socket.
 
-Current development uses an Adafruit MicroSD card breakout board+ on a breadboard, accessed through SPI1. That breakout carries no pull-ups on any SD line, its 74AHC125 level shifter sits on DI, CLK and CS, and its socket's detect switch is active-high. Until the final board's discrete pull-ups exist, `main.c` enables the RP2350 internal pull-ups on DO and CS: the card leaves DO undriven until CMD0 moves it into SPI mode, and without a pull-up the driver's pre-command ready wait sees a floating line and reports BUSY_TIMEOUT before CMD0 is ever sent.
+Current development uses an Adafruit MicroSD card breakout board+ on a breadboard, accessed through SPI0: DO on GPIO 16, CS on GPIO 17, CLK on GPIO 18 and DI on GPIO 19, with the availability signal on GPIO 12 (`main.c` holds the authoritative assignment). The first hardware run, VAL-H01, used an earlier wiring on SPI1; the breadboard was later rewired onto SPI0 to wire up the availability signal. That breakout carries no pull-ups on any SD line, its 74AHC125 level shifter sits on DI, CLK and CS, and its socket's detect switch is active-high. Until the final board's discrete pull-ups exist, `main.c` enables the RP2350 internal pull-ups on DO and CS: the card leaves DO undriven until CMD0 moves it into SPI mode, and without a pull-up the driver's pre-command ready wait sees a floating line and reports BUSY_TIMEOUT before CMD0 is ever sent.
 
 The current SD implementation begins communication at approximately 400 kHz and increases SPI speed only after successful card initialization. 1 MHz is the only post-initialization rate demonstrated on hardware so far.
 
@@ -517,7 +549,7 @@ Two rotary encoders with push input have been explored but are not currently a f
 
 Tome provides USB connectivity and is required to support USB mass-storage access to removable storage.
 
-The detailed firmware ownership and synchronization model for this access remains unresolved.
+Ownership of the storage during this access is defined under "Operating Modes and Storage Ownership"; how USB mode is selected remains open.
 
 ## Known Architectural Limitations
 
@@ -525,15 +557,15 @@ The current firmware architecture is incomplete because development is still con
 
 At the current stage:
 
-- only the SPI SD transport exists; it is functionally complete against the block-device contract and has one real-card run at 1 MHz behind it
+- only the SPI SD transport exists; it is functionally complete against the block-device contract and has three real-card runs at 1 MHz behind it, all on one SDHC card (VAL-H01 to VAL-H03)
 
 - the planned 4-bit SD backend does not yet exist
 
-- FatFs has not yet been integrated
+- the filesystem layer and the storage coordinator have run on the host against a RAM-backed block device and on one real card at 1 MHz (VAL-H02, VAL-H03), but not yet against the card model; removal during a multi-block read and during mount are untested, and the format path has not run on hardware
 
 - DMA-based storage transfer has not yet been implemented
 
-- the filesystem-to-USB ownership model has not yet been defined
+- the USB mass-storage class has not yet been implemented; the storage coordinator's handover to it has
 
 - the final physical input hardware has not been selected
 
@@ -567,9 +599,9 @@ The exact asynchronous API and DMA ownership model have not yet been designed. T
 
 **Filesystem integration**
 
-FatFs is planned above the block-device interface.
+FatFs runs above the block-device interface, behind the filesystem layer's interface.
 
-The adapter between FatFs and block_device_t has not yet been implemented.
+The filesystem layer, the adapter between FatFs and block_device_t, and the storage coordinator above them are implemented and have run on hardware (VAL-H02, VAL-H03); a run on the card model remains.
 
 **Input/events**
 
@@ -597,7 +629,7 @@ Buffering, DMA use, timing, decoder selection or implementation, and interaction
 
 USB mass-storage access to removable storage is required.
 
-A safe ownership model between the USB host and Tavernkeep's own filesystem access must be defined before this feature is implemented.
+The ownership model between the USB host and Tavernkeep's own filesystem access is defined under "Operating Modes and Storage Ownership"; the mass-storage class itself remains to be designed.
 
 **Power management**
 

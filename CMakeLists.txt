@@ -58,6 +58,7 @@ set(TAVERNKEEP_SOURCES
     src/storage/filesystem.c
     src/storage/sd_spi.c
     src/storage/sd_crc.c
+    src/storage/storage.c
 )
 
 # FatFs, vendored under third_party/fatfs. Its own diskio.c is a stub and is
@@ -78,7 +79,21 @@ pico_set_program_version(tavernkeep "${PROJECT_VERSION}")
 
 target_include_directories(tavernkeep PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fatfs/source
+)
+
+# FatFs is opaque outside the filesystem layer, so its include path is given
+# only to the files that may include ff.h: the filesystem layer itself
+# (filesystem.c, which also supplies get_fattime(), and diskio.c). An
+# #include "ff.h" anywhere else fails to build. FatFs's own sources find their
+# headers in their own directory and are listed for completeness.
+set(TAVERNKEEP_FATFS_CLIENTS
+    src/storage/diskio.c
+    src/storage/filesystem.c
+)
+set_source_files_properties(
+    ${TAVERNKEEP_FATFS_CLIENTS} ${TAVERNKEEP_FATFS_SOURCES}
+    PROPERTIES INCLUDE_DIRECTORIES
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fatfs/source
 )
 
 # FF_USE_LFN=2 keeps each FatFs call's long-file-name working buffer

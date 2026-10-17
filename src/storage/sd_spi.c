@@ -11,6 +11,9 @@ enum {
     SD_SPI_CARD_DETECT_STABLE_SAMPLES = 10,
     SD_SPI_CARD_DETECT_MAX_SAMPLES = 30,
     SD_SPI_CARD_DETECT_SAMPLE_INTERVAL_MS = 1,
+    //settling time after the pull-up is first selected, before the level is trusted. the pull-up and the
+    //line's capacitance settle in microseconds; this leaves a wide margin for breadboard wiring
+    SD_SPI_CARD_DETECT_SETTLE_US = 100,
     //bytes read while waiting for an R1 response before giving up. the spec quotes N_CR as 0 to 8 bytes
     //for an sd card in spi mode; linux's mmc_spi driver raised its limit from 8 to 16 after real cards
     //were seen needing 12, and there is no reason to choose differently. a response is accepted on any
@@ -25,6 +28,7 @@ static void sd_spi_card_available_irq(
     uint32_t events
 );
 static bool sd_spi_removal_latched(const sd_spi_t *sd);
+static void sd_spi_card_detect_claim(sd_spi_t *sd);
 static block_device_result_t sd_spi_require_usable(const sd_spi_t *sd);
 static bool sd_spi_wait_ready_timeout(const sd_spi_t *sd, int timeout_ms);
 static bool sd_spi_wait_ready(const sd_spi_t *sd);
@@ -77,6 +81,9 @@ static block_device_result_t sd_spi_device_write_blocks(
 static block_device_result_t sd_spi_device_get_info(
     void *context,
     block_device_info_t *info);
+static block_device_result_t sd_spi_device_is_present(
+    void *context,
+    bool *present);
 
 static const block_device_operations_t sd_spi_operations = {
     .init = sd_spi_device_init,
@@ -84,6 +91,7 @@ static const block_device_operations_t sd_spi_operations = {
     .read_blocks = sd_spi_device_read_blocks,
     .write_blocks = sd_spi_device_write_blocks,
     .get_info = sd_spi_device_get_info,
+    .is_present = sd_spi_device_is_present,
 };
 
 block_device_result_t sd_spi_configure(
@@ -93,6 +101,12 @@ block_device_result_t sd_spi_configure(
     if (sd == NULL || sd->initialized == true || config == NULL || config->spi == NULL
             || config->baud_rate_hz == 0U || config->baud_rate_hz > 25000000U) {
         return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
+    }
+
+    //a claimed card-detect pin that the new configuration no longer uses goes back to its reset state
+    if (sd->card_detect_claimed && sd->config.pin_card_available != config->pin_card_available) {
+        gpio_deinit(sd->config.pin_card_available);
+        sd->card_detect_claimed = false;
     }
 
     sd->config = *config;
@@ -132,16 +146,10 @@ static block_device_result_t sd_spi_device_init(void *context)
     sd->card_type_hcxc = false;
     sd->block_count = 0U;
 
-    //select the pull-up before gpio_init enables the input buffer on RP2350
-    //the pull-up is correct for both senses of the switch: in each case the open state must read high,
-    //only which state means "present" differs (card_detect_active_high)
-    gpio_pull_up(sd->config.pin_card_available);
     //setup the card detect/write protect pin (again, validate hardware slot's truth table to ensure WP can serve both functions)
-    gpio_init(sd->config.pin_card_available);
-    gpio_set_dir(sd->config.pin_card_available, GPIO_IN);
+    sd_spi_card_detect_claim(sd);
     //check that a non write protected card is present, with debouncing
     if (!sd_spi_card_available(sd)) {
-        gpio_deinit(sd->config.pin_card_available);
         return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
     }
 
@@ -154,7 +162,6 @@ static block_device_result_t sd_spi_device_init(void *context)
             sd_spi_card_removal_edge(sd),
             sd_spi_card_available_irq,
             sd)) {
-        gpio_deinit(sd->config.pin_card_available);
         return BLOCK_DEVICE_RESULT_IO_ERROR;
     }
 
@@ -167,7 +174,6 @@ static block_device_result_t sd_spi_device_init(void *context)
     }
     if (card_unavailable || sd_spi_removal_latched(sd)) {
         platform_gpio_irq_unregister(sd->config.pin_card_available);
-        gpio_deinit(sd->config.pin_card_available);
         return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
     }
 
@@ -359,7 +365,7 @@ static block_device_result_t sd_spi_device_deinit(void *context)
     gpio_deinit(sd->config.pin_controller_out);
     gpio_deinit(sd->config.pin_controller_in);
     gpio_deinit(sd->config.pin_chip_select);
-    gpio_deinit(sd->config.pin_card_available);
+    //the card-detect pin stays a pulled-up input (card_detect_claimed in sd_spi.h)
 
     sd->initialized = false;
     sd->card_type_legacy = false;
@@ -999,12 +1005,40 @@ static block_device_result_t sd_spi_init_rollback(
     gpio_deinit(sd->config.pin_controller_out);
     gpio_deinit(sd->config.pin_controller_in);
     gpio_deinit(sd->config.pin_chip_select);
-    gpio_deinit(sd->config.pin_card_available);
+    //the card-detect pin stays a pulled-up input (card_detect_claimed in sd_spi.h)
     sd->initialized = false;
     sd->card_type_legacy = false;
     sd->card_type_hcxc = false;
     sd->block_count = 0U;
     return result;
+}
+
+//set up the card-detect pin as a pulled-up input, once. the pull-up is selected before gpio_init enables
+//the input buffer on RP2350, and it is correct for both senses of the switch: in each case the open state
+//must read high, only which state means "present" differs (card_detect_active_high)
+static void sd_spi_card_detect_claim(sd_spi_t *sd)
+{
+    if (sd->card_detect_claimed) {
+        return;
+    }
+    gpio_pull_up(sd->config.pin_card_available);
+    gpio_init(sd->config.pin_card_available);
+    gpio_set_dir(sd->config.pin_card_available, GPIO_IN);
+    busy_wait_us(SD_SPI_CARD_DETECT_SETTLE_US);
+    sd->card_detect_claimed = true;
+}
+
+//one undebounced sample of the socket, whether or not the device is initialized; no bus traffic. the
+//debounced check is init's (sd_spi_card_available)
+static block_device_result_t sd_spi_device_is_present(void *context, bool *present)
+{
+    sd_spi_t *const sd = context;
+    if (sd == NULL || !sd->configured || present == NULL) {
+        return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
+    }
+    sd_spi_card_detect_claim(sd);
+    *present = gpio_get(sd->config.pin_card_available) == sd_spi_card_present_level(sd);
+    return BLOCK_DEVICE_RESULT_OK;
 }
 
 static bool sd_spi_card_available(const sd_spi_t *sd)
