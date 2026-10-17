@@ -25,8 +25,9 @@
 //data rate for the first hardware runs; protocol first, speed later
 #define SD_BAUD_HZ 1000000U
 
-//the demo never formats a card unless built with this set to 1: a demo that erases whatever card is in
-//the socket is a trap. with it set, a card with no FAT volume is formatted once it is seen
+//the demo never formats a card unless this is changed to 1 below (there is no build option for it): a
+//demo that erases whatever card is in the socket is a trap. with it set, a card with no FAT volume is
+//formatted once it is seen
 #ifndef TAVERNKEEP_DEMO_FORMAT
 #define TAVERNKEEP_DEMO_FORMAT 0
 #endif
@@ -320,7 +321,7 @@ static void storage_watch(void)
         DEBUG_INFO("no FAT volume; formatting (TAVERNKEEP_DEMO_FORMAT)");
         (void)storage_request_format();
 #else
-        DEBUG_INFO("no FAT volume; not formatting (build with TAVERNKEEP_DEMO_FORMAT=1 to allow it)");
+        DEBUG_INFO("no FAT volume; not formatting (set TAVERNKEEP_DEMO_FORMAT to 1 in main.c to allow it)");
 #endif
     }
     if (became_ready && owner == STORAGE_OWNER_LOCAL) {

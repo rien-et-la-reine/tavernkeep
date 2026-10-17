@@ -10,7 +10,7 @@ Tavernkeep is firmware for the RP2350-based Tome e-reader and MP3 player.
 
 The firmware is divided into platform-level hardware support and higher-level subsystems responsible for storage, filesystems, book handling, audio playback, display output, physical input, USB functionality, and system operation.
 
-Development is currently proceeding from the lowest-level hardware interfaces upward. Removable storage is the first substantial subsystem under implementation. Higher-level filesystem, EPUB, display, audio, USB, input, and power-management functionality remains planned or only scaffolded unless otherwise documented.
+Development is currently proceeding from the lowest-level hardware interfaces upward. Removable storage is the first substantial subsystem: the SPI SD driver, the filesystem layer and the storage coordinator are implemented and validated on hardware. EPUB, display, audio, USB, input, and power-management functionality remains planned or only scaffolded unless otherwise documented.
 
 Tome's final hardware uses two e-ink displays and removable SD storage. The exact physical control scheme remains unresolved and must be settled before significant hardware development proceeds.
 
@@ -70,7 +70,7 @@ Filesystem interpretation does not belong to the block-device backend.
 
 The filesystem layer operates above the block-device interface and provides file-level access to removable storage.
 
-FatFs is vendored, configured and built as this layer's implementation. The layer and its FatFs disk I/O adapter are implemented (see "Filesystem" under Major Interfaces) and have passed a host smoke test over a RAM-backed block device and run on a real card at 1 MHz, including hot removal while idle and during writes and save points (VAL-H02 and VAL-H03 in `docs/validation.md`). They have not yet run against the card model.
+FatFs is vendored, configured and built as this layer's implementation. The layer and its FatFs disk I/O adapter are implemented (see "Filesystem" under Major Interfaces) and have passed a host smoke test over a RAM-backed block device and run on a real card at 1 MHz, including hot removal while idle and during writes and save points (VAL-H02 and VAL-H03 in `docs/validation.md`). They have not yet run against the card model, a host simulation of an SD card that is kept outside the repository (see Concurrency / Execution Model).
 
 The filesystem layer should not depend on whether the underlying SD implementation uses SPI or the planned 4-bit interface.
 
@@ -191,10 +191,10 @@ A non-legacy SD card is not assumed to be SDHC/SDXC; version and addressing mode
 
 `src/storage/storage.h` is the owner of the removable card. It holds the block device for the life of the firmware and is the only code that initializes or deinitializes it, mounts, unmounts or formats the filesystem, or lends the device to the USB mass-storage class. It runs as `storage_step(now_ms)` in the cooperative loop of the core that also calls the filesystem layer.
 
-Its state is two values. The *owner* is who may use the card: the filesystem layer (local) or the USB mass-storage class. The *medium* is the card's condition for that owner: absent, preparing (being brought up, including waits between attempts), faulty, unformatted (local only: works, but holds no FAT volume), or ready (local: mounted; USB: initialized and lent).
+Its state is two values. The *owner* is who may use the card: the filesystem layer (local) or the USB mass-storage class. The *medium* is the card's condition for that owner: absent, preparing (being brought up, including the settle wait after insertion and the waits between attempts), faulty, unformatted (local only: works, but holds no FAT volume), or ready (local: mounted; USB: initialized and lent).
 
 - **Removal** is noticed in the step after the card-detect interrupt latches it: `get_info` then reports `INVALID_DEVICE` without touching the bus. The response is the ownership transition: unmount (no I/O), deinitialize (on a latched device, the driver skips the bus), medium absent. **Insertion** is noticed by polling `is_present` while the device is down. An idle step costs one of these two checks and nothing else.
-- **Bring-up** is one attempt per step: init, then for the local owner mount. A card the socket reports but the debounced check refuses is still being inserted; it is retried at the retry interval without being counted. Any other failure is counted, and after a fixed number of attempts the card is marked faulty, released, and left alone until it leaves the socket. A mount that reports the medium unavailable is a removal only if the device has stopped answering; otherwise the card is one the adapter refuses (sector size, capacity, read-only) and is counted as a failure, so it cannot be brought up again forever.
+- **Bring-up** waits first: a new card must read present for `STORAGE_INSERT_SETTLE_MS` before its first attempt, so that it has seated and powered up (see "Availability signal and debounce"). It is then one attempt per step: init, then for the local owner mount. A card the socket reports but the debounced check refuses is still being inserted; it is retried at the retry interval without being counted. Any other failure is counted, and after a fixed number of attempts the card is marked faulty, released, and left alone until it leaves the socket. A mount that reports the medium unavailable is a removal only if the device has stopped answering; otherwise the card is one the adapter refuses (sector size, capacity, read-only) and is counted as a failure, so it cannot be brought up again forever.
 - **Requests** - an owner change, a format - are recorded and carried out at the top of a later step, where no consumer is part-way through a call. Callers watch the owner, medium and `storage_request_pending` for the outcome. Formatting needs a confirmed local request and an unformatted or ready card; it is dropped if the card or owner changes first.
 - **The epoch** is a counter that changes whenever something a consumer may have cached stops being valid: whenever the medium stops being ready for its owner, and on every owner change. Consumers record it with what they cache and discard the cache when it differs; it is readable from either core. Stale filesystem handles enforce the same thing as a backstop.
 
@@ -406,7 +406,9 @@ Current SD communication is synchronous and blocking. Individual SPI transfers a
 
 The initial storage implementation intentionally uses polling rather than DMA.
 
-`src/main.c` is the demo of the highest layer that currently works, replaced as each layer lands: today it runs the storage coordinator in the loop, logs every change of owner, medium and epoch, and each time the card becomes ready runs a filesystem demo (label, root listing, a save point with its recovery rule, and a 16 KiB file written and read back in single calls so that FatFs issues multi-block transfers) whose steps are reported over RTT. It never formats a card unless built with `TAVERNKEEP_DEMO_FORMAT=1`. The same `main.c` is compiled into a host test that runs it against the card model with the real driver and dispatcher underneath, so every demo is proven on the host before it is flashed and the host and hardware logs are directly comparable.
+`src/main.c` is the demo of the highest layer that currently works, replaced as each layer lands: today it runs the storage coordinator in the loop, logs every change of owner, medium and epoch, and each time the card becomes ready runs a filesystem demo (label, root listing, a save point with its recovery rule, and a 16 KiB file written and read back in single calls so that FatFs issues multi-block transfers) whose steps are reported over RTT. It never formats a card unless `TAVERNKEEP_DEMO_FORMAT` is set to 1 in `main.c`; there is no build option for it.
+
+Host tests are kept outside the repository. The storage-layer suite (`tests/filesystem/`, local only) runs the coordinator, the filesystem layer, the adapter and the real FatFs over a RAM-backed fake card. The card model, a host simulation of an SD card that `main.c` was compiled against so that host and hardware logs compare directly, is kept on another machine and has not yet been run against the filesystem layer and the coordinator, so the current demo has not run on it.
 
 DMA is planned for bulk storage transfers after the polling implementation has been validated.
 
@@ -561,7 +563,7 @@ At the current stage:
 
 - the planned 4-bit SD backend does not yet exist
 
-- the filesystem layer and the storage coordinator have run on the host against a RAM-backed block device and on one real card at 1 MHz (VAL-H02, VAL-H03), but not yet against the card model; removal during a multi-block read and during mount are untested, and the format path has not run on hardware
+- the filesystem layer and the storage coordinator have run on the host against a RAM-backed block device and on one real card at 1 MHz (VAL-H02, VAL-H03), but not yet against the card model (kept outside the repository); removal during a multi-block read and during mount are untested, and the format path has not run on hardware
 
 - DMA-based storage transfer has not yet been implemented
 
@@ -601,7 +603,7 @@ The exact asynchronous API and DMA ownership model have not yet been designed. T
 
 FatFs runs above the block-device interface, behind the filesystem layer's interface.
 
-The filesystem layer, the adapter between FatFs and block_device_t, and the storage coordinator above them are implemented and have run on hardware (VAL-H02, VAL-H03); a run on the card model remains.
+The filesystem layer, the adapter between FatFs and block_device_t, and the storage coordinator above them are implemented and have run on hardware (VAL-H02, VAL-H03); a run on the card model, kept outside the repository, remains.
 
 **Input/events**
 
