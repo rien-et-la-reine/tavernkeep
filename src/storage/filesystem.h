@@ -28,15 +28,22 @@
  * Paths and names are UTF-8 (FF_LFN_UNICODE 2). Sizes and offsets are 32-bit
  * because exFAT is not supported (FF_FS_EXFAT 0), so no file exceeds 4 GiB.
  *
- * Open entries are the caller's responsibility. FatFs is built without file
- * locking (FF_FS_LOCK 0) and this layer does not record which paths are open,
- * so nothing refuses the following, and each one can corrupt the volume:
- *   - removing or renaming a file that is open, or a directory being listed;
+ * Open entries. Any number of handles may read a file at once, but these fail
+ * with FILESYSTEM_RESULT_IN_USE and change nothing, because each would corrupt
+ * the volume if it went ahead:
+ *   - removing or renaming a file that is open, or removing a directory being
+ *     listed;
  *   - opening a file with FILESYSTEM_OPEN_REPLACE while it is open through any
- *     other handle, or opening a file that is open for FILESYSTEM_OPEN_REPLACE.
- * Close the handle first. In practice each file has one owning subsystem (the
- * book, the audio player, persistent state), which is what keeps this rule
- * cheap to follow. */
+ *     other handle, or opening a file at all while it is open for
+ *     FILESYSTEM_OPEN_REPLACE.
+ * Renaming a directory being listed is allowed: the listing follows the
+ * directory, not its name. FatFs enforces the rules for files with its table
+ * of open entries (FF_FS_LOCK), which identifies a file by its place in its
+ * directory, so two paths naming the same file are the same entry; the layer
+ * checks a listed directory itself, because that table does not cover it.
+ * Closing a handle releases its entry even when the close fails, and an
+ * unmount releases every entry. The entries inside a directory being listed
+ * are not held by the listing. */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -66,6 +73,12 @@ typedef enum {
     FILESYSTEM_RESULT_TOO_MANY_OPEN,
     FILESYSTEM_RESULT_STORAGE_ERROR,
     FILESYSTEM_RESULT_NOT_IMPLEMENTED,
+    /* The entry is open through another handle in a way the call would
+     * conflict with; see "Open entries" above. Nothing was changed: close the
+     * other handle and try again. Last in the list so that the numbers of the
+     * results before it, which logs and validation records quote, stay the
+     * same. */
+    FILESYSTEM_RESULT_IN_USE,
 } filesystem_result_t;
 
 typedef enum {

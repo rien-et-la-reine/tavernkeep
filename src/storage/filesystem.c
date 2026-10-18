@@ -10,7 +10,8 @@
  *
  * Cooperative and single-threaded: no locking, called from the storage
  * coordinator's core only, and never from an interrupt handler.
- * FF_FS_REENTRANT is 0 to match.
+ * FF_FS_REENTRANT is 0 to match. (FF_FS_LOCK is FatFs's table of open
+ * entries, not a lock between threads; see "Open entries" in filesystem.h.)
  *
  * This file also supplies get_fattime(), FatFs's one seam for time, so that no
  * code outside the filesystem layer includes ff.h; the time itself comes from
@@ -22,8 +23,8 @@
  *   FR_NO_FILESYSTEM                       -> NO_FILESYSTEM
  *   FR_NO_FILE, FR_NO_PATH                 -> NOT_FOUND
  *   FR_EXIST                               -> EXISTS
- *   FR_DENIED, FR_WRITE_PROTECTED,
- *   FR_LOCKED                              -> DENIED
+ *   FR_DENIED, FR_WRITE_PROTECTED          -> DENIED
+ *   FR_LOCKED                              -> IN_USE
  *   FR_INVALID_NAME, FR_INVALID_PARAMETER  -> INVALID_ARGUMENT
  *   FR_INVALID_OBJECT                      -> STALE_HANDLE
  *   FR_TOO_MANY_OPEN_FILES                 -> TOO_MANY_OPEN
@@ -60,6 +61,15 @@ static_assert(FILESYSTEM_MAX_OPEN_FILES <= UINT8_MAX
     "handle slot numbers are uint8_t");
 static_assert(sizeof(FSIZE_t) == sizeof(uint32_t),
     "sizes and offsets are 32-bit while FF_FS_EXFAT is 0");
+//FatFs's open-entry table needs an entry for every file and directory the pools can hold open; with
+//fewer, an open the pools allow would fail with TOO_MANY_OPEN
+static_assert(FF_FS_LOCK >= FILESYSTEM_MAX_OPEN_FILES + FILESYSTEM_MAX_OPEN_DIRS,
+    "FF_FS_LOCK in ffconf.h must cover both handle pools");
+
+//FatFs's flag for a file whose changes are not yet on the card (FA_MODIFIED in ff.c, R0.16). ff.h does
+//not export it; filesystem_close clears it to release a file whose close failed (see there), and
+//fs_failed_close_releases_the_entry in the host tests catches a FatFs that changes it
+#define FATFS_FILE_MODIFIED 0x40U
 
 typedef struct {
     FIL fil;
@@ -108,8 +118,9 @@ static filesystem_result_t map_result(FRESULT result)
         return FILESYSTEM_RESULT_EXISTS;
     case FR_DENIED:
     case FR_WRITE_PROTECTED:
-    case FR_LOCKED:
         return FILESYSTEM_RESULT_DENIED;
+    case FR_LOCKED:
+        return FILESYSTEM_RESULT_IN_USE;
     case FR_INVALID_NAME:
     case FR_INVALID_PARAMETER:
         return FILESYSTEM_RESULT_INVALID_ARGUMENT;
@@ -275,7 +286,8 @@ filesystem_result_t filesystem_unmount(void)
         release_dir_slot(&dirs[i]);
     }
 
-    //only unregisters the volume
+    //only unregisters the volume, which also empties FatFs's open-entry table for it: the files dropped
+    //above were never closed, so their entries are released here
     (void)f_mount(NULL, "", 0);
     filesystem_diskio_unbind(FILESYSTEM_DRIVE_SD);
     mounted = false;
@@ -372,7 +384,15 @@ filesystem_result_t filesystem_close(filesystem_file_t file)
     }
     const FRESULT result = f_close(&slot->fil);
     //the handle is spent whatever f_close returned: after a disk error FatFs has already marked the FIL
-    //failed, so there is nothing a retry could flush
+    //failed, so there is nothing a retry could flush. but f_close gives up the file's entry in FatFs's
+    //open-entry table only after a successful flush, so a failed close would leave the file IN_USE until
+    //the next mount. FatFs left the FIL open in that case: drop its unflushed changes and close it again,
+    //which now has nothing to flush and so releases the entry. after a removal that second close fails
+    //too (the drive reports not ready), and the coordinator's unmount clears the table instead
+    if (result != FR_OK && slot->fil.obj.fs != NULL) {
+        slot->fil.flag &= (BYTE)~FATFS_FILE_MODIFIED;
+        (void)f_close(&slot->fil);
+    }
     release_file_slot(slot);
     return map_result(result);
 }
@@ -489,7 +509,12 @@ filesystem_result_t filesystem_opendir(
             slot->pending = true;
         }
         if (result != FR_OK) {
-            //a DIR holds no resources while FF_FS_LOCK is 0, so a half-opened one needs no close
+            //a failed f_opendir leaves nothing open, but f_findfirst opens the directory before it reads
+            //the first entry, so if that read failed the directory holds an entry in FatFs's open-entry
+            //table. FatFs marks an object it left open by keeping obj.fs set
+            if (slot->dir.obj.fs != NULL) {
+                (void)f_closedir(&slot->dir);
+            }
             slot->pending = false;
             return map_result(result);
         }
@@ -565,8 +590,34 @@ filesystem_result_t filesystem_stat(const char *path, filesystem_dirent_t *entry
     return FILESYSTEM_RESULT_OK;
 }
 
-//the open-entry rule in filesystem.h applies to both of these: FF_FS_LOCK is 0, so FatFs cannot refuse
-//them, and FIL does not record its path, so this layer cannot either
+//both of these refuse a file that is open (IN_USE), through FatFs's open-entry table (FF_FS_LOCK). that
+//table does not cover a directory being listed: f_opendir records a listing under the directory's own
+//first cluster, while f_unlink and f_rename look the directory up by its entry in its parent, so the two
+//never match. renaming a listed directory is harmless, as the listing follows its clusters, not its
+//name; removing one would leave the listing reading freed clusters, so remove checks for it here
+
+//true if path names the directory a listing has open. probing with f_opendir costs a path walk, and only
+//happens while a listing of a subdirectory is open
+static bool being_listed(const char *path)
+{
+    for (size_t i = 0; i < FILESYSTEM_MAX_OPEN_DIRS; i++) {
+        //the root directory has no cluster of its own here (0), and cannot be removed anyway
+        if (!dirs[i].in_use || dirs[i].dir.obj.sclust == 0U) {
+            continue;
+        }
+        DIR probe;
+        if (f_opendir(&probe, path) != FR_OK) {
+            //not a directory, or not there: f_unlink reports that itself
+            return false;
+        }
+        const bool same = probe.obj.sclust == dirs[i].dir.obj.sclust;
+        (void)f_closedir(&probe);
+        if (same) {
+            return true;
+        }
+    }
+    return false;
+}
 
 filesystem_result_t filesystem_rename(const char *old_path, const char *new_path)
 {
@@ -586,6 +637,9 @@ filesystem_result_t filesystem_remove(const char *path)
     }
     if (!mounted) {
         return FILESYSTEM_RESULT_NOT_MOUNTED;
+    }
+    if (being_listed(path)) {
+        return FILESYSTEM_RESULT_IN_USE;
     }
     return map_result(f_unlink(path));
 }
