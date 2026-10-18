@@ -275,10 +275,10 @@ static void bring_up(uint32_t now_ms)
         const block_device_result_t result = block_device_init(device);
         if (result == BLOCK_DEVICE_RESULT_INVALID_DEVICE) {
             //the socket said yes but the debounced check said no: still being inserted, or a glitch. not
-            //counted against the card; look again after the interval, and settle it again if it is there
+            //counted against the card; it settles again from the next step that sees it, which also
+            //spaces the attempts on a card that keeps being refused
             DEBUG_INFO("storage: card not seated (init refused it), waiting");
             medium = STORAGE_MEDIUM_ABSENT;
-            schedule_retry(now_ms);
             settled = false;
             return;
         }

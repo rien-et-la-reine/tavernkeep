@@ -63,8 +63,9 @@ typedef enum {
 
 /* Bring-up attempts (init, then mount) on an inserted card before it is
  * declared faulty, and the interval between them. A refusal because the card
- * turned out not to be seated (INVALID_DEVICE) is not counted: it is retried at
- * the same interval for as long as the socket reports a card. */
+ * turned out not to be seated (INVALID_DEVICE) is not counted: the card is
+ * taken to be still arriving and settles again (STORAGE_INSERT_SETTLE_MS)
+ * before the next attempt, for as long as the socket reports it. */
 #define STORAGE_BRING_UP_ATTEMPTS 3
 #define STORAGE_RETRY_INTERVAL_MS 250U
 
@@ -75,8 +76,8 @@ typedef enum {
  * ramp), so an attempt made at once fails on a good card - always on a
  * deliberately slow insertion (VAL-H02). The driver's own 10 ms debounce
  * rejects contact bounce; this covers seating and power-up. It applies to
- * every new card, including one present at boot, and not to retries, which
- * already follow a settled card. */
+ * every new card, including one present at boot, and again to a card refused
+ * as not seated; not to counted retries, which already follow a settled card. */
 #define STORAGE_INSERT_SETTLE_MS 500U
 
 /* Take ownership of a block device that is configured but not initialized and
