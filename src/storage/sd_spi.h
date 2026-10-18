@@ -40,11 +40,12 @@ typedef struct {
     /* The card-detect pin is set up as a pulled-up input. Once it is, the
      * device keeps it - across deinit and failed inits - because reading it is
      * the only way to see an insertion while the device is uninitialized
-     * (block_device_is_present). Reconfiguring with a different pin releases
-     * the old one. */
+     * (block_device_is_present). Reconfiguring with a different pin fails
+     * with error invalid argument */
     bool card_detect_claimed;
 } sd_spi_t;
 
+//assigns config info to sd_spi_t object as well as claims and configures its card detect pin. blocks for ~100us
 block_device_result_t sd_spi_configure(
     sd_spi_t *sd,
     const sd_spi_config_t *config);

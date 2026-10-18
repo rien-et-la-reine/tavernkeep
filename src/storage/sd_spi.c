@@ -105,10 +105,9 @@ block_device_result_t sd_spi_configure(
         return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
     }
 
-    //a claimed card-detect pin that the new configuration no longer uses goes back to its reset state
-    if (sd->card_detect_claimed && sd->config.pin_card_available != config->pin_card_available) {
-        gpio_deinit(sd->config.pin_card_available);
-        sd->card_detect_claimed = false;
+    //the card-detect pin is hardwired and claimed for the life of the device, so it cannot change
+    if (sd->configured && sd->config.pin_card_available != config->pin_card_available) {
+        return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
     }
 
     sd->config = *config;
@@ -125,6 +124,9 @@ block_device_result_t sd_spi_configure(
         sd->configured = true;
         atomic_init(&sd->removal_latched, false);
     }
+    //claim and configure the card detect pin, used to check for card insertion/presence on startup
+    sd_spi_card_detect_claim(sd);
+
     return BLOCK_DEVICE_RESULT_OK;
 }
 
@@ -148,8 +150,6 @@ static block_device_result_t sd_spi_device_init(void *context)
     sd->card_type_hcxc = false;
     sd->block_count = 0U;
 
-    //setup the card detect/write protect pin (again, validate hardware slot's truth table to ensure WP can serve both functions)
-    sd_spi_card_detect_claim(sd);
     //check that a non write protected card is present, with debouncing
     if (!sd_spi_card_available(sd)) {
         return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
@@ -1062,7 +1062,6 @@ static block_device_result_t sd_spi_device_is_present(void *context, bool *prese
     if (sd == NULL || !sd->configured || present == NULL) {
         return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
     }
-    sd_spi_card_detect_claim(sd);
     *present = gpio_get(sd->config.pin_card_available) == sd_spi_card_present_level(sd);
     return BLOCK_DEVICE_RESULT_OK;
 }
