@@ -113,6 +113,7 @@ block_device_result_t sd_spi_configure(
     sd->config = *config;
     sd->initialized = false;
     sd->block_count = 0U;
+    sd->bus_rate_hz = 0U;
     sd->block_device.context = sd;
     sd->block_device.operations = &sd_spi_operations;
 
@@ -138,6 +139,11 @@ block_device_t *sd_spi_as_block_device(sd_spi_t *sd)
     return &sd->block_device;
 }
 
+uint32_t sd_spi_bus_rate_hz(const sd_spi_t *sd)
+{
+    return sd != NULL && sd->initialized ? sd->bus_rate_hz : 0U;
+}
+
 static block_device_result_t sd_spi_device_init(void *context)
 {
     sd_spi_t *const sd = context;
@@ -149,6 +155,7 @@ static block_device_result_t sd_spi_device_init(void *context)
     sd->card_type_legacy = false;
     sd->card_type_hcxc = false;
     sd->block_count = 0U;
+    sd->bus_rate_hz = 0U;
 
     //check that a non write protected card is present, with debouncing
     if (!sd_spi_card_available(sd)) {
@@ -324,8 +331,8 @@ static block_device_result_t sd_spi_device_init(void *context)
         return sd_spi_init_rollback(sd, BLOCK_DEVICE_RESULT_INVALID_DEVICE);
     }
     
-    //move to operational baud rate
-    spi_set_baudrate(sd->config.spi, sd->config.baud_rate_hz);
+    //move to operational baud rate, keeping the rate clk_peri actually divides to
+    sd->bus_rate_hz = spi_set_baudrate(sd->config.spi, sd->config.baud_rate_hz);
     
     //card initalized, update status accordingly
     sd->initialized = true;
@@ -373,6 +380,7 @@ static block_device_result_t sd_spi_device_deinit(void *context)
     sd->card_type_legacy = false;
     sd->card_type_hcxc = false;
     sd->block_count = 0U;
+    sd->bus_rate_hz = 0U;
 
     return BLOCK_DEVICE_RESULT_OK;
 }
@@ -1036,6 +1044,7 @@ static block_device_result_t sd_spi_init_rollback(
     sd->card_type_legacy = false;
     sd->card_type_hcxc = false;
     sd->block_count = 0U;
+    sd->bus_rate_hz = 0U;
     return result;
 }
 

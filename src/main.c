@@ -160,6 +160,18 @@ static uint32_t demo_bulk_word(size_t i, uint32_t seed)
     return ((uint32_t)i * 4U) ^ (seed * 0x9E3779B9U);
 }
 
+//log how long one bulk write or read call took and the rate that works out to. the open and the close are
+//outside the timing, so it covers the data transfer and FatFs's cluster lookups, not the directory
+//update and sync the close does
+static void demo_report_rate(const char *what, uint64_t elapsed_us)
+{
+    const uint64_t kib_per_s = elapsed_us == 0U
+        ? 0U
+        : (uint64_t)DEMO_BULK_BYTES * 1000000U / 1024U / elapsed_us;
+    DEBUG_INFO("bulk %s: %u bytes in %lu us, %lu KiB/s", what, (unsigned)DEMO_BULK_BYTES,
+        (unsigned long)elapsed_us, (unsigned long)kib_per_s);
+}
+
 //write the bulk file in one call, read it back in one call, and check every word
 static bool demo_bulk(uint32_t seed)
 {
@@ -174,24 +186,30 @@ static bool demo_bulk(uint32_t seed)
         return false;
     }
     size_t done = 0;
+    uint64_t started_us = time_us_64();
     result = filesystem_write(file, demo_bulk_buffer, sizeof demo_bulk_buffer, &done);
+    const uint64_t write_us = time_us_64() - started_us;
     filesystem_result_t closed = filesystem_close(file);
     if (!demo_report(result == FILESYSTEM_RESULT_OK && done == sizeof demo_bulk_buffer
             && closed == FILESYSTEM_RESULT_OK, "bulk write", result != FILESYSTEM_RESULT_OK ? result : closed)) {
         return false;
     }
+    demo_report_rate("write", write_us);
 
     memset(demo_bulk_buffer, 0, sizeof demo_bulk_buffer);
     result = filesystem_open(DEMO_BULK, FILESYSTEM_OPEN_READ, &file);
     if (!demo_report(result == FILESYSTEM_RESULT_OK, "bulk open for read", result)) {
         return false;
     }
+    started_us = time_us_64();
     result = filesystem_read(file, demo_bulk_buffer, sizeof demo_bulk_buffer, &done);
+    const uint64_t read_us = time_us_64() - started_us;
     closed = filesystem_close(file);
     if (!demo_report(result == FILESYSTEM_RESULT_OK && done == sizeof demo_bulk_buffer
             && closed == FILESYSTEM_RESULT_OK, "bulk read", result != FILESYSTEM_RESULT_OK ? result : closed)) {
         return false;
     }
+    demo_report_rate("read", read_us);
 
     for (size_t i = 0; i < words; i++) {
         const uint32_t expected = demo_bulk_word(i, seed);
@@ -323,6 +341,11 @@ static void storage_watch(void)
 #else
         DEBUG_INFO("no FAT volume; not formatting (set TAVERNKEEP_DEMO_FORMAT to 1 in main.c to allow it)");
 #endif
+    }
+    if (became_ready) {
+        //the rate the card actually runs at: the nearest one at or below SD_BAUD_HZ that clk_peri divides to
+        DEBUG_INFO("sd bus at %lu Hz (asked for %lu Hz)", (unsigned long)sd_spi_bus_rate_hz(&sd),
+            (unsigned long)SD_BAUD_HZ);
     }
     if (became_ready && owner == STORAGE_OWNER_LOCAL) {
         filesystem_demo();
