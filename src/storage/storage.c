@@ -165,17 +165,17 @@ static void mount_now(uint32_t now_ms)
         medium = STORAGE_MEDIUM_UNFORMATTED;
         clear_retry();
         return;
-    case FILESYSTEM_RESULT_MEDIUM_UNAVAILABLE:
-        //either the card went away, or the adapter refused it (a sector size or capacity FatFs is not
-        //built for, or a read-only card). only the first is a removal; the second is a faulty card, and
-        //treating it as a removal would bring it up again forever
-        if (device_gone()) {
-            lose_medium();
-            return;
-        }
-        break;
     default:
         break;
+    }
+    //a failure with the device gone is a removal, whatever the mount reported: a card pulled before the
+    //adapter's disk_initialize shows as MEDIUM_UNAVAILABLE, one pulled during the mount's sector reads as
+    //STORAGE_ERROR. with the device still answering it is a counted failure, MEDIUM_UNAVAILABLE included:
+    //that is a card the adapter refused (a sector size or capacity FatFs is not built for, or a read-only
+    //card), and treating it as a removal would bring it up again forever
+    if (device_gone()) {
+        lose_medium();
+        return;
     }
     bring_up_failed(now_ms, "filesystem", (int)result);
 }

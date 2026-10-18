@@ -202,23 +202,24 @@ The `*` marks a planned record: nothing below has been observed yet. The
 asterisk comes off, and the date goes in, once the run has been made and the
 observed result filled in.
 
-- Test method: the VAL-H03 demo, built from the commit that contains the
-  changes made after that run: the card-detect pin is claimed in
-  `sd_spi_configure` instead of at the first presence check or
-  initialization; the block-device contract gains `sync`, which the SD driver
-  implements as a ready check on the selected card; the FatFs adapter
-  forwards `CTRL_SYNC` to it, so every close, remove and rename now asks the
-  device to confirm its writes; FatFs's table of open entries is on
-  (`FF_FS_LOCK` 5), so every open, remove and rename checks it; the storage
-  coordinator gains the none owner (release and reclaim), which the demo
-  never requests; and the save point is now `save_point_write`, two
-  alternating slot files with a sequence number and a CRC, replacing the
-  temporary-file-and-rename scheme VAL-H03 tested. The demo's counter
-  therefore lives in `tavernkeep-demo.a` and `tavernkeep-demo.b`: it starts
-  again from 1 on this card, and the old `tavernkeep-demo.txt` stays behind,
-  unused. Removals are made by hand while the core is halted at function
-  breakpoints, each followed by Continue (never Step), and the card is checked
-  on the host with `fsck.fat -n` afterwards. Planned steps:
+- Test method: the VAL-H03 demo, built from the commit that contains the changes
+  made after that run: the card-detect pin is claimed in `sd_spi_configure`
+  instead of at the first presence check or initialization; the block-device
+  contract gains `sync`, which the SD driver implements as a ready check on the
+  selected card; the FatFs adapter forwards `CTRL_SYNC` to it, so every close,
+  remove and rename now asks the device to confirm its writes; FatFs's table of
+  open entries is on (`FF_FS_LOCK` 5), so every open, remove and rename checks
+  it; the storage coordinator gains the none owner (release and reclaim), which
+  the demo never requests, and treats any mount failure with the device gone as
+  a removal (before, only one reported as medium unavailable); and the save
+  point is now `save_point_write`, two alternating slot files with a sequence
+  number and a CRC, replacing the temporary-file-and-rename scheme VAL-H03
+  tested. The demo's counter therefore lives in `tavernkeep-demo.a` and
+  `tavernkeep-demo.b`: it starts again from 1 on this card, and the old
+  `tavernkeep-demo.txt` stays behind, unused. Removals are made by hand while
+  the core is halted at function breakpoints, each followed by Continue (never
+  Step), and the card is checked on the host with `fsck.fat -n` afterwards.
+  Planned steps:
   - Claim at configure: boot without a card, then insert one; boot with a card
     in. `is_present` no longer claims the pin, so an insertion seen at all
     shows the claim in configure took effect.
