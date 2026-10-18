@@ -23,8 +23,11 @@
 #define SPI      spi0
 //write protect/card detect pin
 #define PIN_WP   12
-//data rate for the first hardware runs; protocol first, speed later
+//data rate for the first hardware runs; protocol first, speed later. the hardware tests' rate sweep
+//overrides it on the compiler command line (-DSD_BAUD_HZ=5000000U)
+#ifndef SD_BAUD_HZ
 #define SD_BAUD_HZ 1000000U
+#endif
 
 //the demo never formats a card unless this is 1: a demo that erases whatever card is in the socket is a
 //trap. set it by changing the line below or by defining it on the compiler command line
