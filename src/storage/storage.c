@@ -4,7 +4,8 @@
  *   owner / requested_owner   who has the card, and who should
  *   medium                    the card's condition for that owner (storage_medium_t)
  *   device_up                 block_device_init has succeeded and no deinit has completed since
- *   attempts, retry_at_ms     counted bring-up failures for the card in the socket, and when to try next
+ *   attempts, retry_at_ms     counted bring-up failures for the card in the socket, and when to try next;
+ *                             while the owner is NONE, counted release attempts instead
  *   settling, settled,        the insertion settle wait (STORAGE_INSERT_SETTLE_MS): under way and when
  *   settle_at_ms              it ends, or over for the card in the socket
  *   epoch                     storage.h; bumped whenever READY ends and on every owner change
@@ -12,7 +13,8 @@
  * How each event is noticed, without the bus:
  *   removal    the driver latches it from the card-detect interrupt; block_device_get_info then
  *              reports INVALID_DEVICE. polled every step while the device is up
- *   insertion  block_device_is_present, polled every step while the device is down
+ *   insertion  block_device_is_present, polled every step while the device is down, except while the
+ *              owner is NONE: a released coordinator does not watch the socket
  *
  * Teardown after a removal is block_device_deinit with the latch set, which the driver performs without
  * touching the card, preceded by filesystem_unmount, which performs no I/O at all. So the whole loss
@@ -129,6 +131,27 @@ static void bring_up_failed(uint32_t now_ms, const char *kind, int result)
     }
 }
 
+//one clean release attempt for the NONE owner. the deinit waits out any programming busy, so once it
+//succeeds the card can lose power safely. a card stuck busy is tried again at the retry interval; after
+//STORAGE_RELEASE_ATTEMPTS it is reported FAULTY and kept, the request stops being pending, and whether to
+//cut the rail anyway is the power manager's decision
+static void attempt_release(uint32_t now_ms)
+{
+    release_device();
+    if (!device_up) {
+        return;
+    }
+    attempts++;
+    DEBUG_WARN("storage: release attempt %u of %d failed, card still busy", attempts,
+        STORAGE_RELEASE_ATTEMPTS);
+    if (attempts < STORAGE_RELEASE_ATTEMPTS) {
+        schedule_retry(now_ms);
+        return;
+    }
+    medium = STORAGE_MEDIUM_FAULTY;
+    retry_scheduled = false;
+}
+
 //local owner, device up: mount it and settle the medium from the result
 static void mount_now(uint32_t now_ms)
 {
@@ -172,12 +195,37 @@ static void watch_for_loss(void)
 //is a fresh mount, because a USB host may have changed anything
 static void change_owner(uint32_t now_ms)
 {
-    if (owner == STORAGE_OWNER_LOCAL) {
+    const storage_owner_t previous = owner;
+    if (previous == STORAGE_OWNER_LOCAL) {
         (void)filesystem_unmount();
     }
     owner = requested_owner;
     format_requested = false;
     bump_epoch();
+
+    if (owner == STORAGE_OWNER_NONE) {
+        //release, so that the peripheral rail can be cut: whatever the medium was, nothing may use the
+        //card now. a card being settled or brought up is dropped, and one that is up is deinitialized
+        medium = STORAGE_MEDIUM_ABSENT;
+        clear_retry();
+        attempt_release(now_ms);
+        return;
+    }
+    if (previous == STORAGE_OWNER_NONE) {
+        //reclaim: the rail was probably cut while released, so the card is treated as one just
+        //inserted, settle wait included, which also covers its power-up time. a card still held after
+        //a failed release is let go first; if even that fails it is faulty, like any card that cannot be
+        //released (handle_faulty)
+        clear_retry();
+        release_device();
+        if (device_up) {
+            medium = STORAGE_MEDIUM_FAULTY;
+            schedule_retry(now_ms);
+        } else {
+            medium = STORAGE_MEDIUM_ABSENT;
+        }
+        return;
+    }
 
     if (!device_up || medium == STORAGE_MEDIUM_FAULTY) {
         //no card, a card still being brought up, or a faulty one: the bring-up phase carries on as it
@@ -237,6 +285,16 @@ static void handle_faulty(uint32_t now_ms)
 //phase 3: notice an insertion and bring the card up for the current owner, one attempt per step
 static void bring_up(uint32_t now_ms)
 {
+    if (owner == STORAGE_OWNER_NONE) {
+        //released: nothing is brought up and the socket is not watched. only a release that has not
+        //succeeded yet is retried, until it succeeds or is given up as FAULTY
+        if (device_up && medium != STORAGE_MEDIUM_FAULTY && retry_scheduled
+                && reached(now_ms, retry_at_ms)) {
+            retry_scheduled = false;
+            attempt_release(now_ms);
+        }
+        return;
+    }
     if (medium == STORAGE_MEDIUM_READY || medium == STORAGE_MEDIUM_UNFORMATTED) {
         return;
     }
@@ -360,8 +418,8 @@ uint32_t storage_epoch(void)
 
 bool storage_request_owner(storage_owner_t new_owner)
 {
-    if (device == NULL
-            || (new_owner != STORAGE_OWNER_LOCAL && new_owner != STORAGE_OWNER_USB)) {
+    if (device == NULL || (new_owner != STORAGE_OWNER_LOCAL && new_owner != STORAGE_OWNER_USB
+            && new_owner != STORAGE_OWNER_NONE)) {
         return false;
     }
     requested_owner = new_owner;
@@ -380,7 +438,10 @@ bool storage_request_format(void)
 
 bool storage_request_pending(void)
 {
-    return requested_owner != owner || format_requested;
+    //a release is not done while the card is still held and still being retried; one given up as FAULTY
+    //is no longer pending (storage.h)
+    const bool releasing = owner == STORAGE_OWNER_NONE && device_up && medium != STORAGE_MEDIUM_FAULTY;
+    return requested_owner != owner || format_requested || releasing;
 }
 
 block_device_t *storage_usb_device(void)

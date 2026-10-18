@@ -10,7 +10,8 @@
  * (docs/architecture.md, "Operating Modes and Storage Ownership").
  *
  *   owner   who may use the card: the filesystem layer (reader and audio
- *           modes) or the USB mass-storage class (USB mode)
+ *           modes), the USB mass-storage class (USB mode), or nobody (the card
+ *           released so that the peripheral rail can be powered down)
  *   medium  the card's condition, as far as that owner is concerned
  *
  * Every change of ownership and every loss of the medium goes through
@@ -39,6 +40,18 @@ typedef enum {
     /* The USB mass-storage class, through the bare block device
      * (storage_usb_device). No filesystem is mounted for the duration. */
     STORAGE_OWNER_USB,
+    /* Nobody: the card is released so that the power manager can cut the
+     * peripheral rail, which powers the socket (docs/architecture.md, "Power
+     * management"). Becoming NONE unmounts, deinitializes the device cleanly
+     * (waiting out any programming busy, so that the card can lose power
+     * safely) and stops bring-up: the socket is not watched, so an idle step
+     * costs nothing. The medium is then ABSENT, or FAULTY if the card stayed
+     * busy through STORAGE_RELEASE_ATTEMPTS clean deinits and is still held.
+     * Leaving NONE treats whatever is in the socket as a card just inserted,
+     * settle wait included, since the rail was probably off and the card may
+     * have been swapped. The power manager turns the rail on before asking for
+     * an owner again. */
+    STORAGE_OWNER_NONE,
 } storage_owner_t;
 
 typedef enum {
@@ -51,7 +64,9 @@ typedef enum {
     STORAGE_MEDIUM_PREPARING,
     /* A card is in the socket but could not be brought up (or, for the local
      * owner, mounted) after STORAGE_BRING_UP_ATTEMPTS tries. Left alone until
-     * it is removed; reinserting it tries again. */
+     * it is removed; reinserting it tries again. For the NONE owner: the card
+     * could not be released, so cutting the rail now could interrupt the
+     * card's own programming. */
     STORAGE_MEDIUM_FAULTY,
     /* Local owner only: the card works but holds no FAT volume (an SDXC card
      * arrives formatted as exFAT). storage_request_format can fix that. */
@@ -68,6 +83,12 @@ typedef enum {
  * before the next attempt, for as long as the socket reports it. */
 #define STORAGE_BRING_UP_ATTEMPTS 3
 #define STORAGE_RETRY_INTERVAL_MS 250U
+
+/* Clean deinit attempts when releasing the card for the NONE owner, at
+ * STORAGE_RETRY_INTERVAL_MS. Each attempt itself waits for the card to finish
+ * programming (the SD driver allows 250 ms), so the whole budget is well past
+ * the SD specification's write-busy limits. */
+#define STORAGE_RELEASE_ATTEMPTS 4
 
 /* How long the socket must report a card, sampled on every step, before the
  * first bring-up attempt; any sample reading empty starts the wait again. The
@@ -93,7 +114,8 @@ bool storage_init(block_device_t *device);
  * millisecond clock (it may wrap). A step does at most one piece of card work -
  * one bring-up attempt (init, then mount), one owner change (with its mount),
  * or one format (with its mount) - and a step with nothing to do costs one
- * presence or status check, neither of which touches the bus. A bring-up can
+ * presence or status check, neither of which touches the bus, or nothing at
+ * all once the card is released for the NONE owner. A bring-up can
  * block for the card's own initialization time; that only happens when a card
  * has just arrived or the owner has just changed. Does nothing before
  * storage_init. */
@@ -122,7 +144,11 @@ bool storage_request_owner(storage_owner_t owner);
  * with an empty volume. */
 bool storage_request_format(void);
 
-/* True while an owner change or a format has been accepted but not yet done. */
+/* True while an owner change or a format has been accepted but not yet done.
+ * A change to NONE is done once the card is released, or given up as FAULTY;
+ * until then it stays pending, so the power manager waits for
+ * storage_owner() == STORAGE_OWNER_NONE and !storage_request_pending() before
+ * cutting the rail, and checks for a FAULTY medium. */
 bool storage_request_pending(void);
 
 /* The block device, for the USB mass-storage class: non-NULL only while the

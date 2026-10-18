@@ -56,7 +56,12 @@ static bool demo_report(bool ok, const char *name, filesystem_result_t result)
 
 static const char *owner_name(storage_owner_t owner)
 {
-    return owner == STORAGE_OWNER_USB ? "usb" : "local";
+    switch (owner) {
+    case STORAGE_OWNER_LOCAL: return "local";
+    case STORAGE_OWNER_USB: return "usb";
+    case STORAGE_OWNER_NONE: return "none";
+    }
+    return "?";
 }
 
 static const char *medium_name(storage_medium_t medium)
