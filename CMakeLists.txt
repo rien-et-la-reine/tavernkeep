@@ -142,5 +142,10 @@ endif()
 set_source_files_properties(${TAVERNKEEP_SOURCES} PROPERTIES
     COMPILE_OPTIONS "-Wall;-Wextra;-Wpedantic"
 )
+# The same goes for SDK headers those sources include: the SDK's <stdatomic.h>
+# wrapper uses #include_next, which -Wpedantic reports in every file that
+# includes it. Marking its header library SYSTEM includes it with -isystem, so
+# the warning flags still apply to Tavernkeep's own code and nothing else.
+set_target_properties(pico_atomic_headers PROPERTIES SYSTEM TRUE)
 
 pico_add_extra_outputs(tavernkeep)

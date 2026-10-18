@@ -33,10 +33,10 @@ FatFs config options changed from default (`source/ffconf.h`):
 - FF_USE_LABEL: 1 (UI can show card volume label)
 - FF_USE_FIND: 1 (pattern-filtered directory listing; `filesystem_opendir`)
 - FF_NORTC_YEAR: 1980 (not strictly necessary since FF_FS_NORTC is 0 and the firmware supplies get_fattime())
+- FF_FS_LOCK: 5 (one entry for each file and directory the filesystem layer can hold open, checked by a `static_assert` in `filesystem.c`). FatFs then refuses removing, renaming or re-opening an open file in a way that would corrupt the volume, which the layer reports as `FILESYSTEM_RESULT_IN_USE`. About 80 bytes of RAM. It does not stop removing a directory that is being listed (it records the listing under the directory's own cluster, but finds a directory to remove by its entry in the parent), so the layer checks that itself
 
 Deliberately left at default:
 - FF_FS_EXFAT: 0 for licensing reasons, no exFAT support planned currently or in future. Sizes and offsets in the filesystem interface are therefore 32-bit
-- FF_FS_LOCK: 0. FatFs does not refuse removing, renaming or re-opening an open file; not doing so is a documented caller rule instead (`src/storage/filesystem.h`)
 - FF_FS_REENTRANT: 0. The filesystem layer is single-threaded and called from one core only
 - FF_FS_TINY: 0. Each open file has its own sector buffer: faster, at about 512 bytes of RAM per file slot
 - FF_VOLUMES: 1, FF_MAX_SS: 512, FF_LBA64: 0. One card, 512-byte sectors, 32-bit sector numbers; the disk I/O adapter refuses a device that does not fit these

@@ -19,17 +19,23 @@ and blinks the Pico 2 status LED when the selected board defines one.
   for commands and data.
 - **Filesystem layer:** FatFs behind `src/storage/filesystem.h`, private to
   the layer, with pooled file and directory handles that a removal or unmount
-  invalidates without any I/O, and a save-point pattern for replacing
-  persistent files safely.
+  invalidates without any I/O.
+- **Save points:** persistent state (bookmarks, settings) saved in two
+  alternating slot files with a sequence number and a CRC
+  (`src/storage/save_point.h`), so an interruption at any moment leaves the
+  previous record readable.
 - **Storage coordinator:** the single owner of the card. It notices removal
   and insertion, settles a newly inserted card before bringing it up, retries
   and parks failing cards, carries out format and owner-change requests, and
-  is ready to hand the card to a USB mass-storage class.
+  is ready to hand the card to a USB mass-storage class or release it so that
+  the peripherals can be powered down.
 
 Hardware validated at 1 MHz on an 8 GB SDHC card (`docs/validation.md`,
 VAL-H01 to VAL-H03): mount, file operations, multi-block transfers, hot
-removal while idle and during writes and save points, save-point recovery,
-and booting without a card.
+removal while idle and during writes, and booting without a card. The save
+points have been redesigned since VAL-H03 tested the earlier
+temporary-file-and-rename scheme, and have so far run only in the host tests,
+as has formatting a card.
 
 Planned work, none of which is implemented yet:
 

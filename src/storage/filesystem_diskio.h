@@ -33,7 +33,8 @@ bool filesystem_diskio_bind(uint8_t drive, block_device_t *device);
  * Performs no I/O, so it is safe after a card removal. */
 void filesystem_diskio_unbind(uint8_t drive);
 
-/* The device currently bound to a drive number, or NULL. */
+/* The device currently bound to a drive number, or NULL.
+ * Used for testing only, nothing in the firmware calls it. */
 block_device_t *filesystem_diskio_device(uint8_t drive);
 
 #endif

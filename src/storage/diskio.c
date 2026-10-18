@@ -5,9 +5,11 @@
 //
 //the adapter is dumb by design: no retries, no caching, no policy. it forwards sectors and counts, maps
 //result codes, and remembers one thing per drive - whether the medium has reported itself gone. FatFs
-//only ever tests STA_NOINIT (mount_volume and validate in ff.c), so a vanished medium is reported as
-//STA_NOINIT | STA_NODISK: open objects then fail validation with FR_INVALID_OBJECT, and the next mount
-//attempt re-runs disk_initialize, which keeps failing until the owner re-initializes the device.
+//never tests STA_NODISK: it tests STA_NOINIT (mount_volume, validate and f_mkfs in ff.c), and STA_PROTECT
+//before a write, which this adapter never reports. so a vanished medium is reported as
+//STA_NOINIT | STA_NODISK, and STA_NOINIT is the bit FatFs acts on: open objects then fail validation with
+//FR_INVALID_OBJECT, and the next mount attempt re-runs disk_initialize, which keeps failing until the
+//owner re-initializes the device. STA_NODISK only records why.
 //
 //result mapping:
 //  BLOCK_DEVICE_RESULT_OK               -> RES_OK

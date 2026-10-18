@@ -654,7 +654,7 @@ static block_device_result_t sd_spi_device_write_blocks(
                 //reset crc
                 crc = 0x0000;
                 //transmit start block token (0b11111100 for multi block write) + load data block into transmit buffer
-                sd_spi_transfer(sd, 0b11111100);
+                sd_spi_transfer(sd, 0xFC);
                 do {
                     //transmit byte
                     sd_spi_transfer(sd, buf[(sent_blocks * 512) + (byte_counter)]);
@@ -676,7 +676,7 @@ static block_device_result_t sd_spi_device_write_blocks(
                     sd_spi_release_bus(sd);
                     return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
                 }
-                if ((token == 0b00001011) || (token == 0b00001101)) { //data CRC or data write error
+                if ((token == 0x0B) || (token == 0x0D)) { //data CRC or data write error
                     //ensure card not busy
                     if (!sd_spi_wait_ready_timeout(sd, 1000)) {
                         sd_spi_release_bus(sd);
@@ -698,7 +698,7 @@ static block_device_result_t sd_spi_device_write_blocks(
                     }
                     return BLOCK_DEVICE_RESULT_IO_ERROR;
                 }
-                if (!(token == 0b00000101)) {
+                if (!(token == 0x05)) {
                     //unknown token, TODO: robust cleanup procedure, card likely never recieved data start token
                     sd_spi_release_bus(sd);
                     return sd_spi_removal_latched(sd)
@@ -714,7 +714,7 @@ static block_device_result_t sd_spi_device_write_blocks(
                 }
             } while(++sent_blocks < block_count); //repeat for block_count number of blocks
             //stop transmission token (0b11111101)
-            sd_spi_transfer(sd, 0b11111101);
+            sd_spi_transfer(sd, 0xFD);
             //spec mandated byte gap
             sd_spi_transfer(sd, 0xFF);
             if (sd_spi_removal_latched(sd)) {
@@ -749,7 +749,7 @@ static block_device_result_t sd_spi_device_write_blocks(
             //seed crc
             crc = 0x0000;
             //transmit start block token (0b11111110 for single block write)
-            sd_spi_transfer(sd, 0b11111110);
+            sd_spi_transfer(sd, 0xFE);
             do {
                 //transmit byte
                 sd_spi_transfer(sd, buf[byte_counter]);
@@ -771,7 +771,7 @@ static block_device_result_t sd_spi_device_write_blocks(
                 sd_spi_release_bus(sd);
                 return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
             }
-            if ((token == 0b00001011) || (token == 0b00001101)) { //data CRC or data write error
+            if ((token == 0x0B) || (token == 0x0D)) { //data CRC or data write error
                 //ensure card not busy
                 if (!sd_spi_wait_ready_timeout(sd, 1000)) {
                     sd_spi_release_bus(sd);
@@ -788,7 +788,7 @@ static block_device_result_t sd_spi_device_write_blocks(
                 }
                 return BLOCK_DEVICE_RESULT_IO_ERROR;
             }
-            if (!(token == 0b00000101)) {
+            if (!(token == 0x05)) {
                 //unknown token, TODO: robust cleanup procedure, card likely never recieved data start token
                 sd_spi_release_bus(sd);
                 return sd_spi_removal_latched(sd)

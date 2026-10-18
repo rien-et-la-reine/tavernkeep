@@ -116,7 +116,7 @@ USB mass storage is an exclusive operating mode: while a USB host has the storag
 
 Tavernkeep will ultimately manage hardware initialization, shutdown, peripheral power state, and other system-level behavior.
 
-Detailed power-management architecture has not yet been implemented.
+Peripheral power is to be switched as one rail under GPIO control, so that the device can sleep with everything but the microcontroller powered down and wake without a reboot (see "Power management" under Planned / Future Architecture). The power manager that drives it has not yet been implemented; the storage coordinator can already release the card for it.
 
 ## Major Interfaces and Abstractions
 
@@ -130,7 +130,9 @@ The SPI SD implementation interprets this context as an already-created and conf
 
 The abstraction exposes generic block-device results rather than SD protocol responses. SD-specific response interpretation remains within the SD backend.
 
-Besides init, deinit, block reads and writes and `get_info`, a device may offer `is_present`: one undebounced sample of the presence signal, with no bus traffic, that works whether or not the device is initialized. It is how an insertion becomes visible, since an uninitialized device has nothing else watching the socket. It is a hint: `init` still does the debounced check. It reports the socket, not the removal latch, so after a removal and reinsertion it reads true while the device still refuses operations until it is re-initialized.
+A successful write means the device has accepted the data, not that it is on the medium, so that a later DMA backend can return while a transfer is still in flight. Every device therefore provides `sync`, which returns OK only once every accepted write is on the medium, and reports any accepted write that failed afterwards. A read after an accepted write returns that write's data whether or not it has been synced. The FatFs adapter forwards `CTRL_SYNC` to `sync`, so a file close only succeeds once its data has landed. The SPI SD backend currently waits out the card's programming busy on every write, so its `sync` only confirms the card is idle.
+
+Besides init, deinit, block reads and writes, `get_info` and `sync`, a device may offer `is_present`: one undebounced sample of the presence signal, with no bus traffic, that works whether or not the device is initialized. It is how an insertion becomes visible, since an uninitialized device has nothing else watching the socket. It is a hint: `init` still does the debounced check. It reports the socket, not the removal latch, so after a removal and reinsertion it reads true while the device still refuses operations until it is re-initialized.
 
 Current block-device result categories include:
 
@@ -168,6 +170,8 @@ Runtime state currently includes:
 
 - the block count decoded from the CSD, which `get_info` reports without touching the bus
 
+- the data rate actually in use after bring-up (`sd_spi_bus_rate_hz`): the nearest rate at or below the configured one that the SPI peripheral's clock divides to
+
 - the atomic removal latch set by the card-detect interrupt
 
 - whether the card-detect pin has been claimed as a pulled-up input; once it has, the device keeps it across deinitialization and failed initializations (see Resource Ownership)
@@ -185,20 +189,31 @@ A non-legacy SD card is not assumed to be SDHC/SDXC; version and addressing mode
 - Open files and directories live in fixed pools inside the layer. Callers hold handles made of a slot number and that slot's generation; the generation advances on open, close and every unmount, and 0 is never issued. A stale handle is therefore detected rather than used, and unmount invalidates every handle at once without any I/O.
 - `filesystem_mount` takes an already-initialized block device from the storage coordinator and mounts immediately, so an absent card or a card without a FAT volume is reported at mount. `filesystem_unmount` performs no I/O, flushes nothing and always succeeds. `filesystem_format` creates a new FAT volume on an unmounted card, for cards that arrive formatted as exFAT.
 - The layer is cooperative and single-threaded: it is called only from the core running the storage coordinator, never from an interrupt handler, and has no locking.
-- Open entries are the caller's responsibility. FatFs is built without file locking (`FF_FS_LOCK` 0), so nothing refuses removing or renaming an open file, or opening a file for replacement while another handle has it open, and each of these can corrupt the volume. The rule is cheap to follow because each file has one owning subsystem; it was chosen over enabling FatFs's lock table, which would refuse these operations at the cost of a small table and a check on every open.
+- Operations that would corrupt the volume because an entry is open are refused with `FILESYSTEM_RESULT_IN_USE`: removing or renaming an open file, removing a directory being listed, opening a file for replacement while another handle has it open, and opening a file that is open for replacement. Several handles may still read one file, and a directory being listed may be renamed, since the listing follows its clusters rather than its name. FatFs enforces the rules for files with its table of open entries (`FF_FS_LOCK` 5, one entry for each file and directory the pools can hold open, checked at compile time), which costs about 80 bytes and a short scan on each open, remove and rename. That table does not cover a directory being listed - FatFs records a listing under the directory's own cluster but looks a directory up for removal by its entry in the parent - so `filesystem_remove` checks the open listing itself. The layer releases a file's entry even when its close fails, and an unmount empties the table, so a removal cannot leave entries behind. This replaced an earlier rule that left open entries to the callers, which held only while every file had exactly one owner and turned any mistake into silent corruption rather than an error.
 
 **Storage coordinator**
 
 `src/storage/storage.h` is the owner of the removable card. It holds the block device for the life of the firmware and is the only code that initializes or deinitializes it, mounts, unmounts or formats the filesystem, or lends the device to the USB mass-storage class. It runs as `storage_step(now_ms)` in the cooperative loop of the core that also calls the filesystem layer.
 
-Its state is two values. The *owner* is who may use the card: the filesystem layer (local) or the USB mass-storage class. The *medium* is the card's condition for that owner: absent, preparing (being brought up, including the settle wait after insertion and the waits between attempts), faulty, unformatted (local only: works, but holds no FAT volume), or ready (local: mounted; USB: initialized and lent).
+Its state is two values. The *owner* is who may use the card: the filesystem layer (local), the USB mass-storage class, or nobody (none: the card released so that the peripheral rail can be powered down; see "Power management"). The *medium* is the card's condition for that owner: absent, preparing (being brought up, including the settle wait after insertion and the waits between attempts), faulty, unformatted (local only: works, but holds no FAT volume), or ready (local: mounted; USB: initialized and lent).
 
 - **Removal** is noticed in the step after the card-detect interrupt latches it: `get_info` then reports `INVALID_DEVICE` without touching the bus. The response is the ownership transition: unmount (no I/O), deinitialize (on a latched device, the driver skips the bus), medium absent. **Insertion** is noticed by polling `is_present` while the device is down. An idle step costs one of these two checks and nothing else.
-- **Bring-up** waits first: a new card must read present for `STORAGE_INSERT_SETTLE_MS` before its first attempt, so that it has seated and powered up (see "Availability signal and debounce"). It is then one attempt per step: init, then for the local owner mount. A card the socket reports but the debounced check refuses is still being inserted; it is retried at the retry interval without being counted. Any other failure is counted, and after a fixed number of attempts the card is marked faulty, released, and left alone until it leaves the socket. A mount that reports the medium unavailable is a removal only if the device has stopped answering; otherwise the card is one the adapter refuses (sector size, capacity, read-only) and is counted as a failure, so it cannot be brought up again forever.
+- **Bring-up** waits first: a new card must read present for `STORAGE_INSERT_SETTLE_MS` before its first attempt, so that it has seated and powered up (see "Availability signal and debounce"). It is then one attempt per step: init, then for the local owner mount. A card the socket reports but the debounced check refuses is still being inserted; it is not counted, and settles again before the next attempt. Any other failure is counted, and after a fixed number of attempts the card is marked faulty, released, and left alone until it leaves the socket. A mount that reports the medium unavailable is a removal only if the device has stopped answering; otherwise the card is one the adapter refuses (sector size, capacity, read-only) and is counted as a failure, so it cannot be brought up again forever.
 - **Requests** - an owner change, a format - are recorded and carried out at the top of a later step, where no consumer is part-way through a call. Callers watch the owner, medium and `storage_request_pending` for the outcome. Formatting needs a confirmed local request and an unformatted or ready card; it is dropped if the card or owner changes first.
 - **The epoch** is a counter that changes whenever something a consumer may have cached stops being valid: whenever the medium stops being ready for its owner, and on every owner change. Consumers record it with what they cache and discard the cache when it differs; it is readable from either core. Stale filesystem handles enforce the same thing as a backstop.
+- **Release** is the change to the none owner. It unmounts with no I/O and deinitializes the card cleanly: unlike the removal path, the card is present, so the driver waits out any programming busy, and once the deinit succeeds the card can lose power safely. A card being settled or brought up is dropped. While released, bring-up stops and the socket is not watched, so an idle step costs nothing. A card that stays busy is retried at the retry interval, `STORAGE_RELEASE_ATTEMPTS` times, and the request stays pending until it succeeds; after the last attempt the medium is reported faulty with the card still held, the request stops being pending, and whether to cut the rail anyway is the power manager's decision. A removal still releases a held card through the latch. Leaving the none owner treats whatever is in the socket as a card just inserted, settle wait included, because the rail was probably off and the card may have been swapped.
 
 The coordinator is built for the consumers it does not have yet. A consumer that must reach a safe point before a transition - persistent state written before a USB handover, the audio stream stopped - adds that check where requests are carried out, and the request simply stays pending until it passes; the interface does not change. Bounded service work for consumers, such as the audio stream's read-ahead into the decoder's ring, has a marked place at the end of the step, after transitions, so it never runs against a card that is being lost or handed over. The USB mass-storage class will take the device from `storage_usb_device` and compare epochs to report a medium change to the host.
+
+**Save points**
+
+`src/storage/save_point.h` is how persistent state - bookmarks, settings - is written and read back. It sits on top of the filesystem layer and runs where that layer runs. A record is small (at most `SAVE_POINT_DATA_MAX` bytes) and is always saved whole.
+
+- Each record lives in two slot files, the record's name with `.a` and `.b` appended. Each slot holds a magic number, a sequence number, the data length, the data and a CRC-16 over all of it (the same CRC-16 the SD driver uses for its data blocks, from `sd_crc.h`) (the exact format is in `save_point.h`).
+- A save checks both slots, then rewrites the one that does not hold the newest valid record, with the next sequence number. Its result is OK once the slot file's close succeeds, which is when the record is confirmed on the card.
+- A read checks both slots and returns the valid one with the higher sequence number. A slot that is missing, short, the wrong length or fails its CRC holds no record; it is not an error. Sequence numbers are compared across a wrap.
+- An interrupted save can damage only the slot it was rewriting, which then fails its checks, so a read still finds the previous record. That holds for the very first save too: it leaves no valid record, and the read reports that there is none, rather than returning a partial one.
+- Nothing is renamed or removed. FatFs writes a renamed entry's new name before removing the old one, so an interrupted rename can leave two names sharing one cluster chain, and removing either then frees the other's data (`filesystem_rename` in `filesystem.h`). An earlier temporary-file-and-rename scheme was replaced for that reason, and because an interrupted first save left only an incomplete temporary that its recovery rule would have promoted.
 
 *Other subsystem interfaces*
 
@@ -276,7 +291,7 @@ Current storage ownership is more clearly defined:
 
 - the SD device structure retains its static configuration across initialization and deinitialization
 
-- successful SD deinitialization releases the SPI peripheral and associated GPIO configuration, except the card-detect pin: the SD device claims it as a pulled-up input at its first presence check or initialization and keeps it until it is reconfigured with a different pin, because reading it is the only way to see an insertion while the device is uninitialized
+- successful SD deinitialization releases the SPI peripheral and associated GPIO configuration, except the card-detect pin: the SD device claims it as a pulled-up input at configure and keeps it for the life of the device, because reading it is the only way to see an insertion while the device is uninitialized
 
 - a failed clean deinitialization may deliberately leave the SD device initialized and its hardware resources configured so that shutdown can be retried or handled by a separate forced-shutdown path
 
@@ -310,7 +325,7 @@ Reading and playback never run concurrently. (Audiobook read-along, if ever impl
 
 **Storage has one owner at a time.** The owner is the filesystem layer in reader and audio modes and the mass-storage class in USB mode. Higher layers obtain storage only through the filesystem. The `block_device_t` is held by the storage coordinator, which initializes and deinitializes it and alone decides who may use it; by the filesystem adapter while a volume is mounted; and, in USB mode, by the mass-storage glue. Nothing else holds it. This is what makes ownership enforceable rather than conventional.
 
-**Every change of ownership is the same transition.** A card removal, entering USB mode, leaving USB mode, and a future mode switch all pass through one storage coordinator path that:
+**Every change of ownership is the same transition.** A card removal, entering USB mode, leaving USB mode, releasing the card before the peripheral rail is powered down, and a future mode switch all pass through one storage coordinator path that:
 
 1. cancels cooperative storage consumers and invalidates open handles, cached sectors and bookmarks in memory;
 2. flushes nothing to media that may be absent - persistent state is written at its defined save points before the transition, never during it;
@@ -324,7 +339,7 @@ From the filesystem layer's point of view, entering USB mode is indistinguishabl
 
 **Persistent-state writes happen at named save points behind one function.** Bookmarks and settings are written when the user explicitly bookmarks and automatically at chapter transitions; nowhere else, and never from within the mode transition above. In reader mode the chapter transition coincides with a full display refresh, so the write is issued once the frame has been sent to the panels and completes during the panels' own refresh time, which is much longer than a typical write. In audio mode the same rule bounds when a card write - with its programming-busy budget - can stall the storage coordinator, which sizes the audio buffering. Before entering USB mode the pending state is written and the write is confirmed complete before the handover.
 
-A save point replaces a file rather than editing it in place: it writes the new contents under a temporary name and confirms the close, removes the old file, then renames the temporary into place. An interruption can leave either both files, in which case the temporary may be incomplete and is discarded, or only the temporary, which was confirmed complete before the removal and is renamed into place. Whoever reads a persistent-state file resolves those two cases before using it (`filesystem_rename` in `filesystem.h`).
+The one function is `save_point_write` (see "Save points" under Major Interfaces). Each save rewrites whichever of a record's two slot files does not hold the newest valid copy, so an interruption at any moment - a removal, a USB handover forced by a cable, a power loss - leaves the previous record readable, and a read never returns a partly written one.
 
 **How USB mode is selected** - automatically on host enumeration, by prompt, or by menu - is an open product decision (`requirements.md`, OPEN-002). It decides whether reader or audio mode can be interrupted by a cable, in which case the interruption is one more caller of the ownership transition above.
 
@@ -336,7 +351,7 @@ The final socket presents card-detect and write-protect information through one 
 
 The SPI backend debounces its preliminary initialization check before touching the SD bus. It requires ten consecutive samples at the present level, taken one millisecond apart, within a maximum of thirty samples. The pad's internal pull-up is selected before GPIO initialization enables the input buffer. The board-level external pull-up remains required to define the signal before firmware begins executing and while the RP2350 pad is still in its reset state. After the interrupt is armed the level is read once more, so a card that went away between the debounce and the arming is refused rather than left with a latch nothing will set.
 
-That debounce rejects contact bounce; it does not wait for the card itself. The detect switch closes before the card's contacts have seated and before the card has powered up, so an initialization attempted the moment the socket reports a card fails on a good card - on every reinsertion in VAL-H02, and on all three attempts of a deliberately slow one. The storage coordinator therefore waits `STORAGE_INSERT_SETTLE_MS` (500 ms) after a card first appears, sampling the socket on every step and restarting the wait on any empty reading, before its first bring-up attempt. The wait applies to every new card, including one present at boot; retries after a failed attempt follow a card that has already settled and do not wait again.
+That debounce rejects contact bounce; it does not wait for the card itself. The detect switch closes before the card's contacts have seated and before the card has powered up, so an initialization attempted the moment the socket reports a card fails on a good card - on every reinsertion in VAL-H02, and on all three attempts of a deliberately slow one. The storage coordinator therefore waits `STORAGE_INSERT_SETTLE_MS` (500 ms) after a card first appears, sampling the socket on every step and restarting the wait on any empty reading, before its first bring-up attempt. The wait applies to every new card, including one present at boot; so does a card that init refuses as not seated, since it is still arriving. Retries after a counted failure follow a card that has already settled and do not wait again.
 
 The hot-removal interrupt is armed on the removal edge for the configured sense (rising for active-low, falling for active-high) rather than on a level. The first edge conservatively makes storage unavailable immediately and disables further edges until a fresh initialization, so mechanical contact bounce cannot produce an interrupt storm. A transaction interrupted by even an unconfirmed removal edge fails and does not resume; if the signal settles back to the present level, the card must be reinitialized before further access. The insertion edge is ignored by the interrupt; insertion is noticed by the storage coordinator polling the device's presence signal (`is_present`) while the device is uninitialized.
 
@@ -406,13 +421,15 @@ Current SD communication is synchronous and blocking. Individual SPI transfers a
 
 The initial storage implementation intentionally uses polling rather than DMA.
 
-`src/main.c` is the demo of the highest layer that currently works, replaced as each layer lands: today it runs the storage coordinator in the loop, logs every change of owner, medium and epoch, and each time the card becomes ready runs a filesystem demo (label, root listing, a save point with its recovery rule, and a 16 KiB file written and read back in single calls so that FatFs issues multi-block transfers) whose steps are reported over RTT. It never formats a card unless `TAVERNKEEP_DEMO_FORMAT` is set to 1 in `main.c`; there is no build option for it.
+`src/main.c` is the demo of the highest layer that currently works, replaced as each layer lands: today it runs the storage coordinator in the loop, logs every change of owner, medium and epoch, and each time the card becomes ready runs a filesystem demo (label, root listing, a counter read from and saved through a save point, and a 16 KiB file written and read back in single calls so that FatFs issues multi-block transfers) whose steps are reported over RTT. It never formats a card unless `TAVERNKEEP_DEMO_FORMAT` is 1, set in `main.c` or with `-DTAVERNKEEP_DEMO_FORMAT=1` on the compiler command line; there is deliberately no CMake option for it, so it cannot be left switched on in a configured build.
 
-Host tests are kept outside the repository. The storage-layer suite (`tests/filesystem/`, local only) runs the coordinator, the filesystem layer, the adapter and the real FatFs over a RAM-backed fake card. The card model, a host simulation of an SD card that `main.c` was compiled against so that host and hardware logs compare directly, is kept on another machine and has not yet been run against the filesystem layer and the coordinator, so the current demo has not run on it.
+Host tests are kept outside the repository. The storage-layer suite (`tests/filesystem/`, local only) runs the save points, the coordinator, the filesystem layer, the adapter and the real FatFs over a RAM-backed fake card. The card model, a host simulation of an SD card that `main.c` was compiled against so that host and hardware logs compare directly, is kept on another machine and has not yet been run against the filesystem layer and the coordinator, so the current demo has not run on it.
 
 DMA is planned for bulk storage transfers after the polling implementation has been validated.
 
 Interrupt-driven or asynchronous operation will be introduced where required by later subsystems, but a complete system-wide execution and scheduling model has not yet been defined beyond the following rule: each core runs one cooperative loop of bounded-work steps, and no operating mode places more than one hard-deadline domain on a core (see "Operating Modes and Storage Ownership"). Audio is the only current domain with a hard deadline; its decoder is written as a bounded step reading compressed data from a ring the storage coordinator fills, so whether it runs in the core 0 loop or on the second core is a launch-time placement decision sized by measurement (chiefly the display driver's blocking time), not a structural one. The no-RTOS decision is to be re-evaluated if a mode ever needs two hard-deadline domains on one core, or if long operations start acquiring hand-written yield points.
+
+**Stacks.** Core 0 runs on a 4 KB stack (`PICO_STACK_SIZE` in `CMakeLists.txt`), the most the SDK's default memory map allows: its linker script places core 0's stack in the 4 KB SCRATCH_Y bank and core 1's in SCRATCH_X. Everything in the storage stack runs on it, including FatFs, which with `FF_USE_LFN` 2 puts a 512-byte long-file-name buffer on the stack in every call that takes a path. GCC's call-graph output (`-fcallgraph-info=su`) for the Release build puts the deepest storage path at about 1.7 KB: the demo's save-point read, through `f_open` (a 624-byte frame) and FatFs's directory code, down to the SD driver. Formatting is shallower, about 0.8 KB, despite `f_mkfs`'s 512-byte work buffer, and a log line costs about 0.8 KB wherever it is made. Interrupt frames come on top, so the margin is roughly half the stack. These are static figures for one build: a less optimised debug build has larger frames, and the first run-time measurement is planned in VAL-H04*. A larger stack, and the stack a core 1 audio decoder is likely to need, means a custom linker script that places the stacks in main SRAM.
 
 Audio playback is expected to impose stronger real-time data-flow requirements than the current storage work, but the mechanism by which audio, display updates, storage access, user input, and other work will coexist has not yet been selected.
 
@@ -563,7 +580,7 @@ At the current stage:
 
 - the planned 4-bit SD backend does not yet exist
 
-- the filesystem layer and the storage coordinator have run on the host against a RAM-backed block device and on one real card at 1 MHz (VAL-H02, VAL-H03), but not yet against the card model (kept outside the repository); removal during a multi-block read and during mount are untested, and the format path has not run on hardware
+- the filesystem layer and the storage coordinator have run on the host against a RAM-backed block device and on one real card at 1 MHz (VAL-H02, VAL-H03), but not yet against the card model (kept outside the repository); removal during a multi-block read and during mount are untested, and neither the redesigned save points nor the format path has run on hardware
 
 - DMA-based storage transfer has not yet been implemented
 
@@ -579,7 +596,7 @@ At the current stage:
 
 - the overall asynchronous/concurrency model beyond the current blocking storage implementation has not yet been defined
 
-- system-wide power-management architecture has not yet been defined
+- system-wide power management is designed only in outline (see "Power management" under Planned / Future Architecture): the storage coordinator can release the card for a power-down, but there is no power manager, no rail switch and no safe-point hook for consumers yet
 
 These are development-state limitations rather than necessarily permanent restrictions.
 
@@ -637,4 +654,27 @@ The ownership model between the USB host and Tavernkeep's own filesystem access 
 
 Power management will eventually coordinate processor activity, peripheral power state, display behavior, audio hardware, removable storage, and system shutdown.
 
-The detailed architecture remains to be designed.
+*The peripheral rail.* Every peripheral that can be powered down - the SD socket, and the other parts that need it - runs from one rail switched by a MOSFET under GPIO control. Cutting the rail removes power from everything but the microcontroller, which gives a sleep state deeper than leaving the peripherals at their idle draw, yet one the firmware wakes from with its RAM and state intact rather than through a reboot. The rail belongs to the power manager, not to any one driver: a driver cannot cut a rail other peripherals depend on, so the SD driver never touches it, and it copes with the card having lost power between a deinit and the next init because init always starts from CMD0, as for a card just inserted. One consequence is that a single peripheral cannot be power-cycled on its own to recover it; doing that means cycling the whole rail.
+
+*Going to sleep:*
+
+1. ask each owner of a peripheral on the rail to release it, and wait, with a timeout, for all of them. For storage that is `storage_request_owner(STORAGE_OWNER_NONE)`, done once `storage_owner()` is the none owner and `storage_request_pending()` is false; a faulty medium then means the card stayed busy, and cutting the rail could interrupt its programming
+2. put every pin facing the rail into a state that cannot feed current into unpowered parts through their protection diodes: nothing driven high, and no microcontroller pull-up to 3.3 V on those lines. That covers the SD lines and the display and audio buses alike
+3. turn the rail off, then put the microcontroller to sleep
+
+*Waking:*
+
+1. turn the rail on and wait for it to settle (the load switch's or MOSFET circuit's turn-on time)
+2. restore the pins
+3. ask for the owners back - for storage, the local owner, or USB if a host is attached. The rail must be on before this request: the coordinator then treats the card as just inserted, and its insertion settle wait (`STORAGE_INSERT_SETTLE_MS`) comfortably covers the card's power-up time before the first command
+
+Waking therefore takes the settle wait plus the card's own initialization before storage is ready, roughly 0.6 to 1 s; turning the rail on early in the wake sequence, while the displays wake, hides some of it.
+
+*Board design notes,* to carry into the first schematic:
+
+- pull-ups on the SD lines (DO, CS, and the data lines) belong on the switched rail, not on the microcontroller's 3.3 V, so that they cannot back-power an unpowered card. The internal pull-ups `main.c` enables on DO and CS are breadboard stand-ins and go away with them. The card-detect switch is the exception: it has to be readable with the rail off, so its pull-up stays on the microcontroller side
+- switching the rail on charges the bulk capacitance of everything on it at once. A bare MOSFET can sag the shared 3.3 V enough to brown out the RP2350 on wake; a load switch with a controlled turn-on time, or a slowed gate drive, avoids it
+- an SD card needs its supply to fall close to zero, and stay there briefly, before it is powered again, or it may not reset cleanly. Sleep satisfies that naturally, but the power manager needs a minimum off time for any quick off-and-on, and the rail must actually discharge when switched off, which may need a weak pull-down on it
+- the development socket's detect switch closes to ground when the socket is empty, so an empty socket draws about 66 µA through the card-detect pull-up for as long as the device sleeps. Whether insertion should wake the device is still open; if it should not, either the driver switches that pull-up off during sleep (a small addition that partly reverses the rule that the detect pin is claimed for the life of the device), or the board uses a weaker external pull-up or a socket whose switch is open when empty
+
+*Built so far:* the storage coordinator's release and reclaim (the none owner, in `storage.h`), tested on the host. Not yet built: the power manager itself, the rail switch, the pin safe-state for each peripheral, a forced release for a card that never stops being busy (the "separate forced-shutdown path" under Resource Ownership), and the consumer safe-point hook in `storage_step`.

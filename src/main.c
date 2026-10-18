@@ -26,9 +26,10 @@
 //data rate for the first hardware runs; protocol first, speed later
 #define SD_BAUD_HZ 1000000U
 
-//the demo never formats a card unless this is changed to 1 below (there is no build option for it): a
-//demo that erases whatever card is in the socket is a trap. with it set, a card with no FAT volume is
-//formatted once it is seen
+//the demo never formats a card unless this is 1: a demo that erases whatever card is in the socket is a
+//trap. set it by changing the line below or by defining it on the compiler command line
+//(-DTAVERNKEEP_DEMO_FORMAT=1); there is deliberately no CMake option that could be left switched on. with
+//it set, a card with no FAT volume is formatted once it is seen
 #ifndef TAVERNKEEP_DEMO_FORMAT
 #define TAVERNKEEP_DEMO_FORMAT 0
 #endif
@@ -308,7 +309,7 @@ static void storage_watch(void)
         DEBUG_INFO("no FAT volume; formatting (TAVERNKEEP_DEMO_FORMAT)");
         (void)storage_request_format();
 #else
-        DEBUG_INFO("no FAT volume; not formatting (set TAVERNKEEP_DEMO_FORMAT to 1 in main.c to allow it)");
+        DEBUG_INFO("no FAT volume; not formatting (set TAVERNKEEP_DEMO_FORMAT to 1 to allow it; see main.c)");
 #endif
     }
     if (became_ready) {
