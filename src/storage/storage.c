@@ -302,7 +302,8 @@ static void bring_up(uint32_t now_ms)
 bool storage_init(block_device_t *new_device)
 {
     if (device != NULL || !block_device_is_valid(new_device)
-            || new_device->operations->is_present == NULL) {
+            || new_device->operations->is_present == NULL
+            || new_device->operations->sync == NULL) {
         return false;
     }
     device = new_device;

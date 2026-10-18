@@ -81,6 +81,7 @@ static block_device_result_t sd_spi_device_write_blocks(
 static block_device_result_t sd_spi_device_get_info(
     void *context,
     block_device_info_t *info);
+static block_device_result_t sd_spi_device_sync(void *context);
 static block_device_result_t sd_spi_device_is_present(
     void *context,
     bool *present);
@@ -91,6 +92,7 @@ static const block_device_operations_t sd_spi_operations = {
     .read_blocks = sd_spi_device_read_blocks,
     .write_blocks = sd_spi_device_write_blocks,
     .get_info = sd_spi_device_get_info,
+    .sync = sd_spi_device_sync,
     .is_present = sd_spi_device_is_present,
 };
 
@@ -834,6 +836,30 @@ static block_device_result_t sd_spi_device_get_info(
     info->writable = true;
 
     return BLOCK_DEVICE_RESULT_OK;
+}
+
+//block_device_sync. every write currently waits out the card's programming busy before it returns, so
+//nothing accepted is still in flight and this only confirms the card is idle. once writes return before
+//the card has finished with them (DMA), waiting for them belongs here, ahead of the ready check
+static block_device_result_t sd_spi_device_sync(void *context)
+{
+    sd_spi_t *const sd = context;
+    if (sd == NULL || !sd->configured) {
+        return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
+    }
+    const block_device_result_t usability = sd_spi_require_usable(sd);
+    if (usability != BLOCK_DEVICE_RESULT_OK) {
+        return usability;
+    }
+
+    //the card only drives its busy signal while selected. same timeout as the wait after a write
+    sd_spi_capture_bus(sd);
+    const bool ready = sd_spi_wait_ready_timeout(sd, 1000);
+    sd_spi_release_bus(sd);
+    if (sd_spi_removal_latched(sd)) {
+        return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
+    }
+    return ready ? BLOCK_DEVICE_RESULT_OK : BLOCK_DEVICE_RESULT_BUSY_TIMEOUT;
 }
 
 // The caller owns the captured bus and remains responsible for releasing it.

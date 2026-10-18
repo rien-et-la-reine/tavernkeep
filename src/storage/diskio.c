@@ -190,8 +190,10 @@ DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
 
     switch (cmd) {
     case CTRL_SYNC:
-        //the driver waits out programming busy on every write, so nothing is ever pending
-        return RES_OK;
+        //FatFs has already written everything it buffers; this waits for the device to finish with it
+        //(block_device_sync). a write the device accepted but failed later shows up here, so the
+        //f_close or f_sync behind it fails instead of reporting data that may not be on the card
+        return map_result(drive, block_device_sync(drive->device));
 
     case GET_SECTOR_COUNT: {
         if (buff == NULL) {

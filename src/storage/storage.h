@@ -80,7 +80,9 @@ typedef enum {
 #define STORAGE_INSERT_SETTLE_MS 500U
 
 /* Take ownership of a block device that is configured but not initialized and
- * that implements block_device_is_present. Starts with the local owner and an
+ * that implements block_device_is_present (without it an insertion would go
+ * unseen) and block_device_sync (required of every device; without it no file
+ * close could succeed). Starts with the local owner and an
  * absent medium; the first storage_step looks at the socket. Returns false for
  * an unusable device or if already initialized. */
 bool storage_init(block_device_t *device);

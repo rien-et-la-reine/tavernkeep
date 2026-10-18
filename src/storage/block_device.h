@@ -38,6 +38,8 @@ typedef struct {
     block_device_result_t (*get_info)(
         void *context,
         block_device_info_t *info);
+    /* See block_device_sync. */
+    block_device_result_t (*sync)(void *context);
     /* Optional; NULL for a device with no presence signal. See
      * block_device_is_present. */
     block_device_result_t (*is_present)(
@@ -91,6 +93,12 @@ static inline block_device_result_t block_device_read_blocks(
         device->context, first_lba, buffer, block_count);
 }
 
+/* BLOCK_DEVICE_RESULT_OK means the device has accepted the data, not that it
+ * is on the medium: a device may return while the transfer or the medium's
+ * own programming is still under way (a DMA transfer in flight, for example).
+ * block_device_sync is where the caller learns that accepted writes have
+ * landed. A read issued after a write has been accepted returns that write's
+ * data, whether or not it has been synced. */
 static inline block_device_result_t block_device_write_blocks(
     const block_device_t *device,
     uint64_t first_lba,
@@ -115,6 +123,22 @@ static inline block_device_result_t block_device_get_info(
         return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
     }
     return device->operations->get_info(device->context, info);
+}
+
+/* Wait until every write the device has accepted is on the medium.
+ * BLOCK_DEVICE_RESULT_OK means all of them are, so a caller may treat that
+ * data as durable. Any other result means at least one may not be: a write
+ * that fails after write_blocks accepted it is reported here, and after a
+ * removal (INVALID_DEVICE) accepted writes may have been lost. Required of
+ * every device, including one whose writes always land before write_blocks
+ * returns: for that device sync only confirms it is idle. */
+static inline block_device_result_t block_device_sync(
+    const block_device_t *device)
+{
+    if (!block_device_is_valid(device) || device->operations->sync == NULL) {
+        return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
+    }
+    return device->operations->sync(device->context);
 }
 
 /* Whether a medium appears to be in the socket right now: one sample of the
