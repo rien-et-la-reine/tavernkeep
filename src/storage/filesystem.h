@@ -211,16 +211,12 @@ filesystem_result_t filesystem_stat(const char *path, filesystem_dirent_t *entry
 
 /* Rename an entry. Fails with FILESYSTEM_RESULT_EXISTS if new_path exists.
  *
- * A save point replaces a file without leaving it half-written in three steps:
- * write the new contents under a temporary name (FILESYSTEM_OPEN_REPLACE, then
- * a close whose result was OK), remove the old file, and rename the temporary
- * into place. An interruption can leave the pair in two states, and whoever
- * reads the file resolves them before using it:
- *   - the file and the temporary both exist: the interruption came before the
- *     remove, so the temporary may be incomplete; remove it and use the file.
- *   - only the temporary exists: the interruption came after the remove, and
- *     the temporary was confirmed complete before it; rename it into place.
- * (docs/architecture.md, "Operating Modes and Storage Ownership") */
+ * Not safe against interruption. FatFs writes the new name before it removes
+ * the old one, and when the two entries sit in different directory sectors an
+ * interruption between those writes leaves both names on the card, sharing one
+ * cluster chain. Removing either name then frees the clusters the other still
+ * uses. Persistent state is therefore never replaced by renaming: it is
+ * written through save_point.h, which neither renames nor removes. */
 filesystem_result_t filesystem_rename(const char *old_path, const char *new_path);
 
 /* Remove a file or an empty directory. A directory that is not empty fails

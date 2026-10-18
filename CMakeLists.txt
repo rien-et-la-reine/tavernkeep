@@ -59,6 +59,7 @@ set(TAVERNKEEP_SOURCES
     src/storage/sd_spi.c
     src/storage/sd_crc.c
     src/storage/storage.c
+    src/storage/save_point.c
 )
 
 # FatFs, vendored under third_party/fatfs. Its own diskio.c is a stub and is

@@ -8,8 +8,9 @@
 #include "platform/debug.h"
 #include "platform/gpio_irq.h"
 
-//the storage stack, top to bottom: coordinator, filesystem layer, sd driver
+//the storage stack: save points over the filesystem layer, the coordinator that owns the card, the sd driver
 #include "storage/filesystem.h"
+#include "storage/save_point.h"
 #include "storage/sd_spi.h"
 #include "storage/storage.h"
 
@@ -72,8 +73,8 @@ static const char *medium_name(storage_medium_t medium)
 
 /* ------------------------------------------------------ filesystem demo */
 
-#define DEMO_FILE "/tavernkeep-demo.txt"
-#define DEMO_TEMP "/tavernkeep-demo.tmp"
+//the counter's save point, in the slot files /tavernkeep-demo.a and /tavernkeep-demo.b
+#define DEMO_RECORD "/tavernkeep-demo"
 #define DEMO_BULK "/tavernkeep-bulk.bin"
 
 enum {
@@ -86,71 +87,34 @@ enum {
 //static: too large for the 4 KB stack
 static uint32_t demo_bulk_buffer[DEMO_BULK_BYTES / sizeof(uint32_t)];
 
-//read the demo file's counter, first resolving an interrupted save point as filesystem.h prescribes:
-//both files present -> the temporary may be incomplete, discard it; only the temporary -> it was
-//confirmed complete, rename it into place. returns false only on a storage failure; a missing file reads
-//as counter 0
+//read the demo's counter from its save point. returns false only on a storage failure: no record yet
+//(nothing saved, or the first save was interrupted) reads as counter 0
 static bool demo_read_counter(uint32_t *counter)
 {
-    filesystem_dirent_t entry;
-    filesystem_result_t result;
-    const bool have_file = filesystem_stat(DEMO_FILE, &entry) == FILESYSTEM_RESULT_OK;
-    const bool have_temp = filesystem_stat(DEMO_TEMP, &entry) == FILESYSTEM_RESULT_OK;
-    if (have_temp && have_file) {
-        result = filesystem_remove(DEMO_TEMP);
-        DEBUG_INFO("recovered: discarded an incomplete save point");
-        if (!demo_report(result == FILESYSTEM_RESULT_OK, "recovery remove", result)) {
-            return false;
-        }
-    } else if (have_temp) {
-        result = filesystem_rename(DEMO_TEMP, DEMO_FILE);
-        DEBUG_INFO("recovered: completed an interrupted save point");
-        if (!demo_report(result == FILESYSTEM_RESULT_OK, "recovery rename", result)) {
-            return false;
-        }
-    }
-
-    *counter = 0;
-    filesystem_file_t file;
-    result = filesystem_open(DEMO_FILE, FILESYSTEM_OPEN_READ, &file);
+    uint8_t bytes[4];
+    size_t size = 0;
+    const filesystem_result_t result = save_point_read(DEMO_RECORD, bytes, sizeof bytes, &size);
     if (result == FILESYSTEM_RESULT_NOT_FOUND) {
+        DEBUG_INFO("no saved counter yet");
+        *counter = 0;
         return true;
     }
-    if (!demo_report(result == FILESYSTEM_RESULT_OK, "open counter", result)) {
+    if (!demo_report(result == FILESYSTEM_RESULT_OK && size == sizeof bytes, "read counter", result)) {
         return false;
     }
-    size_t got = 0;
-    result = filesystem_read(file, counter, sizeof *counter, &got);
-    const filesystem_result_t closed = filesystem_close(file);
-    if (result == FILESYSTEM_RESULT_OK && got != sizeof *counter) {
-        *counter = 0;
-    }
-    return demo_report(result == FILESYSTEM_RESULT_OK && closed == FILESYSTEM_RESULT_OK,
-        "read counter", result != FILESYSTEM_RESULT_OK ? result : closed);
+    *counter = (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) | ((uint32_t)bytes[2] << 16)
+        | ((uint32_t)bytes[3] << 24);
+    return true;
 }
 
-//the save point: write the temporary and confirm its close, remove the old file, rename into place
+//save the counter: one save_point_write, which either lands whole or leaves the previous value readable
 static bool demo_write_counter(uint32_t counter)
 {
-    filesystem_file_t file;
-    filesystem_result_t result = filesystem_open(DEMO_TEMP, FILESYSTEM_OPEN_REPLACE, &file);
-    if (!demo_report(result == FILESYSTEM_RESULT_OK, "save point open", result)) {
-        return false;
-    }
-    size_t written = 0;
-    result = filesystem_write(file, &counter, sizeof counter, &written);
-    const filesystem_result_t closed = filesystem_close(file);
-    if (!demo_report(result == FILESYSTEM_RESULT_OK && written == sizeof counter
-            && closed == FILESYSTEM_RESULT_OK, "save point write", result != FILESYSTEM_RESULT_OK ? result : closed)) {
-        return false;
-    }
-    result = filesystem_remove(DEMO_FILE);
-    if (!demo_report(result == FILESYSTEM_RESULT_OK || result == FILESYSTEM_RESULT_NOT_FOUND,
-            "save point remove", result)) {
-        return false;
-    }
-    result = filesystem_rename(DEMO_TEMP, DEMO_FILE);
-    return demo_report(result == FILESYSTEM_RESULT_OK, "save point rename", result);
+    const uint8_t bytes[4] = {
+        (uint8_t)counter, (uint8_t)(counter >> 8), (uint8_t)(counter >> 16), (uint8_t)(counter >> 24),
+    };
+    const filesystem_result_t result = save_point_write(DEMO_RECORD, bytes, sizeof bytes);
+    return demo_report(result == FILESYSTEM_RESULT_OK, "save point write", result);
 }
 
 //the word expected at index i of the bulk file: different for every word and for every run, so a block
