@@ -252,7 +252,7 @@ int main(int argc, char **argv)
     }
 
     const size_t total = diskio_test_count + filesystem_test_count + storage_test_count
-        + save_point_test_count + msc_disk_test_count;
+        + save_point_test_count + msc_disk_test_count + usb_mode_test_count;
     const test_case_t **order = calloc(total, sizeof *order);
     if (order == NULL) {
         return 2;
@@ -281,6 +281,11 @@ int main(int argc, char **argv)
     for (size_t i = 0; i < msc_disk_test_count; i++) {
         if (selected(msc_disk_tests[i].name, argc, argv, first_name)) {
             order[count++] = &msc_disk_tests[i];
+        }
+    }
+    for (size_t i = 0; i < usb_mode_test_count; i++) {
+        if (selected(usb_mode_tests[i].name, argc, argv, first_name)) {
+            order[count++] = &usb_mode_tests[i];
         }
     }
 

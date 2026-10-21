@@ -15,11 +15,20 @@
 /* Initialize the USB controller and connect to the bus. Returns false if TinyUSB could not start. */
 bool usb_device_init(void);
 
+/* Connect to the bus or disconnect from it (the D+ pull-up), when that changes; the USB-mode policy
+ * says which, following the cable. The controller cannot see a cable's removal itself (board.h), so it
+ * is disconnected by hand and connects afresh when the next cable comes. */
+void usb_device_attach(bool attached);
+
+/* A host has configured the device (tud_mounted). A host that suspends the bus leaves it configured. */
+bool usb_device_configured(void);
+
 /* One pass of the USB stack's work. Does nothing before usb_device_init succeeds. */
 void usb_device_task(void);
 
-/* A host is on the bus: it has reset it and sent its first request (tud_connected). While one is, the
- * main loop does not idle between passes, so that each of the host's commands is answered promptly. */
+/* A host is on the bus: the device is connected to it, and a host has reset it and sent its first
+ * request (tud_connected). While one is, the main loop does not idle between passes, so that each of the
+ * host's commands is answered promptly. */
 bool usb_device_host_present(void);
 
 #endif

@@ -42,6 +42,16 @@ python3 tests/hardware/run.py rates
 python3 tests/hardware/run.py --rate 25000000
 ```
 
+The `usb` group needs the Pico 2's USB port connected to the computer running the tests, which acts as
+the USB host; it runs only when asked for:
+
+```bash
+python3 tests/hardware/run.py usb
+```
+
+It lends the card through the USB-mode policy's request variable (`usb_mode_request`, written over the
+probe) and works the host side through `/sys/block` and udisks (`usb_host.py`), so it needs no root.
+
 The `manual` group needs you at the bench, for physical removal and insertion. It runs only when
 asked for:
 
@@ -83,6 +93,9 @@ ERROR (the rig failed: no verdict).
 | `manual_removal_bulk_write` | The core halts mid data block of the bulk file's multi-block write and you pull the card: STORAGE_ERROR, ABSENT, the save point before it intact |
 | `manual_fumbled_insertion` | You push the card partly in, pause, then push it home: it reaches READY, never FAULTY, and the case reports how many attempts failed first and at which init step |
 | `manual_host_check` | You check the card on your computer with `fsck.fat -n`, paste its output, and put the card back: any structural error fails; a stale FSInfo free cluster count (a hint FatFs keeps from mount to sync, not structure) is reported as a note |
+| `usb_round_trip` | The card lent on request; the host mounts it, writes a file and ejects it; the card comes back with a clean pass whose listing has the host's file at its size, and the host is left with no medium, the device still on the bus |
+| `usb_leave_by_request` | The card lent, then asked back through the request variable: a clean pass, and no medium on the host |
+| `usb_removal_while_lent` | A removal injected while lent: lost for the USB owner at the next epoch, brought up for USB again at that epoch and found again by the host, with no return to the local owner; one CMD0 retry is allowed and reported (VAL-H09) |
 | `rates` | Each of `--rates` (default 5, 12.5, 25 MHz) for `--rate-boots` boots, the bus at exactly that rate, with throughput; then a bulk-write removal at the highest passing rate |
 
 ## What injected removals do and do not show

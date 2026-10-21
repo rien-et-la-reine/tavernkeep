@@ -436,8 +436,61 @@ has no margin there; 5 MHz the conservative one.
 - Covered: enumeration and the no-medium answer on Linux; the storage cases
   with a host on the bus
 - Not covered, **pending**: the card lent to USB (reads, writes, eject,
-  removal while lent), which needs the USB-mode policy; other host operating
-  systems; the stack use of a USB transfer, which nothing triggers yet
+  removal while lent), which needs the USB-mode policy (VAL-H09); other host
+  operating systems; the stack use of a USB transfer, which nothing triggers
+  yet
+
+### VAL-H09 — The card lent to a USB host and returned, 2026-10-21
+
+- Test method: the firmware with the USB-mode policy at 1 MHz, the Pico 2's
+  USB port on the bench computer (Linux, GNOME, udisks), and the hardware
+  tests' `usb` group. Entry and leaving asked for through the policy's
+  request variable, written over the probe; on the host, the medium watched
+  in `/sys/block`, the volume mounted, written and ejected through udisks,
+  as the desktop does. A removal injected while lent, by setting the
+  driver's latch. Before the group existed, the same round trip done by hand
+  (`udisksctl`, a file written, the drive's Eject method)
+- Environment / hardware: as VAL-H08
+- Expected result: the card lent only once asked for and with a host
+  configured; the host finding the medium, and its writes landing on the
+  card; an eject or a request returning the card, the device staying on the
+  bus, the next local pass clean and seeing the host's file; a removal while
+  lent being a new medium for the USB owner, not a return
+- Observed result: all three cases passed:
+  - Round trip: the host found the medium (15523840 sectors, the card's size)
+    within a second of the request and read its partition table; udev took
+    about 30 s to identify the volume over USB at 1 MHz (about 150 reads),
+    and udisks then mounted it, showing the demo's own files. A file written
+    and synced by the host was listed by the demo at its size after the eject
+    ("usb: returning the card: the host ejected it"), the counter one higher,
+    and the host left with no medium and the device still on the bus.
+    GNOME did not automount the volume
+  - Leave by request: returned ("requested") with a clean pass, and the host
+    saw no medium
+  - Removal while lent: the loss at the next epoch for the USB owner, the
+    seated card brought up for USB again at that epoch and found again by the
+    host, which had a read fail with an I/O error at the removal; no return
+    until asked
+  - The `core`, `removal` and `faults` groups on the same firmware: all 14
+    passed, as in VAL-H08
+- Findings:
+  - A host configures the device about 0.25 s after reset, but the host can
+    take longer to attach it again after the previous boot's device, so the
+    first run of the removal case asked for entry, the policy waited (as it
+    should), and the case timed out. The policy now logs a host configuring
+    the device, and the cases wait for that line
+  - An injected removal leaves the card powered. When the host was reading it
+    at that moment, the card was left mid multi-block read, the first CMD0 of
+    the next bring-up went unanswered, and the retry 250 ms later succeeded.
+    The same followed a reset with the card lent and the host reading. A
+    physical removal takes the card's power, so it cannot happen there; the
+    removal case allows and reports one such retry
+- Covered: entry by request, the host's reads and writes, an eject, leaving
+  by request, a removal while lent, on Linux at 1 MHz
+- Not covered, **pending**: a cable removal (the bench Pico 2 is powered
+  through the cable; host-tested only); the host leaving while lent (bus
+  reset or unconfigure; host-tested only); other host operating systems;
+  higher SPI rates in USB mode; the stack use of a USB transfer
 
 ## Measurements / Performance Characterization
 
@@ -499,6 +552,6 @@ of it in one wait), which is the card taking longer to program some blocks.
 - The storage coordinator's release and reclaim (the none owner) has run only
   in the host tests; nothing requests a release on hardware until the power
   manager exists.
-- The USB mass-storage disk has run only in the host tests: nothing lends it
-  the card on hardware until the USB-mode policy exists.
+- USB mode: a cable removal and a host leaving while lent have run only in
+  the host tests (VAL-H09), and only on Linux.
 - DMA, PIO and power management are not implemented, so nothing to test.

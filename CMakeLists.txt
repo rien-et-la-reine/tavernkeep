@@ -74,6 +74,7 @@ if(TAVERNKEEP_USB_MSC)
     list(APPEND TAVERNKEEP_SOURCES
         src/usb/msc_disk.c
         src/usb/usb_device.c
+        src/usb/usb_mode.c
     )
 endif()
 

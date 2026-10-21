@@ -2,7 +2,7 @@
 """Mutation testing for the storage-layer tests.
 
 Each mutation plants one deliberate bug in a copy of src/storage/filesystem.c, diskio.c or storage.c, or
-src/usb/msc_disk.c, rebuilds fs_tests against the copy and runs it. A mutation the suite fails on is "killed"; one it still
+src/usb/msc_disk.c or usb_mode.c, rebuilds fs_tests against the copy and runs it. A mutation the suite fails on is "killed"; one it still
 passes is a SURVIVOR, meaning the suite cannot detect that bug. The sources in the repository are never
 modified.
 
@@ -30,11 +30,13 @@ FILESYSTEM = "filesystem.c"
 DISKIO = "diskio.c"
 STORAGE = "storage.c"
 MSC_DISK = "msc_disk.c"
+USB_MODE = "usb_mode.c"
 SOURCES = {
     FILESYSTEM: os.path.join(ROOT, "src", "storage", "filesystem.c"),
     DISKIO: os.path.join(ROOT, "src", "storage", "diskio.c"),
     STORAGE: os.path.join(ROOT, "src", "storage", "storage.c"),
     MSC_DISK: os.path.join(ROOT, "src", "usb", "msc_disk.c"),
+    USB_MODE: os.path.join(ROOT, "src", "usb", "usb_mode.c"),
 }
 
 # (file, description, old text, new text)
@@ -584,6 +586,57 @@ MUTATIONS = [
      "    presented = false;\n    eject_pending = true;", "    presented = false;"),
     (MSC_DISK, "an eject is reported forever",
      "    eject_pending = false;\n    return ejected;", "    return ejected;"),
+    # ------------------------------------------------------------------ usb_mode.c: the cable
+    (USB_MODE, "VBUS not debounced",
+     "    if (held_for(now_ms, changing_since, USB_MODE_VBUS_DEBOUNCE_MS)) {",
+     "    if (held_for(now_ms, changing_since, 0U)) {"),
+    (USB_MODE, "the debounce one millisecond long",
+     "    return now_ms - since >= ms;", "    return now_ms - since > ms;"),
+    (USB_MODE, "the debounce breaks across a wrap of the clock",
+     "    return now_ms - since >= ms;", "    return now_ms >= since + ms;"),
+    (USB_MODE, "a dip does not restart the debounce",
+     "    if (vbus == cable) {\n        changing = false;\n        return;\n    }",
+     "    if (vbus == cable) {\n        return;\n    }"),
+    (USB_MODE, "the first step assumes a cable",
+     "        started = true;\n        cable = vbus;", "        started = true;\n        cable = true;"),
+    (USB_MODE, "the bus follows raw VBUS",
+     "    return cable;\n}", "    return vbus;\n}"),
+
+    # ------------------------------------------------------------------ usb_mode.c: requests and entry
+    (USB_MODE, "a request is not taken",
+     "    usb_mode_request = USB_MODE_REQUEST_NONE;\n", ""),
+    (USB_MODE, "an entry asked for while lent is kept",
+     "    if (request == USB_MODE_REQUEST_ENTER && !lending) {", "    if (request == USB_MODE_REQUEST_ENTER) {"),
+    (USB_MODE, "a leave request does not cancel a waiting entry",
+     "        entering = false;\n        if (lending) {\n            give_back(\"requested\");",
+     "        if (lending) {\n            give_back(\"requested\");"),
+    (USB_MODE, "a leave request does not return the card",
+     "            give_back(\"requested\");", "            entering = false;"),
+    (USB_MODE, "entry without a configured host",
+     "    } else if (entering && configured) {", "    } else if (entering) {"),
+    (USB_MODE, "a done entry stays waiting",
+     "        entering = false;\n        if (storage_request_owner(STORAGE_OWNER_USB)) {",
+     "        if (storage_request_owner(STORAGE_OWNER_USB)) {"),
+    (USB_MODE, "lending not recorded",
+     "            lending = true;\n", ""),
+    (USB_MODE, "a refused entry counted as lent",
+     "        if (storage_request_owner(STORAGE_OWNER_USB)) {", "        if (storage_request_owner(STORAGE_OWNER_USB) || true) {"),
+
+    # ------------------------------------------------------------------ usb_mode.c: return
+    (USB_MODE, "a cable removal does not cancel a waiting entry",
+     "    if (!cable) {\n        entering = false;\n", "    if (!cable) {\n"),
+    (USB_MODE, "a cable removal does not return the card",
+     "            give_back(\"cable removed\");", "            entering = false;"),
+    (USB_MODE, "an eject does not return the card",
+     "    } else if (lending && ejected) {", "    } else if (false && ejected) {"),
+    (USB_MODE, "an eject from before a lend is acted on",
+     "    const bool ejected = msc_disk_take_eject();", "    const bool ejected = lending && msc_disk_take_eject();"),
+    (USB_MODE, "the host leaving does not return the card",
+     "    } else if (lending && !configured) {", "    } else if (false) {"),
+    (USB_MODE, "returning asks for the wrong owner",
+     "    (void)storage_request_owner(STORAGE_OWNER_LOCAL);", "    (void)storage_request_owner(STORAGE_OWNER_USB);"),
+    (USB_MODE, "returning leaves the card counted as lent",
+     "    lending = false;\n    (void)storage_request_owner", "    (void)storage_request_owner"),
 ]
 
 
@@ -613,7 +666,8 @@ def main():
                      "-DFS_TESTS_FILESYSTEM_SOURCE=" + copies[FILESYSTEM],
                      "-DFS_TESTS_DISKIO_SOURCE=" + copies[DISKIO],
                      "-DFS_TESTS_STORAGE_SOURCE=" + copies[STORAGE],
-                     "-DFS_TESTS_MSC_DISK_SOURCE=" + copies[MSC_DISK]])
+                     "-DFS_TESTS_MSC_DISK_SOURCE=" + copies[MSC_DISK],
+                     "-DFS_TESTS_USB_MODE_SOURCE=" + copies[USB_MODE]])
     if configure.returncode != 0:
         print(configure.stdout)
         return 2

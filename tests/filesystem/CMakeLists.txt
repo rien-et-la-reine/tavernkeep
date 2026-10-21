@@ -1,5 +1,5 @@
 # Host tests for the storage layer above the SD driver (src/storage/filesystem.c, diskio.c, storage.c, save_point.c) and the USB
-# mass-storage disk over it (src/usb/msc_disk.c), running the real
+# mass-storage disk and USB-mode policy over it (src/usb/msc_disk.c, usb_mode.c), running the real
 # FatFs over a RAM-backed fake block device. Standalone for now; see README.md.
 #
 #   cmake -S tests/filesystem -B build-fs-tests && cmake --build build-fs-tests
@@ -26,6 +26,8 @@ set(FS_TESTS_SAVE_POINT_SOURCE "${TAVERNKEEP_ROOT}/src/storage/save_point.c" CAC
     "save_point.c to test")
 set(FS_TESTS_MSC_DISK_SOURCE "${TAVERNKEEP_ROOT}/src/usb/msc_disk.c" CACHE FILEPATH
     "msc_disk.c to test")
+set(FS_TESTS_USB_MODE_SOURCE "${TAVERNKEEP_ROOT}/src/usb/usb_mode.c" CACHE FILEPATH
+    "usb_mode.c to test")
 
 set(FS_TESTS_OWN_SOURCES
     test_main.c
@@ -34,6 +36,7 @@ set(FS_TESTS_OWN_SOURCES
     test_storage.c
     test_save_point.c
     test_msc_disk.c
+    test_usb_mode.c
     fake_block_device.c
     fake_platform.c
     ${FS_TESTS_FILESYSTEM_SOURCE}
@@ -41,6 +44,7 @@ set(FS_TESTS_OWN_SOURCES
     ${FS_TESTS_STORAGE_SOURCE}
     ${FS_TESTS_SAVE_POINT_SOURCE}
     ${FS_TESTS_MSC_DISK_SOURCE}
+    ${FS_TESTS_USB_MODE_SOURCE}
     ${TAVERNKEEP_ROOT}/src/storage/sd_crc.c
 )
 set(FS_TESTS_FATFS_SOURCES

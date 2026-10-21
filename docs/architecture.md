@@ -110,7 +110,7 @@ The final physical control scheme has not yet been selected. Two rotary encoders
 
 USB mass-storage access to Tome's removable storage is a required feature.
 
-USB mass storage is an exclusive operating mode: while a USB host has the storage, no local reading or playback runs, and vice versa. Coordination with local filesystem access is therefore a mode transition, not concurrent sharing; see "Operating Modes and Storage Ownership". The class is TinyUSB's mass-storage device, from the Pico SDK, over the bare block device; when the device enters and leaves USB mode is set out under "USB Mode Entry and Exit". The class is implemented (see "USB mass-storage disk" under Major Interfaces); the policy that decides when to lend it the card is not yet.
+USB mass storage is an exclusive operating mode: while a USB host has the storage, no local reading or playback runs, and vice versa. Coordination with local filesystem access is therefore a mode transition, not concurrent sharing; see "Operating Modes and Storage Ownership". The class is TinyUSB's mass-storage device, from the Pico SDK, over the bare block device; when the device enters and leaves USB mode is set out under "USB Mode Entry and Exit". Both the class and the policy that decides when to lend it the card are implemented (see "USB mass-storage disk" and "USB-mode policy" under Major Interfaces); entry is by request until automatic entry is added.
 
 **Power / System Operation**
 
@@ -227,6 +227,15 @@ The coordinator is built for the consumers it does not have yet. A consumer that
 - **Eject** (START STOP UNIT with LoEj set and Start clear) withholds the medium until the epoch moves on, and is recorded for the USB-mode policy (`msc_disk_take_eject`), whose job it is to return the card to the local owner. A load is accepted and changes nothing; PREVENT ALLOW MEDIUM REMOVAL likewise, since the socket has no lock.
 
 The device descriptor uses TinyUSB's example vendor and product IDs, which are for development only; a device given to anyone else needs IDs of its own. The serial number is the flash chip's unique ID.
+
+**USB-mode policy**
+
+`src/usb/usb_mode.h` decides when the card is lent to USB and when it comes back, as set out under "USB Mode Entry and Exit", and asks the coordinator through `storage_request_owner`; it holds no device and does no I/O. Its step takes one sample of the VBUS sense pin (`board_vbus_present`) and whether a host has the device configured (`tud_mounted`), and returns whether the device should be on the bus, which `usb_device_attach` applies.
+
+- **Entry** is by request: `usb_mode_request`, written by the GDB harness, asks for it, and the card is lent once a host has the device configured. Automatic entry on configuration waits for the consumer safe-point hook (see the work list under "USB mass storage" in Planned / Future Architecture).
+- **The card comes back** on an eject (`msc_disk_take_eject`), on the cable's removal, when the host stops having the device configured (a bus reset, or unconfiguring it), or on request. A host that suspends the bus keeps the card.
+- **VBUS** is believed once it has read the same for `USB_MODE_VBUS_DEBOUNCE_MS` (50 ms). The device is on the bus while the cable is there. TinyUSB forces the controller's own VBUS detection on, so without the pin the device could not tell a removed cable from an idle host; on a board without VBUS sensing the cable is taken to be always there.
+- It logs each decision (`usb: ...`): a host configuring the device or leaving, the cable, an entry asked for, the card lent, and the card returned with the reason. The hardware tests key on these lines.
 
 *Other subsystem interfaces*
 
@@ -374,13 +383,14 @@ The host can therefore enumerate the device before the card is released; it sees
 **Leaving:**
 
 - **The host ejects** (START STOP UNIT with LoEj set and Start clear): the policy requests `STORAGE_OWNER_LOCAL`, and the class reports MEDIUM NOT PRESENT again. The device stays on the bus, so it keeps charging and can be used in the meantime (FR-010). It does not re-enter USB mode until the cable is next connected.
-- **The cable is removed** (VBUS falls, or the stack reports unmount): the policy disconnects from the bus and requests `STORAGE_OWNER_LOCAL`. The coordinator mounts the card as a new medium, as step 5 of the ownership transition requires, since the host may have changed anything and may not have finished writing.
+- **The cable is removed** (VBUS falls): the policy disconnects from the bus and requests `STORAGE_OWNER_LOCAL`. The coordinator mounts the card as a new medium, as step 5 of the ownership transition requires, since the host may have changed anything and may not have finished writing.
+- **The host stops having the device configured** (it reset the bus or unconfigured the device, with the cable still in): the policy requests `STORAGE_OWNER_LOCAL` and the device stays on the bus.
 - **The host suspends the bus** (a computer going to sleep with VBUS kept up): the device stays in USB mode. Taking the card back while the host may still hold writes in its cache is how volumes are corrupted; the host resumes or the cable is removed.
 - **The card is removed in USB mode:** the removal latch fails every block operation, and the class reports MEDIUM NOT PRESENT, as under "Operating Modes and Storage Ownership". A card inserted while USB mode lasts is brought up for the USB owner.
 
 PREVENT ALLOW MEDIUM REMOVAL is accepted and ignored: the socket has no lock, and a removal is handled the same way whether or not the host asked to prevent it.
 
-**Test builds trigger USB mode by hand.** Until the safe-point hook and the reader and audio modes exist, automatic entry on configuration is compiled out by a build option, and the hardware tests request USB mode instead: the GDB harness writes a request variable in the policy, and the policy's next step carries it out exactly as step 3 would, through `storage_request_owner`. Leaving is requested the same way, or by ejecting on the host. No RTT input is read by the firmware. The Pico 2 is powered from a computer's USB port for these runs, so a host is always present and the device is always configured; without the request it remains a reader with no card.
+**USB mode is entered by hand for now.** Until the safe-point hook and the reader and audio modes exist, there is no automatic entry: the GDB harness writes `usb_mode_request` (`usb_mode.h`), and the policy's next step carries it out as step 3 will, through `storage_request_owner`, once a host has the device configured. Leaving is requested the same way, or by ejecting on the host. No RTT input is read by the firmware. The Pico 2 is powered from a computer's USB port for these runs, so a host is always present and the device is always configured; without the request it remains a reader with no card. That also means a cable removal cannot be tried on that bench: pulling the cable is a power cut. Trying it needs the Pico 2 powered through VSYS as well.
 
 **USB stdio is unavailable in a build with the mass-storage class.** TinyUSB's device stack has one owner, and its descriptors are the mass-storage class's; stdio stays on RTT (`TAVERNKEEP_STDIO_RTT`) or UART, and `TAVERNKEEP_STDIO_USB` is refused alongside it.
 
@@ -625,7 +635,7 @@ Tome provides USB connectivity and is required to support USB mass-storage acces
 
 Ownership of the storage during this access is defined under "Operating Modes and Storage Ownership", and when the device enters and leaves USB mode under "USB Mode Entry and Exit".
 
-The firmware needs to see VBUS to know a cable is connected. The Pico 2 brings it to GPIO 24 through a divider (`PICO_VBUS_PIN` in the SDK's board header); the final board needs the same, a divider from VBUS to a GPIO that stays readable with the peripheral rail off. Its values, 5.6 kΩ over 8.2 kΩ, and the reasons for them are in the board design notes under "Power management".
+The firmware needs to see VBUS to know a cable is connected: TinyUSB forces the controller's own VBUS detection on, so the controller never sees a cable go. The Pico 2 brings VBUS to GPIO 24 through a divider (`PICO_VBUS_PIN` in the SDK's board header), which `board_vbus_present` reads; the final board needs the same, a divider from VBUS to a GPIO that stays readable with the peripheral rail off. Its values, 5.6 kΩ over 8.2 kΩ, and the reasons for them are in the board design notes under "Power management".
 
 **Battery and charging**
 
@@ -645,7 +655,7 @@ At the current stage:
 
 - DMA-based storage transfer has not yet been implemented
 
-- the USB mass-storage class has run only in the host tests, and the USB-mode policy that lends it the card has not yet been implemented, so on hardware a host sees a reader with no card
+- USB mode is entered only on request (`usb_mode_request`, from GDB): automatic entry waits for the consumer safe-point hook, and the charger timeout with it. A cable's removal has run only in the host tests
 
 - the final physical input hardware has not been selected
 
@@ -711,9 +721,9 @@ USB mass-storage access to removable storage is required.
 
 The ownership model between the USB host and Tavernkeep's own filesystem access is defined under "Operating Modes and Storage Ownership", and entry and exit under "USB Mode Entry and Exit". The work, in order:
 
-1. done: TinyUSB in device mode with a mass-storage-only configuration, its read, write, capacity and sense callbacks over `storage_usb_device()`, write-through, with block-device results mapped to SCSI sense (see "USB mass-storage disk" under Major Interfaces); host-tested, not yet run on hardware
-2. the USB-mode policy with the hand trigger the hardware tests use (a request variable written by GDB), and VBUS sensing for cable removal
-3. host tests of the policy's transitions; hardware cases for entering and leaving by request and by eject, a copy from the computer, and removal of the card and of the cable while the host has the storage
+1. done: TinyUSB in device mode with a mass-storage-only configuration, its read, write, capacity and sense callbacks over `storage_usb_device()`, write-through, with block-device results mapped to SCSI sense (see "USB mass-storage disk" under Major Interfaces; VAL-H08, VAL-H09)
+2. done: the USB-mode policy with the hand trigger the hardware tests use (`usb_mode_request`, written by GDB), and VBUS sensing for cable removal (see "USB-mode policy" under Major Interfaces)
+3. done but for the cable: host tests of the policy's transitions; hardware cases (the `usb` group) for entering by request, a copy from the computer and an eject, leaving by request, and a removal of the card while the host has the storage (VAL-H09). A cable removal is host-tested only, since the bench Pico 2 is powered through its cable
 4. automatic entry on configuration, with the charger timeout, once the consumer safe-point hook exists
 
 **Power management**

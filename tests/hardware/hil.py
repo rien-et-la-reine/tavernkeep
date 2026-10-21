@@ -109,7 +109,7 @@ class Symbols:
                  "filesystem_mount", "filesystem_open", "filesystem_write", "filesystem_read",
                  "filesystem_close", "save_point_write", "save_point_read", "disk_read", "disk_write",
                  "disk_ioctl", "crc_helper_rolling_16")
-    DATA = ("_SEGGER_RTT", "__StackTop", "__StackBottom", "__StackLimit")
+    DATA = ("_SEGGER_RTT", "__StackTop", "__StackBottom", "__StackLimit", "usb_mode_request")
 
     def __init__(self, elf):
         self.elf = elf
@@ -382,6 +382,12 @@ class Board:
         self.ocd.write_byte(self.symbols.removal_latch, 1)
         self.note(f"injected removal: {why}")
 
+    def request_usb(self, request, why):
+        """Write the USB-mode policy's request variable (usb_mode.h), as the firmware's own docs say the GDB
+        harness does; the policy's next step takes it. 1 asks for entry, 2 for the card back."""
+        self.ocd.write_words(self.symbols["usb_mode_request"], [request])
+        self.note(f"usb_mode_request = {request}: {why}")
+
     # ---- boot
 
     def _wait_halted(self, timeout, what):
@@ -507,6 +513,10 @@ BULK = re.compile(r"^bulk (write|read): (\d+) bytes in (\d+) us, (\d+) KiB/s$")
 NOT_SEATED = re.compile(r"^storage: card not seated")
 INIT_FAILED = re.compile(r"^sd: init failed at (.+), result (-?\d+)$")
 BRING_UP_FAILED = re.compile(r"^storage: bring-up attempt (\d+) of (\d+) failed, (.+) result (-?\d+)$")
+LISTED = re.compile(r"^  (.+?)(/?) (\d+)$")
+USB_LENDING = re.compile(r"^usb: lending the card to the host$")
+USB_CONFIGURED = re.compile(r"^usb: a host configured the device$")
+USB_RETURNING = re.compile(r"^usb: returning the card: (.+)$")
 
 SOURCE_TEXT = {
     "src/main.c": ["\"storage: owner %s, medium %s, epoch %lu\"", "\"PASS %s\"", "\"FAIL %s: result %d\"",
@@ -514,11 +524,14 @@ SOURCE_TEXT = {
                    "\"this card has now been mounted by the demo %lu times\"",
                    "\"bulk %s: %u bytes in %lu us, %lu KiB/s\"", "\"PASS bulk verify, %u bytes\"",
                    "\"save point write\"", "\"counter readback\"", "\"bulk write\"", "\"bulk read\"",
-                   "\"no FAT volume on this card; format it as FAT32 on a computer\""],
+                   "\"no FAT volume on this card; format it as FAT32 on a computer\"", "\"  %s%s %lu\""],
     "src/storage/sd_spi.c": ["\"sd: init failed at %s, result %d\""],
     "src/storage/storage.c": ["\"storage: card not seated (init refused it), waiting\"",
                               "\"storage: bring-up attempt %u of %d failed, %s result %d\""],
     "src/platform/debug.c": ["\"[%s] \""],
+    "src/usb/usb_mode.c": ["\"usb: lending the card to the host\"", "\"usb: returning the card: %s\"",
+                           "\"a host configured the device\"",
+                           "\"the host ejected it\"", "\"requested\""],
 }
 
 # the steps of one complete, successful demo pass, in order (src/main.c, filesystem_demo)

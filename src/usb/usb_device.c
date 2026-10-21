@@ -258,12 +258,27 @@ int32_t tud_msc_scsi_cb(uint8_t lun, const uint8_t scsi_cmd[16], void *buffer, u
 /* ------------------------------------------------------------ interface */
 
 static bool initialized;
+//tusb_init connects to the bus
+static bool attached = true;
 
 bool usb_device_init(void)
 {
     pico_get_unique_board_id_string(serial, sizeof serial);
     initialized = tusb_init();
     return initialized;
+}
+
+void usb_device_attach(bool attach)
+{
+    if (!initialized || attach == attached) {
+        return;
+    }
+    attached = attach ? tud_connect() : !tud_disconnect();
+}
+
+bool usb_device_configured(void)
+{
+    return initialized && tud_mounted();
 }
 
 void usb_device_task(void)
@@ -275,5 +290,5 @@ void usb_device_task(void)
 
 bool usb_device_host_present(void)
 {
-    return initialized && tud_connected();
+    return initialized && attached && tud_connected();
 }
