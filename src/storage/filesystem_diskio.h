@@ -9,8 +9,7 @@
  * The FatFs disk I/O adapter (src/storage/diskio.c) is part of the filesystem
  * layer. FatFs only ever passes a physical drive number to disk_*(), so
  * filesystem_mount() binds the block device to that number before calling
- * f_mount and filesystem_unmount() unbinds it afterwards; filesystem_format()
- * binds it around f_mkfs in the same way. */
+ * f_mount and filesystem_unmount() unbinds it afterwards. */
 
 #include <stdbool.h>
 #include <stdint.h>

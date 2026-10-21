@@ -189,180 +189,229 @@ sequences it did not exercise.
   removal at both interruption points of the save point and both recovery
   paths; remount after each; volume consistency afterwards on the host
 - Not covered: removal during a multi-block read; removal at a confirmed point
-  inside a multi-block write; removal during mount or bring-up (planned in
-  VAL-H04*); repeated interruption of the same save point; the format path
-  (planned in VAL-H04*); any rate above 1 MHz (planned in VAL-H05*);
+  inside a multi-block write; removal during mount or bring-up (injected in
+  VAL-H04); repeated interruption of the same save point; the format path
+  (planned in VAL-H04); any rate above 1 MHz (run in VAL-H05);
   standard-capacity cards; write protect. Procedure note: when a session
   appears to stall after a breakpoint is armed, check the debugger's Call Stack
   pane, which shows whether the core is paused on a breakpoint
 
-### VAL-H04* — Card-detect claim at configure, removal during bring-up and mount, block-device sync, slot-file save points, and the format path (planned, not yet run)
+### VAL-H04 — Card-detect claim at configure, removal during bring-up and mount, block-device sync, slot-file save points, and the format path, 2026-10-20
 
-The `*` marks a planned record: nothing below has been observed yet. The
-asterisk comes off, and the date goes in, once the run has been made and the
-observed result filled in.
+- Test method: the VAL-H03 demo with the changes since: card detect claimed
+  at configure, a block-device `sync` behind `CTRL_SYNC`, FatFs's open-entry
+  table (`FF_FS_LOCK` 5), any mount failure with the device gone treated as a
+  removal, and the slot-file save point (`save_point_write`). Automated over
+  the Debug Probe, with removals injected by setting the driver's removal
+  latch at a hardware breakpoint, the card left seated: at CMD8 and the first
+  ACMD41 of init, the mount's first `disk_read`, three save-point stages
+  (opening the older slot, its header write, its `CTRL_SYNC`), and inside the
+  bulk file's multi-block write. Also a boot with 3 s idle, ten reboots, and
+  the stack high-water mark. The format path in a `TAVERNKEEP_DEMO_FORMAT`
+  build, the card made to look unformatted by clearing the boot signature in
+  the mount's sector-0 buffer, so the format itself was real: once clean, once
+  with a removal at the first save on the new volume, once with a removal at
+  the format's 200th write
+- Environment / hardware: as VAL-H03, with OpenOCD and RTT driven by script
+  instead of Cortex-Debug; Release build of b413dad, and for the format path
+  b413dad with the two fixes below
+- Expected result: init interrupted logs "card not seated", not counted, and
+  the card returns with no IO_ERROR; a mount interrupted ends ABSENT, never
+  FAULTY; no IN_USE; stack near the 1.7 KB call-graph estimate; a save point
+  interrupted at any stage fails with STORAGE_ERROR and leaves the old value
+  or the new one, never a third; the format leaves an empty, unlabelled
+  FAT32 volume; a removal during it never ends FAULTY
+- Observed result:
+  - Init and mount interrupted: as expected, each back to READY with a clean
+    pass. 37 bring-ups with no counted failure or WARN; 32 clean passes; ten
+    reboots, the counter up by one each.
+  - Stack: 1604 of 4096 bytes, in the normal and the format build alike.
+  - Save point interrupted: STORAGE_ERROR each time; the old record kept at
+    the open and the header write, the new one already on the card at the
+    sync. Never a third value. The first save on a new volume, interrupted at
+    its sync, likewise kept the new record.
+  - Bulk write interrupted: STORAGE_ERROR, the save point before it intact.
+  - Format: about 26 s at 1 MHz; an empty volume with no label, then a clean
+    pass from counter 1. `fsck.fat -n` on the host: no errors; FAT32, 32 KiB
+    clusters, two FATs, data area at absolute sector 8192 (4 MiB). Removal
+    during the format: UNFORMATTED, formatted again, a clean pass.
+  - Two findings, fixed before commit. A format interrupted at its 200th
+    write left a volume that mounted READY with the old files listed over a
+    FAT already cleared: `f_mkfs` writes the MBR last. `filesystem_format` now
+    clears sector 0 first, so that write commits the format. And the format
+    made one FAT with the data area unaligned (sector 1991): the SD driver now
+    reports the 4 MiB boundary unit of SDHC and SDXC cards for `f_mkfs` to
+    align to, and the format asks for two FATs, as the SD file system
+    specification does. Bulk write times did not change; a 16 KiB write stays
+    in one allocation unit either way. The format path was later removed from
+    the firmware altogether: formatting is left to a computer.
+  - Not a failure: after the save-point and bulk-write removals the log went
+    from READY to PREPARING with the epoch advanced, never ABSENT, since the
+    seated card read present at once, as in VAL-H03
+- Covered: all of the above on an 8 GB SDHC card, with injected removals
+- Not covered here: boot without a card then insertion, and physical
+  removal at each point above and while idle, done by hand in VAL-H07. Not
+  planned: DMA; removal during a multi-block read; the none owner's release;
+  SDSC cards; write protect
 
-- Test method: the VAL-H03 demo, built from the commit that contains the changes
-  made after that run: the card-detect pin is claimed in `sd_spi_configure`
-  instead of at the first presence check or initialization; the block-device
-  contract gains `sync`, which the SD driver implements as a ready check on the
-  selected card; the FatFs adapter forwards `CTRL_SYNC` to it, so every close,
-  remove and rename now asks the device to confirm its writes; FatFs's table of
-  open entries is on (`FF_FS_LOCK` 5), so every open, remove and rename checks
-  it; the storage coordinator gains the none owner (release and reclaim), which
-  the demo never requests, and treats any mount failure with the device gone as
-  a removal (before, only one reported as medium unavailable); and the save
-  point is now `save_point_write`, two alternating slot files with a sequence
-  number and a CRC, replacing the temporary-file-and-rename scheme VAL-H03
-  tested. The demo's counter therefore lives in `tavernkeep-demo.a` and
-  `tavernkeep-demo.b`: it starts again from 1 on this card, and the old
-  `tavernkeep-demo.txt` stays behind, unused. Removals are made by hand while
-  the core is halted at function breakpoints, each followed by Continue (never
-  Step), and the card is checked on the host with `fsck.fat -n` afterwards.
-  Planned steps:
-  - Claim at configure: boot without a card, then insert one; boot with a card
-    in. `is_present` no longer claims the pin, so an insertion seen at all
-    shows the claim in configure took effect.
-  - Removal during SD init: halt in `sd_spi_command` with `$r1 == 8` (CMD8)
-    or `$r1 == 41` (inside the ACMD41 loop), pull the card, Continue; then
-    reinsert. `sd_spi_command` is static, so first confirm the breakpoint
-    resolves in the Release build.
-  - Removal during mount: once init has succeeded, halt at the first
-    `disk_read` of the mount, pull the card, Continue; then reinsert.
-  - Sync on every close and the lock table: a normal run, idle removals and
-    reinsertions included, with every demo step passing.
-  - Stack high-water mark, in the normal build and again in the format build
-    below: halt at `main`, fill the unused part of core 0's stack with a
-    pattern from the debugger (take the bounds from the linker map), run the
-    whole session, then halt and find the lowest overwritten word. The
-    call-graph estimate is about 1.7 KB, deepest in the demo's save-point read
-    through `f_open`, and about 0.8 KB for the format (`docs/architecture.md`,
-    "Stacks"). Alternatively build with the SDK's stack guard
-    (`PICO_USE_STACK_GUARDS`) so that an overflow faults.
-  - Save point interrupted at each stage: halt at `save_point_write`, then arm
-    one of these and pull the card when it stops, Continue, and reinsert. Use
-    a separate interruption for each, with at least two saves on the card first
-    so both slots hold a record:
-    - `filesystem_open` with `$r1 == 1` (FILESYSTEM_OPEN_REPLACE): just before
-      the older slot is truncated.
-    - `filesystem_write` with `$r2 == 12` (the record's header): the slot has
-      been truncated and nothing new is in it yet.
-    - `disk_ioctl` with `$r1 == 0` (`CTRL_SYNC`): the record is written and
-      its close is confirming it.
-  - First save interrupted: after the format step below, the demo's first
-    save on the empty volume, interrupted at `disk_ioctl` with `$r1 == 0`.
-  - Format, run last because it erases the card: on the same 8 GB card,
-    first image it on the host (`dd`) so its contents can be restored, then
-    reformat it there as exFAT, which leaves it with no FAT volume as an SDXC
-    card arrives. Run a separate build with `TAVERNKEEP_DEMO_FORMAT` set to 1
-    in `main.c`, measuring the stack as above. Afterwards check the card on
-    the host. Then reformat it as exFAT again,
-    halt in `disk_write` while `f_mkfs` is running, pull the card, Continue,
-    and reinsert. Restore the image at the end if the old contents are wanted.
-- Environment / hardware: as VAL-H03 - Raspberry Pi Pico 2 (RP2350, Arm), Pico
-  SDK 2.3.0, Release build, Debug Probe with OpenOCD and Cortex-Debug, RTT;
-  Adafruit MicroSD card breakout board+ on SPI0 (DO 16, CS 17, CLK 18, DI 19),
-  availability signal on GPIO 12 (active-high); internal pull-ups on DO and
-  CS; 400 kHz bring-up then 1 MHz; the 8 GB microSDHC card from VAL-H01. Record
-  the exact commit built, not a working tree
-- Expected result:
-  - Claim at configure: the cardless boot reports ABSENT, and the insertion
-    settles and reaches READY; the boot with a card reaches READY.
-  - Removal during SD init: init fails through its rollback and the
-    coordinator logs "card not seated", not a counted failure, then ABSENT. On
-    reinsertion the card is detected and reaches READY with no
-    `block device result 4` (IO_ERROR) line, which shows the rollback kept the
-    card-detect pin claimed and unregistered the removal interrupt, so the next
-    registration succeeded.
-  - Removal during mount: the mount fails, the coordinator treats it as a
-    removal (ABSENT, never FAULTY), and the reinserted card reaches READY.
-  - Sync on every close and the lock table: every demo step PASS, as in
-    VAL-H03; neither the extra ready check nor the lock table causes a
-    failure, and no `result 13` (IN_USE) appears, since the demo never holds
-    two handles on one file.
-  - Stack: in each build a high-water mark near the call-graph estimate plus
-    interrupt frames, recorded with its margin below 4 KB; the stack guard, if
-    used, does not fire.
-  - Save point interrupted at each stage: `FAIL save point write: result 11`
-    (STORAGE_ERROR), then ABSENT, including at the sync, where the record's
-    sectors may already be on the card. After reinsertion the counter is the
-    value before the save or the one after it, never a third, and the next
-    save passes. On the host the slot that was not being written still holds
-    the older record, untouched. `fsck.fat -n` reports no errors, except
-    possibly one lost cluster chain: an interruption between clearing the
-    truncated slot's directory entry and freeing its clusters leaves them
-    allocated but unreferenced, which wastes space and nothing else.
-  - First save interrupted: the next mount logs "no saved counter yet", not a
-    partial value, and the following save writes counter 1.
-  - Format: the card reports UNFORMATTED, the demo requests the format, and
-    the card reaches READY with an empty volume; the demo then passes every
-    step with the counter at 1. On the host the card holds an MBR partition
-    table (no `FM_SFD`) and a FAT32 volume with no label, which
-    `fsck.fat -n` reports clean. A removal during the format ends in ABSENT,
-    never FAULTY, and the reinserted card is either UNFORMATTED or READY,
-    whatever the interrupted format left
-- Observed result: not yet run
-- Covered: nothing yet
-- Not covered by the plan: DMA transfers, whose `sync` behaviour is the reason
-  for the contract change but which do not exist yet; a write that fails after
-  it was accepted (needs asynchronous writes to happen at all); removal during
-  a multi-block read; formatting an SDXC card or a card small enough for FatFs
-  to pick FAT12 or FAT16, since the card's size decides the FAT type; release
-  and reclaim for the none owner, which nothing on the board requests yet and
-  for which there is no rail to cut; any rate above 1 MHz (planned in
-  VAL-H05*); standard-capacity cards; write protect
+### VAL-H05 — SPI data rates of 5, 12.5 and 25 MHz, 2026-10-20
 
-### VAL-H05* — SPI data rates of 5, 12.5 and 25 MHz (planned, not yet run)
+All three divide the RP2350's 150 MHz clk_peri exactly. 25 MHz is the SD
+default-speed maximum in SPI mode; 12.5 MHz the fallback if the first board
+has no margin there; 5 MHz the conservative one.
 
-Planned, like VAL-H04*: nothing below has been observed yet.
+- Test method: the VAL-H04 build at each rate, lowest first: three boots of
+  the whole demo, then a removal injected inside the bulk write at 25 MHz;
+  later, every automated VAL-H04 case except the format at each rate
+- Environment / hardware: as VAL-H04, same card and breadboard; b413dad
+- Expected result: every step PASS at the requested rate; at 25 MHz either
+  the same or reported failures, never wrong data; throughput rising with the
+  clock but not in proportion
+- Observed result: every case passed at every rate, each reporting exactly
+  the rate asked for, with no CRC error at 25 MHz on the breadboard, and the
+  same results as VAL-H04 at 1 MHz. Throughput is under Measurements: above
+  about 5-6.5 MHz the CPU, not SCK, sets the pace
+- Covered: 5, 12.5 and 25 MHz on this card and breadboard, with VAL-H04's
+  injected removals at each
+- Not covered, **pending**: physical removal and reinsertion above 1 MHz
+  (VAL-H07 ran at 1 MHz); a bus capture at 25 MHz. Not planned: rates above
+  25 MHz (CMD6 high-speed mode); DMA; other cards; the final board; power
 
-Why these three. The SPI peripheral is clocked from clk_peri, which the SDK
-runs from clk_sys at 150 MHz on the RP2350, and `spi_set_baudrate` divides it
-by an even prescale times a post-divide. All three rates divide 150 MHz
-exactly (2 × 15, 2 × 6 and 2 × 3), so the card sees the rate that was asked
-for. 25 MHz is the ceiling: it is the SD default-speed maximum in SPI mode and
-the most `sd_spi_configure` accepts. 12.5 MHz is the likely working rate for
-the final firmware if 25 MHz has no margin on the first board; its raw rate of
-about 1.5 MB/s is several times uncompressed CD-quality audio (176 KB/s),
-the heaviest stream the device is expected to read. 5 MHz is the conservative
-fallback, five times the rate validated so far and still ample for compressed
-audio and the reader. The 400 kHz bring-up rate is unchanged throughout.
+### VAL-H06 — Pull-request run: unformatted cards, failed closes, unreadable save-point slots, bring-up retries, and VAL-H04 and VAL-H05 again, 2026-10-21
 
-- Test method: the demo from the latest validated build, with `SD_BAUD_HZ` in
-  `main.c` set to each rate in turn, lowest first; move up only once a rate
-  passes. The demo logs the rate actually set each time the card becomes
-  ready (`sd bus at ... Hz`, from the value `spi_set_baudrate` returns), and
-  the time and rate of the bulk write and the bulk read call (`bulk write:
-  ... KiB/s`), timing the transfer call alone, not the open or the close. At
-  each rate: a boot with the card in, then at least ten
-  removal and reinsertion cycles, each running the whole demo including the
-  16 KiB bulk write, read and verify. At the highest rate that passes, one
-  removal during the bulk write, as in VAL-H03, to check the removal path
-  still works when a transfer takes a fraction of the time. Finish with
-  `fsck.fat -n` on the host. If a logic analyser or scope is available,
-  capture SCK and DO at 25 MHz and record the edges under Measurements below
-- Environment / hardware: as VAL-H04*, the same 8 GB microSDHC card. The
-  breadboard matters more here than in any earlier run: jumper lengths and
-  the breakout's 74AHC125 level shifter on DI, CLK and CS all affect signal
-  quality at 25 MHz. Record the wiring as it is, and the exact commit built
-- Expected result: every demo step PASS at 5 and 12.5 MHz, with the reported
-  rate equal to the one requested. At 25 MHz either the same, or failures
-  that are reported, never silent: with CRC on every command and data block,
-  and every word of the bulk file verified, a marginal bus shows up as
-  `IO_ERROR` results and FAIL lines, not as wrong data. No hang at any rate.
-  Throughput rises with the clock, but not in proportion: the driver moves one
-  byte per `spi_write_read_blocking` call and computes the CRC a byte at a
-  time in software, so above some rate the CPU, not SCK, sets the pace. The
-  run records where that happens. A failure at 25 MHz on the breadboard is a
-  property of the wiring, to be retested on the first board, not a firmware
-  result. The removal during the bulk write ends as in VAL-H03: the write
-  fails with STORAGE_ERROR, then ABSENT
-- Observed result: not yet run
-- Covered: nothing yet
-- Not covered by the plan: rates above 25 MHz (SD high-speed mode, switched
-  with CMD6, which the driver does not implement); DMA, which will change the
-  throughput figures entirely; any card other than the 8 GB SDHC card; signal
-  integrity on the final board; power at each rate
+- Test method: the firmware as submitted: VAL-H04's build with the changes
+  since. The format path is removed: a card with no FAT volume stays
+  UNFORMATTED, and the demo asks for it to be formatted as FAT32 on a
+  computer. A failed close is retried once before it reports. A save-point
+  slot the card cannot read is treated as holding no record, so a read falls
+  back to the other slot and the next save rewrites it. After VAL-H07's
+  finding, bring-up is attempted nine times over about 3.5 s instead of three
+  over 0.5 s, and the SD driver logs which init step failed. Every automated
+  case of VAL-H04 and VAL-H05 was rerun, the VAL-H04 cases at 1, 5, 12.5 and
+  25 MHz, with four new ones over the Debug Probe: the card made to look
+  unformatted (boot signature cleared in the mount's sector-0 buffer, the
+  card untouched); a write error at the first device write of a save point's
+  close (`disk_write` made to return an error from its entry breakpoint); and
+  slot a's record sector made unreadable, every device read of it failing
+  until it is written, as a bad sector, starting from the newest record in
+  each slot in turn; and SD init made to fail at CMD8 (`sd_spi_command`
+  returning IO_ERROR), on all attempts but the last and then on every one
+- Environment / hardware: as VAL-H05; built from the commit that adds this
+  record
+- Expected result: as VAL-H04 and VAL-H05 for their cases. The unformatted
+  card reported with the message and left alone, never retried or FAULTY,
+  and found unchanged on the next boot. The save whose close write failed
+  passing, its record read back on the next boot. With slot a unreadable, no
+  step failing: the read returning slot b's record when it is the newest, and
+  falling back to it, the previous record, when slot a held the newest; the
+  save rewriting slot a. Each failed bring-up naming its init step, the
+  attempts following the schedule, the card coming up on the last attempt
+  and parked FAULTY when every one fails
+- Observed result:
+  - 57 of 57 cases passed: 14 at each rate and the rate sweep. 179
+    bring-ups and 162 clean demo passes, with no IN_USE. The only counted
+    bring-up failures and WARN lines were the 68 injected CMD8 failures, the
+    only FAULTY the four injected parks, and the only FAIL lines the 17
+    injected removals, each STORAGE_ERROR.
+  - Bring-up retries, at every rate: each failure logged "sd: init failed at
+    CMD8, result 4" and a counted attempt of 9; the attempts came about 400,
+    400, 700, 700, 700, 1200, 400 and 400 ms apart, the schedule plus about
+    150 to 200 ms for each attempt, mostly the test's own breakpoints; with
+    eight failing the card came up on the ninth, and with all nine it was
+    parked FAULTY.
+  - Unformatted: UNFORMATTED and the message, no state change in 3 s idle;
+    the next boot mounted the volume with the counter one higher.
+  - Failed close write: the save passed and read back, and the next boot
+    read the record, at every rate.
+  - Unreadable slot a, at every rate: with the newest record in slot b the
+    counter advanced; with it in slot a the read fell back and the counter
+    repeated. Each time the save rewrote slot a's sector, which then read
+    normally.
+  - Stack: 1628 of 4096 bytes, 24 more than VAL-H04, as the save-point read
+    now checks its slots in a frame of its own. Reads as fast as in VAL-H05.
+    Bulk writes were as fast at best but varied more, the slowest pass at
+    each rate slower than in VAL-H05: 60.0 ms at 5 MHz (54.4), 48.1 ms at
+    12.5 MHz (37.3), 43.4 ms at 25 MHz (32.2), each on an ordinary boot with
+    nothing injected. Measured afterwards (Measurements, "Bulk write: time
+    waiting on the card"): the variation is all the card's programming time;
+    the firmware's own share of a write is constant.
+  - Two findings, fixed before this run. A close whose retry also failed
+    reported the retry's error, so a removal there showed as STALE_HANDLE;
+    it now reports the first, and the save-point removal at the sync gave
+    STORAGE_ERROR. And a first full run measured 1860 bytes of stack: the
+    slot check had been inlined beside `f_open`, the deepest path; it is now
+    kept out of line
+- Covered: every case above at 1, 5, 12.5 and 25 MHz on the 8 GB SDHC card,
+  with removals and errors injected
+- Not covered here: physical removal and insertion (VAL-H07). Not planned: a
+  real bad sector or transient write error (both injected at the FatFs
+  adapter's entry, not produced by the card); DMA; SDSC cards; write protect
+
+### VAL-H07 — Physical removal and insertion, 2026-10-21
+
+- Test method: the firmware at 1 MHz, with a person at the bench pulling and
+  inserting the card when the test run asked (the hardware tests' `manual`
+  group). Ten removal and insertion cycles while idle, the last insertion
+  slow; a boot with the socket empty, then an insertion; the card pulled
+  while the core was halted at a breakpoint, at CMD8 of SD init, at the
+  mount's first sector read, at each of VAL-H04's three save-point stages,
+  and inside the first data block of the bulk file's multi-block write (the
+  card selected, mid-CMD25), the run resuming once the card-detect pin, read
+  over the probe, showed the socket empty; a card pushed partly in, left,
+  then pushed home; and last, the card checked on a computer with
+  `fsck.fat -n`. Run three times: twice on the VAL-H06 firmware before its
+  bring-up change, then on the firmware as submitted
+- Environment / hardware: as VAL-H06
+- Expected result: each removal one ABSENT, never FAULTY, not counted; each
+  insertion settling to READY with a clean pass; the cardless boot ABSENT at
+  epoch 0 with no bring-up; at the halted points the outcomes of the injected
+  cases in VAL-H04 (init: "card not seated"; save point and bulk write:
+  STORAGE_ERROR), the counter only ever the old or the new value; the
+  fumbled insertion reaching READY; no structural error on the host
+- Observed result, final run:
+  - Every case passed but the host check, which the test run could not read
+    (a rig fault: the output was pasted as one line); read afterwards, it
+    passes. 21 ABSENT transitions and no FAULTY; no WARN beyond the fumbled
+    insertion's; the only FAIL lines were the four expected
+    STORAGE_ERRORs. Every halted removal was seen from the card-detect pin.
+  - Idle: ten removals, the epoch advancing to 10; every insertion, the slow
+    one included, reached READY with a clean pass and the counter one higher.
+  - Cardless boot: ABSENT at epoch 0, no state change in 3 s, then READY on
+    insertion: the card-detect claim at configure works.
+  - Halted removals: init gave "card not seated"; mount, ABSENT with no
+    counted failure; the save point kept the previous record at the open and
+    the header write and the new one at the sync; the bulk write failed with
+    STORAGE_ERROR, the save point before it intact. Every reinsertion read
+    cleanly.
+  - Fumbled insertion: the first attempt failed at CMD0 ("sd: init failed at
+    CMD0, result 4"), the card not yet answering, and the next reached READY.
+    The card was pushed home quickly enough that three attempts would have
+    done; the full schedule is shown by VAL-H06's injected case.
+  - Host check: no structural error; 3 files in 4 clusters, exactly the
+    card's contents; the FSInfo free cluster count 25 low, as predicted.
+- Findings, from the earlier runs:
+  - The FSInfo free cluster count drifts. FatFs keeps it in RAM from mount
+    and writes it back at each close; opening a file to replace it frees its
+    cluster on the card at once (directory entry first, then the FAT, so the
+    volume stays consistent), so a removal between that truncation and the
+    close leaves the count one cluster low. A measurement build logging the
+    stored count against one from the FAT at every mount, with each automated
+    case run alone, found it at that point and no other. The count was 38 low
+    after the first run and, once repaired, 14 and then 25 low after later
+    ones, each exactly the number of such removals in between. Left as it is:
+    the firmware never reads the count, a host repairs it, and keeping it
+    exact would cost a sector write on every save.
+  - A card put back partly in and pushed home after a pause (the breakout,
+    held only by its header pins, moves under the push) went FAULTY: the
+    detect switch closed and stayed closed through the 500 ms settle wait
+    while the contacts were not seated, and all three bring-up attempts, then
+    250 ms apart, failed with IO_ERROR. Bring-up now makes nine attempts over
+    about 3.5 s, and the driver logs the failing init step (VAL-H06)
+- Covered: physical removal while idle and at each of VAL-H04's points,
+  including a power loss mid-CMD25; insertion, slow and fumbled insertion,
+  and a cardless boot; the volume afterwards on a host
+- Not covered: removal during a multi-block read; physical removal above
+  1 MHz; other cards; the final board
 
 ## Measurements / Performance Characterization
 
@@ -372,31 +421,57 @@ results. Include method, equipment, configuration, uncertainty or limitations,
 and expected limits where applicable.
 -->
 
+### Bulk transfer throughput by SPI rate, 2026-10-20
+
+The demo's 16 KiB bulk file, written and read in one call each, timed around
+the call alone (VAL-H04, VAL-H05). On the host-formatted volume (4 KiB
+clusters, 8-block transfers) and on one made by the firmware's format path in
+VAL-H04, since removed (32 KiB, one 32-block transfer). Reads vary under 1%;
+writes up to 12% on the firmware's volume, aligned or not, so with the card's
+own write latency.
+
+| SPI rate | SCK ceiling | Write, 4 KiB / 32 KiB clusters | Read, 4 KiB / 32 KiB clusters |
+| --- | --- | --- | --- |
+| 1 MHz | 122 KiB/s | 98 / 98-99 KiB/s | 102 / 106 KiB/s |
+| 5 MHz | 610 KiB/s | 307 / 293-328 KiB/s | 339 / 361-364 KiB/s |
+| 12.5 MHz | 1526 KiB/s | 451 / 428-490 KiB/s | 515-521 / 570 KiB/s |
+| 25 MHz | 3052 KiB/s | 535 / 496-593 KiB/s | 634 / 703 KiB/s |
+
+Beyond 8 SCK periods per byte, each byte costs about 1.2 µs read and 1.5 µs
+written, so 25 MHz is only about 23% faster than 12.5 MHz.
+
+### Bulk write: time waiting on the card, 2026-10-21
+
+To find where VAL-H06's bulk-write variation came from: a measurement build
+(not committed) timed every call to the SD driver's wait for the card's busy
+to end, totalled over the demo's timed 16 KiB write, on 30 boots at each rate
+with nothing injected, on the VAL-H04 firmware-formatted volume. Every write
+made the same 37 waits (one per block of the 32-block CMD25, and those around
+the command and the FAT and directory sectors).
+
+| SPI rate | Write, min / median / max | Not waiting | Waiting on the card |
+| --- | --- | --- | --- |
+| 1 MHz | 159.8 / 162.0 / 166.4 ms | 154.3 ms | 5.4-12.0 ms |
+| 5 MHz | 50.0 / 52.1 / 56.2 ms | 45.0 ms | 5.0-11.2 ms |
+| 12.5 MHz | 32.6 / 33.1 / 47.7 ms | 28.6 ms | 4.0-19.1 ms |
+| 25 MHz | 28.0 / 28.6 / 32.7 ms | 23.2-23.5 ms | 4.9-9.5 ms |
+
+The time not spent waiting, sending data and computing CRCs, is the same on
+every pass to within 0.4 ms. All the variation is in the waits: a slow write
+has one or two long ones (the slowest, 47.7 ms, waited 19.1 ms in all, 12.6 ms
+of it in one wait), which is the card taking longer to program some blocks.
+
 ## Not Yet Demonstrated on Hardware
 
-- Three real-card runs exist, all at 1 MHz on one 8 GB SDHC card: the driver
-  alone (VAL-H01); the filesystem layer with the storage coordinator, including
-  hot removal while idle (VAL-H02); and boot without a card, the insertion
-  settle wait, multi-block transfers under FatFs, removal during writes and
-  save points, and both save-point recovery paths (VAL-H03). No bus capture,
-  no power measurement, no rate above 1 MHz, no removal during a multi-block
-  read, no standard-capacity card, no second card.
-- The card-detect claim at configure and the block-device `sync` behind
-  `CTRL_SYNC` came after VAL-H03 and have only run in the host tests; VAL-H04*
-  plans their first hardware run, together with removal during bring-up and
-  mount.
-- The save point was redesigned after VAL-H03 (two slot files with a sequence
-  number and a CRC, `src/storage/save_point.h`), because the
-  temporary-file-and-rename scheme VAL-H03 exercised turned out to have two
-  unsafe interruption points that it did not reach. The new scheme has run only
-  in the host tests, including a removal at every device write of a save;
-  VAL-H04* plans its hardware run.
-- FatFs's table of open entries (`FF_FS_LOCK`) and the storage coordinator's
-  release and reclaim (the none owner) also came after VAL-H03 and have run
-  only in the host tests. VAL-H04*'s normal run exercises the table; nothing
-  requests a release on hardware until the power manager exists.
-- The format path is implemented but has not run on hardware, and no stack
-  measurement has been made on hardware; VAL-H04* plans both.
-- Every run so far has used 1 MHz. VAL-H05* plans 5, 12.5 and 25 MHz.
+- All runs so far are on one 8 GB SDHC card: no bus capture, no power
+  measurement, no removal during a multi-block read, no SDSC card, no second
+  card.
+- Physical removal, power loss mid-write included, has run only at 1 MHz
+  (VAL-H07); above that, removals have been injected with the card seated.
+- A removal while a file is being replaced leaves the FSInfo free cluster
+  count one cluster low (VAL-H07), until a host repairs it.
+- The storage coordinator's release and reclaim (the none owner) has run only
+  in the host tests; nothing requests a release on hardware until the power
+  manager exists.
 - DMA, PIO, USB mass storage and power management are not implemented, so
   nothing to test.

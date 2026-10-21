@@ -5,7 +5,7 @@
 //
 //the adapter is dumb by design: no retries, no caching, no policy. it forwards sectors and counts, maps
 //result codes, and remembers one thing per drive - whether the medium has reported itself gone. FatFs
-//never tests STA_NODISK: it tests STA_NOINIT (mount_volume, validate and f_mkfs in ff.c), and STA_PROTECT
+//never tests STA_NODISK: it tests STA_NOINIT (mount_volume and validate in ff.c), and STA_PROTECT
 //before a write, which this adapter never reports. so a vanished medium is reported as
 //STA_NOINIT | STA_NODISK, and STA_NOINIT is the bit FatFs acts on: open objects then fail validation with
 //FR_INVALID_OBJECT, and the next mount attempt re-runs disk_initialize, which keeps failing until the
@@ -181,6 +181,9 @@ DRESULT disk_write(BYTE pdrv, const BYTE *buff, LBA_t sector, UINT count)
 
 DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
 {
+#if !FF_USE_MKFS
+    (void)buff;     //only the commands f_mkfs asks take a buffer
+#endif
     diskio_drive_t *const drive = drive_at(pdrv);
     if (drive == NULL) {
         return RES_PARERR;
@@ -197,6 +200,9 @@ DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
         //f_close or f_sync behind it fails instead of reporting data that may not be on the card
         return map_result(drive, block_device_sync(drive->device));
 
+#if FF_USE_MKFS
+    //only f_mkfs asks for these, and the firmware does not build it (ffconf.h); the host tests do, to
+    //create the volumes they run on
     case GET_SECTOR_COUNT: {
         if (buff == NULL) {
             return RES_PARERR;
@@ -221,9 +227,11 @@ DRESULT disk_ioctl(BYTE pdrv, BYTE cmd, void *buff)
         //erase block size in sectors; unknown here, and 1 is FatFs's documented "unknown" value
         *(DWORD *)buff = 1U;
         return RES_OK;
+#endif
 
     default:
-        //GET_SECTOR_SIZE is never asked while FF_MIN_SS == FF_MAX_SS, and CTRL_TRIM needs FF_USE_TRIM
+        //GET_SECTOR_SIZE is never asked while FF_MIN_SS == FF_MAX_SS, CTRL_TRIM needs FF_USE_TRIM, and
+        //GET_SECTOR_COUNT and GET_BLOCK_SIZE need FF_USE_MKFS
         return RES_PARERR;
     }
 }

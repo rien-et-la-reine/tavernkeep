@@ -4,8 +4,8 @@
 /* The storage coordinator: the owner of the removable card.
  *
  * It holds the block device for the life of the firmware and is the only code
- * that initializes or deinitializes it, mounts, unmounts or formats the
- * filesystem, or lends the device to the USB mass-storage class. Everything
+ * that initializes or deinitializes it, mounts or unmounts the filesystem, or
+ * lends the device to the USB mass-storage class. Everything
  * else learns what it may do from the two values below and the epoch
  * (docs/architecture.md, "Operating Modes and Storage Ownership").
  *
@@ -17,7 +17,7 @@
  * Every change of ownership and every loss of the medium goes through
  * storage_step, never through an interrupt handler: the card-detect interrupt
  * only latches the removal inside the driver, and the next step acts on it.
- * Requests (an owner change, a format) are therefore asynchronous: a request
+ * Requests (an owner change) are therefore asynchronous: a request
  * is recorded, and a later step carries it out. Callers watch storage_owner,
  * storage_medium and storage_request_pending for the outcome. This is also
  * the seam where consumers will be given time to reach a safe point before a
@@ -69,7 +69,8 @@ typedef enum {
      * card's own programming. */
     STORAGE_MEDIUM_FAULTY,
     /* Local owner only: the card works but holds no FAT volume (an SDXC card
-     * arrives formatted as exFAT). storage_request_format can fix that. */
+     * arrives formatted as exFAT). The firmware does not format cards: the
+     * user formats it as FAT32 on a computer. Left alone until it is removed. */
     STORAGE_MEDIUM_UNFORMATTED,
     /* Usable by the current owner. Local: mounted, and filesystem.h works.
      * USB: initialized and lent through storage_usb_device. */
@@ -77,11 +78,19 @@ typedef enum {
 } storage_medium_t;
 
 /* Bring-up attempts (init, then mount) on an inserted card before it is
- * declared faulty, and the interval between them. A refusal because the card
- * turned out not to be seated (INVALID_DEVICE) is not counted: the card is
- * taken to be still arriving and settles again (STORAGE_INSERT_SETTLE_MS)
- * before the next attempt, for as long as the socket reports it. */
-#define STORAGE_BRING_UP_ATTEMPTS 3
+ * declared faulty, and the wait before each attempt after the first: three
+ * attempts 250 ms apart, three 500 ms apart, then after a second three more
+ * 250 ms apart, about 3.5 s in all. The detect switch can close well before a
+ * card pushed only partly in is seated (VAL-H07), so the attempts reach past a
+ * fumbled insertion. A refusal because the card turned out not to be seated
+ * (INVALID_DEVICE) is not counted: the card is taken to be still arriving and
+ * settles again (STORAGE_INSERT_SETTLE_MS) before the next attempt, for as
+ * long as the socket reports it. */
+#define STORAGE_BRING_UP_ATTEMPTS 9
+#define STORAGE_BRING_UP_DELAYS_MS { 250U, 250U, 500U, 500U, 500U, 1000U, 250U, 250U }
+
+/* The interval between other retries: release attempts, and letting go of a
+ * card parked as faulty. */
 #define STORAGE_RETRY_INTERVAL_MS 250U
 
 /* Clean deinit attempts when releasing the card for the NONE owner, at
@@ -112,8 +121,8 @@ bool storage_init(block_device_t *device);
 /* One bounded step of foreground work: notice a removal or an insertion, carry
  * out a pending request, bring a new card up. now_ms is any monotonic
  * millisecond clock (it may wrap). A step does at most one piece of card work -
- * one bring-up attempt (init, then mount), one owner change (with its mount),
- * or one format (with its mount) - and a step with nothing to do costs one
+ * one bring-up attempt (init, then mount) or one owner change (with its
+ * mount) - and a step with nothing to do costs one
  * presence or status check, neither of which touches the bus, or nothing at
  * all once the card is released for the NONE owner. A bring-up can
  * block for the card's own initialization time; that only happens when a card
@@ -137,14 +146,7 @@ uint32_t storage_epoch(void);
  * can be entered and left with no card in the socket. */
 bool storage_request_owner(storage_owner_t owner);
 
-/* Ask for the card to be formatted with a new, empty FAT volume, erasing it.
- * Only for the local owner and an UNFORMATTED or READY medium; refused (false)
- * otherwise, and dropped if the medium or owner changes before it runs. The
- * caller has had the user confirm. Success shows as the medium becoming READY
- * with an empty volume. */
-bool storage_request_format(void);
-
-/* True while an owner change or a format has been accepted but not yet done.
+/* True while an owner change has been accepted but not yet done.
  * A change to NONE is done once the card is released, or given up as FAULTY;
  * until then it stays pending, so the power manager waits for
  * storage_owner() == STORAGE_OWNER_NONE and !storage_request_pending() before

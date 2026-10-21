@@ -60,7 +60,8 @@ typedef enum {
      * once the coordinator has re-initialized it. */
     FILESYSTEM_RESULT_MEDIUM_UNAVAILABLE,
     /* The card is readable but holds no FAT volume (e.g. exFAT out of the
-     * box); the UI can offer to format it (filesystem_format). */
+     * box). The firmware does not format cards: the user formats it as FAT32
+     * on a computer. */
     FILESYSTEM_RESULT_NO_FILESYSTEM,
     FILESYSTEM_RESULT_NOT_FOUND,
     FILESYSTEM_RESULT_EXISTS,
@@ -131,18 +132,11 @@ filesystem_result_t filesystem_mount(block_device_t *device);
 
 /* Drop the volume and every open handle without any I/O, so it is safe after a
  * card removal and on entry to USB mode. Nothing is flushed: writers close
- * their files at their save points, before any transition. Idempotent, and
- * always succeeds. */
-filesystem_result_t filesystem_unmount(void);
+ * their files at their save points, before any transition. Idempotent; it
+ * cannot fail. */
+void filesystem_unmount(void);
 
 bool filesystem_is_mounted(void);
-
-/* Create a new, empty FAT volume on an already-initialized block device,
- * erasing everything on it. The volume must not be mounted; mount afterwards to
- * use it. Called by the storage coordinator only, once the user has confirmed -
- * typically after filesystem_mount returned FILESYSTEM_RESULT_NO_FILESYSTEM.
- * FatFs picks FAT12/16 or FAT32 by card size; exFAT is never written. */
-filesystem_result_t filesystem_format(block_device_t *device);
 
 /* Copy the volume label (UTF-8, possibly empty) into a buffer of at least
  * FILESYSTEM_LABEL_SIZE bytes. */
@@ -156,7 +150,8 @@ filesystem_result_t filesystem_open(
     filesystem_file_t *file);
 
 /* For a file opened for writing, close is the point at which the data is
- * confirmed on the card; its result must be checked. */
+ * confirmed on the card; its result must be checked. A failed flush is retried
+ * once before the close reports it. */
 filesystem_result_t filesystem_close(filesystem_file_t file);
 
 /* Reads fewer than size bytes only at end of file. */

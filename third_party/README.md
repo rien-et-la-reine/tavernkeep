@@ -29,11 +29,11 @@ FatFs config options changed from default (`source/ffconf.h`):
 - FF_CODE_PAGE: 437 (US, smaller than JIS, only comes up for files without long names, long names use unicode regardless)
 - FF_USE_LFN: 2 (EPUB uses LFN). The long-file-name working buffer goes on the caller's stack, which is why the firmware stack is 4 KB (`CMakeLists.txt`)
 - FF_LFN_UNICODE: 2 (UTF-8)
-- FF_USE_MKFS: 1 (an SDXC card arrives formatted as exFAT, so it can be reformatted to FAT on the device; `filesystem_format`)
+- FF_USE_MKFS: still 0 (the default), but wrapped in `#ifndef` so the host tests can set it to 1 and build `f_mkfs` for their test volumes. The firmware never formats a card
 - FF_USE_LABEL: 1 (UI can show card volume label)
 - FF_USE_FIND: 1 (pattern-filtered directory listing; `filesystem_opendir`)
 - FF_NORTC_YEAR: 1980 (not strictly necessary since FF_FS_NORTC is 0 and the firmware supplies get_fattime())
-- FF_FS_LOCK: 5 (one entry for each file and directory the filesystem layer can hold open, checked by a `static_assert` in `filesystem.c`). FatFs then refuses removing, renaming or re-opening an open file in a way that would corrupt the volume, which the layer reports as `FILESYSTEM_RESULT_IN_USE`. About 80 bytes of RAM. It does not stop removing a directory that is being listed (it records the listing under the directory's own cluster, but finds a directory to remove by its entry in the parent), so the layer checks that itself
+- FF_FS_LOCK: 5, one entry per file and directory the filesystem layer can hold open (`static_assert` in `filesystem.c`); about 80 bytes of RAM. FatFs then refuses removing, renaming or re-opening an open file in a way that would corrupt the volume (`FILESYSTEM_RESULT_IN_USE`). It does not catch removing a directory that is being listed, so the layer checks that itself (`docs/architecture.md`, "Filesystem")
 
 Deliberately left at default:
 - FF_FS_EXFAT: 0 for licensing reasons, no exFAT support planned currently or in future. Sizes and offsets in the filesystem interface are therefore 32-bit

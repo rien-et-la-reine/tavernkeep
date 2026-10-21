@@ -13,7 +13,8 @@
  * holds the previous record. Nothing is ever renamed or removed: an interrupted
  * rename can leave two names sharing one cluster chain (filesystem_rename).
  *
- * Slot file format, little-endian:
+ * Slot file format, little-endian (the RP2350's own byte order, so fields are
+ * stored as they are in memory):
  *   offset 0         magic, the four bytes "TKS1"
  *   offset 4         sequence number (uint32_t; compared across a wrap)
  *   offset 8         data length in bytes (at most SAVE_POINT_DATA_MAX)
@@ -33,7 +34,10 @@
  * FILESYSTEM_RESULT_IN_USE, as does, for a save, the slot it would rewrite
  * being open at all; the call then changes nothing. Results are the filesystem
  * layer's; a slot that is missing or fails its checks is not an error, only a
- * slot without a record. */
+ * slot without a record. A slot the card fails to read is read once more; if
+ * it fails again (STORAGE_ERROR) while the other slot can be read, that is not
+ * an error either: a read returns the other slot's record, and a save rewrites
+ * the unreadable slot, which repairs it. */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -51,13 +55,16 @@
 /* Save size bytes as the record's new contents. OK once the new record is
  * confirmed on the card (the slot file's close succeeded). After any other
  * result a read returns either the previous record or the new one, never
- * anything else. INVALID_ARGUMENT for a name longer than SAVE_POINT_PATH_MAX,
+ * anything else - where the previous record means the newest one the card
+ * could still read when the save began: with the slot holding the newest
+ * record unreadable, the other slot's older record stands in for it. INVALID_ARGUMENT for a name longer than SAVE_POINT_PATH_MAX,
  * more than SAVE_POINT_DATA_MAX bytes, or NULL data with a non-zero size. */
 filesystem_result_t save_point_write(const char *path, const void *data, size_t size);
 
 /* Read the newest valid record into data, a buffer of capacity bytes, and its
  * length into *size. NOT_FOUND if neither slot holds a valid record: nothing
- * has been saved yet, or the first save was interrupted. INVALID_ARGUMENT if
+ * has been saved yet, or the first save was interrupted. STORAGE_ERROR instead
+ * if neither holds one and a slot could not be read. INVALID_ARGUMENT if
  * the record is longer than capacity, with *size set to its length. data is
  * unspecified after anything but OK. */
 filesystem_result_t save_point_read(const char *path, void *data, size_t capacity, size_t *size);

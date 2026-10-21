@@ -144,8 +144,12 @@ set_source_files_properties(${TAVERNKEEP_SOURCES} PROPERTIES
 )
 # The same goes for SDK headers those sources include: the SDK's <stdatomic.h>
 # wrapper uses #include_next, which -Wpedantic reports in every file that
-# includes it. Marking its header library SYSTEM includes it with -isystem, so
-# the warning flags still apply to Tavernkeep's own code and nothing else.
-set_target_properties(pico_atomic_headers PROPERTIES SYSTEM TRUE)
+# includes it. Listing its header library's directories as system include
+# directories includes them with -isystem, so the warning flags still apply to
+# Tavernkeep's own code and nothing else. (The SYSTEM target property would do
+# the same but needs CMake 3.25; this property has existed since 3.0.)
+get_target_property(PICO_ATOMIC_INCLUDE_DIRS pico_atomic_headers INTERFACE_INCLUDE_DIRECTORIES)
+set_property(TARGET pico_atomic_headers APPEND PROPERTY
+    INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${PICO_ATOMIC_INCLUDE_DIRS})
 
 pico_add_extra_outputs(tavernkeep)

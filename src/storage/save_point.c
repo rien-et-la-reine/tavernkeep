@@ -26,35 +26,12 @@ static const uint8_t magic[4] = { 'T', 'K', 'S', '1' };
 //what checking a slot file found
 typedef struct {
     bool valid;
+    bool unreadable;        //the card failed to read it twice (STORAGE_ERROR); never valid
     uint32_t sequence;
     uint32_t length;
 } slot_t;
 
 /* ----------------------------------------------------------- helpers */
-
-static void put_u16(uint8_t *out, uint16_t value)
-{
-    out[0] = (uint8_t)value;
-    out[1] = (uint8_t)(value >> 8);
-}
-
-static uint16_t get_u16(const uint8_t *in)
-{
-    return (uint16_t)(in[0] | (in[1] << 8));
-}
-
-static void put_u32(uint8_t *out, uint32_t value)
-{
-    out[0] = (uint8_t)value;
-    out[1] = (uint8_t)(value >> 8);
-    out[2] = (uint8_t)(value >> 16);
-    out[3] = (uint8_t)(value >> 24);
-}
-
-static uint32_t get_u32(const uint8_t *in)
-{
-    return (uint32_t)in[0] | ((uint32_t)in[1] << 8) | ((uint32_t)in[2] << 16) | ((uint32_t)in[3] << 24);
-}
 
 //true if sequence number a is newer than b. half the range either way counts, so the comparison
 //survives a wrap from 0xFFFFFFFF to 0
@@ -102,9 +79,11 @@ static filesystem_result_t write_exact(filesystem_file_t file, const void *buffe
 
 /* ------------------------------------------------------------- slots */
 
-//check an open slot file against the format in save_point.h. with keep non-NULL the data is also
-//copied there, but only if it fits keep_capacity; a slot that does not fit is reported invalid
-static filesystem_result_t check_open_slot(
+//check an open slot file against the format in save_point.h. with keep non-NULL the data is also copied
+//there if it fits keep_capacity; a slot too long for it is still checked, and still valid. kept out
+//of line so that its buffers are on the stack only while a slot is read, not under the f_open beside it,
+//the deepest storage path (docs/architecture.md, "Stacks")
+__attribute__((noinline)) static filesystem_result_t check_open_slot(
     filesystem_file_t file,
     slot_t *slot,
     uint8_t *keep,
@@ -121,11 +100,14 @@ static filesystem_result_t check_open_slot(
     if (result != FILESYSTEM_RESULT_OK || !complete) {
         return result;
     }
-    const uint32_t length = get_u32(header + 8);
+    uint32_t length;
+    memcpy(&length, header + 8, sizeof length);
     if (memcmp(header, magic, sizeof magic) != 0 || length > SAVE_POINT_DATA_MAX
-            || file_size != HEADER_BYTES + length + TRAILER_BYTES
-            || (keep != NULL && length > keep_capacity)) {
+            || file_size != HEADER_BYTES + length + TRAILER_BYTES) {
         return FILESYSTEM_RESULT_OK;
+    }
+    if (keep != NULL && length > keep_capacity) {
+        keep = NULL;
     }
 
     uint16_t crc = crc_helper_16(header, sizeof header);
@@ -145,11 +127,15 @@ static filesystem_result_t check_open_slot(
     }
     uint8_t trailer[TRAILER_BYTES];
     result = read_exact(file, trailer, sizeof trailer, &complete);
-    if (result != FILESYSTEM_RESULT_OK || !complete || get_u16(trailer) != crc) {
+    uint16_t stored_crc;
+    memcpy(&stored_crc, trailer, sizeof stored_crc);
+    if (result != FILESYSTEM_RESULT_OK || !complete || stored_crc != crc) {
         return result;
     }
 
-    *slot = (slot_t){ .valid = true, .sequence = get_u32(header + 4), .length = length };
+    uint32_t sequence;
+    memcpy(&sequence, header + 4, sizeof sequence);
+    *slot = (slot_t){ .valid = true, .sequence = sequence, .length = length };
     return FILESYSTEM_RESULT_OK;
 }
 
@@ -170,14 +156,33 @@ static filesystem_result_t check_slot(const char *name, slot_t *slot, uint8_t *k
     return result != FILESYSTEM_RESULT_OK ? result : closed;
 }
 
-//check both slots of a record
-static filesystem_result_t check_slots(char names[2][SAVE_POINT_PATH_MAX + 3U], slot_t slots[2])
+//check both slots of a record. a slot the card fails to read is read once more, so that a passing error
+//changes nothing; failing again, it is marked unreadable instead of ending the check, so that one bad slot
+//cannot make the other unusable: a read can still return the other's record, and a save rewrites the
+//bad one. any other error ends it (the card gone, the volume unmounted, a slot open for writing), and so
+//does neither slot being readable. slot a's data is kept as check_open_slot keeps it, when keep is
+//non-NULL
+static filesystem_result_t check_slots(
+    char names[2][SAVE_POINT_PATH_MAX + 3U],
+    slot_t slots[2],
+    uint8_t *keep,
+    size_t keep_capacity)
 {
     for (size_t i = 0; i < 2U; i++) {
-        const filesystem_result_t result = check_slot(names[i], &slots[i], NULL, 0U);
-        if (result != FILESYSTEM_RESULT_OK) {
+        uint8_t *const into = i == 0U ? keep : NULL;
+        const size_t capacity = i == 0U ? keep_capacity : 0U;
+        filesystem_result_t result = check_slot(names[i], &slots[i], into, capacity);
+        if (result == FILESYSTEM_RESULT_STORAGE_ERROR) {
+            result = check_slot(names[i], &slots[i], into, capacity);
+        }
+        if (result == FILESYSTEM_RESULT_STORAGE_ERROR) {
+            slots[i] = (slot_t){ .valid = false, .unreadable = true };
+        } else if (result != FILESYSTEM_RESULT_OK) {
             return result;
         }
+    }
+    if (slots[0].unreadable && slots[1].unreadable) {
+        return FILESYSTEM_RESULT_STORAGE_ERROR;
     }
     return FILESYSTEM_RESULT_OK;
 }
@@ -197,14 +202,15 @@ static filesystem_result_t write_slot(const char *name, uint32_t sequence, const
 {
     uint8_t header[HEADER_BYTES];
     memcpy(header, magic, sizeof magic);
-    put_u32(header + 4, sequence);
-    put_u32(header + 8, (uint32_t)size);
+    const uint32_t length = (uint32_t)size;
+    memcpy(header + 4, &sequence, sizeof sequence);
+    memcpy(header + 8, &length, sizeof length);
     uint16_t crc = crc_helper_16(header, sizeof header);
     for (size_t i = 0; i < size; i++) {
         crc = crc_helper_rolling_16(crc, data[i]);
     }
     uint8_t trailer[TRAILER_BYTES];
-    put_u16(trailer, crc);
+    memcpy(trailer, &crc, sizeof crc);
 
     filesystem_file_t file;
     filesystem_result_t result = filesystem_open(name, FILESYSTEM_OPEN_REPLACE, &file);
@@ -233,13 +239,18 @@ filesystem_result_t save_point_write(const char *path, const void *data, size_t 
         return FILESYSTEM_RESULT_INVALID_ARGUMENT;
     }
     slot_t slots[2];
-    const filesystem_result_t result = check_slots(names, slots);
+    const filesystem_result_t result = check_slots(names, slots, NULL, 0U);
     if (result != FILESYSTEM_RESULT_OK) {
         return result;
     }
-    //write over the slot that does not hold the newest record, never the one that does
+    //write over the slot that does not hold the newest record, never the one that does. an unreadable
+    //slot is always the one written: rewriting it is what repairs it, and left alone it could later read
+    //back holding a record that looks newer than this one
     const int current = newest_slot(slots);
-    const int target = current == 0 ? 1 : 0;
+    int target = current == 0 ? 1 : 0;
+    if (slots[0].unreadable || slots[1].unreadable) {
+        target = slots[0].unreadable ? 0 : 1;
+    }
     const uint32_t sequence = current < 0 ? 1U : slots[current].sequence + 1U;
     return write_slot(names[target], sequence, data, size);
 }
@@ -251,28 +262,35 @@ filesystem_result_t save_point_read(const char *path, void *data, size_t capacit
             || !slot_names(path, names[0], names[1])) {
         return FILESYSTEM_RESULT_INVALID_ARGUMENT;
     }
+    //slot a is checked straight into the caller's buffer, so when it holds the newest record - every other
+    //save - nothing is read twice
     slot_t slots[2];
-    filesystem_result_t result = check_slots(names, slots);
+    filesystem_result_t result = check_slots(names, slots, data, capacity);
     if (result != FILESYSTEM_RESULT_OK) {
         return result;
     }
     const int current = newest_slot(slots);
     if (current < 0) {
-        return FILESYSTEM_RESULT_NOT_FOUND;
+        //with a slot unreadable, nothing found does not mean nothing saved
+        return slots[0].unreadable || slots[1].unreadable ? FILESYSTEM_RESULT_STORAGE_ERROR
+                                                         : FILESYSTEM_RESULT_NOT_FOUND;
     }
     *size = slots[current].length;
     if (slots[current].length > capacity) {
         return FILESYSTEM_RESULT_INVALID_ARGUMENT;
     }
+    if (current == 0) {
+        return FILESYSTEM_RESULT_OK;        //it fits, so check_slots kept it (an empty record has nothing to keep)
+    }
 
-    //the slot checked out a moment ago and nothing else writes it, so if reading it again gives a
-    //different answer the card is not returning what it holds
+    //slot b, read again, now into the buffer. it checked out a moment ago and nothing else writes it, so
+    //if reading it again gives a different answer the card is not returning what it holds
     slot_t kept;
-    result = check_slot(names[current], &kept, data, capacity);
+    result = check_slot(names[1], &kept, data, capacity);
     if (result != FILESYSTEM_RESULT_OK) {
         return result;
     }
-    if (!kept.valid || kept.sequence != slots[current].sequence || kept.length != slots[current].length) {
+    if (!kept.valid || kept.sequence != slots[1].sequence || kept.length != slots[1].length) {
         return FILESYSTEM_RESULT_STORAGE_ERROR;
     }
     return FILESYSTEM_RESULT_OK;

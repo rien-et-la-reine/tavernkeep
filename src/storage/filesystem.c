@@ -29,8 +29,9 @@
  *   FR_INVALID_OBJECT                      -> STALE_HANDLE
  *   FR_TOO_MANY_OPEN_FILES                 -> TOO_MANY_OPEN
  *   FR_DISK_ERR, FR_INT_ERR, and the rest  -> STORAGE_ERROR
- *     (FR_MKFS_ABORTED means no FAT type fits the card's size, which no
- *     usable card causes; FR_INVALID_DRIVE, FR_NOT_ENABLED, FR_TIMEOUT and
+ *     (FR_MKFS_ABORTED comes only from f_mkfs, which the firmware does
+ *     not build (FF_USE_MKFS 0; only the host tests do); FR_INVALID_DRIVE,
+ *     FR_NOT_ENABLED, FR_TIMEOUT and
  *     FR_NOT_ENOUGH_CORE indicate a configuration or internal error at the
  *     current ffconf.h. Neither is a condition callers can act on) */
 
@@ -67,8 +68,9 @@ static_assert(FF_FS_LOCK >= FILESYSTEM_MAX_OPEN_FILES + FILESYSTEM_MAX_OPEN_DIRS
     "FF_FS_LOCK in ffconf.h must cover both handle pools");
 
 //FatFs's flag for a file whose changes are not yet on the card (FA_MODIFIED in ff.c, R0.16). ff.h does
-//not export it; filesystem_close clears it to release a file whose close failed (see there), and
-//fs_failed_close_releases_the_entry in the host tests catches a FatFs that changes it
+//not export it; filesystem_close sets it to retry a failed close and clears it to release a file whose
+//close failed again (see there), and fs_close_retries_a_failed_flush and
+//fs_failed_close_releases_the_entry in the host tests catch a FatFs that changes it
 #define FATFS_FILE_MODIFIED 0x40U
 
 typedef struct {
@@ -246,8 +248,8 @@ filesystem_result_t filesystem_mount(block_device_t *new_device)
     if (mounted) {
         return FILESYSTEM_RESULT_ALREADY_MOUNTED;
     }
-    //the device is known valid, so a refusal means the drive is still bound from a mount or format that
-    //never unbound - an internal error. the binding is left alone
+    //the device is known valid, so a refusal means the drive is still bound from a mount that never
+    //unbound - an internal error. the binding is left alone
     if (!filesystem_diskio_bind(FILESYSTEM_DRIVE_SD, new_device)) {
         return FILESYSTEM_RESULT_STORAGE_ERROR;
     }
@@ -266,11 +268,11 @@ filesystem_result_t filesystem_mount(block_device_t *new_device)
     return FILESYSTEM_RESULT_OK;
 }
 
-filesystem_result_t filesystem_unmount(void)
+void filesystem_unmount(void)
 {
     //no i/o anywhere below - the card may already be gone
     if (!mounted) {
-        return FILESYSTEM_RESULT_OK;
+        return;
     }
 
     for (size_t i = 0; i < FILESYSTEM_MAX_OPEN_FILES; i++) {
@@ -291,37 +293,11 @@ filesystem_result_t filesystem_unmount(void)
     (void)f_mount(NULL, "", 0);
     filesystem_diskio_unbind(FILESYSTEM_DRIVE_SD);
     mounted = false;
-    return FILESYSTEM_RESULT_OK;
 }
 
 bool filesystem_is_mounted(void)
 {
     return mounted;
-}
-
-filesystem_result_t filesystem_format(block_device_t *new_device)
-{
-    if (!block_device_is_valid(new_device)) {
-        return FILESYSTEM_RESULT_INVALID_ARGUMENT;
-    }
-    if (mounted) {
-        return FILESYSTEM_RESULT_ALREADY_MOUNTED;
-    }
-    if (!filesystem_diskio_bind(FILESYSTEM_DRIVE_SD, new_device)) {
-        return FILESYSTEM_RESULT_STORAGE_ERROR;
-    }
-
-    //FatFs picks FAT12/16 or FAT32 by size. no FM_SFD, so the card keeps an MBR partition table as hosts
-    //expect. align 0 takes the data-area alignment from disk_ioctl GET_BLOCK_SIZE; align to the card's
-    //allocation unit there if format speed or card wear ever matters
-    static const MKFS_PARM params = { .fmt = FM_FAT | FM_FAT32 };
-    //the minimum f_mkfs accepts, and within the 4 KB stack. more would only mean fewer writes
-    BYTE work[FF_MAX_SS];
-    const FRESULT result = f_mkfs("", &params, work, sizeof work);
-
-    //f_mkfs registers nothing, so unbinding is all the cleanup there is
-    filesystem_diskio_unbind(FILESYSTEM_DRIVE_SD);
-    return map_result(result);
 }
 
 filesystem_result_t filesystem_get_label(char *label, size_t label_size)
@@ -382,13 +358,25 @@ filesystem_result_t filesystem_close(filesystem_file_t file)
     if (slot == NULL) {
         return FILESYSTEM_RESULT_STALE_HANDLE;
     }
-    const FRESULT result = f_close(&slot->fil);
-    //the handle is spent whatever f_close returned: after a disk error FatFs has already marked the FIL
-    //failed, so there is nothing a retry could flush. but f_close gives up the file's entry in FatFs's
-    //open-entry table only after a successful flush, so a failed close would leave the file IN_USE until
-    //the next mount. FatFs left the FIL open in that case: drop its unflushed changes and close it again,
-    //which now has nothing to flush and so releases the entry. after a removal that second close fails
-    //too (the drive reports not ready), and the coordinator's unmount clears the table instead
+    FRESULT result = f_close(&slot->fil);
+    //a failed close leaves the FIL open (FatFs gives up the file's entry in its open-entry table only
+    //after a successful flush) with whatever the flush did not write still pending: the file's buffered
+    //sector, the volume's window, the directory entry. a transient error is worth one retry, or the
+    //clusters the file allocated stay marked in the FAT with no entry pointing at them. the flag is set
+    //again first because a flush that failed in its last step, writing the window back, has already
+    //cleared it, and would otherwise report success without writing anything. a retry that fails too
+    //reports the first failure: after a removal it fails differently (FatFs finds the drive not
+    //initialized, FR_INVALID_OBJECT), and the caller should still learn of a storage error
+    if (result != FR_OK && slot->fil.obj.fs != NULL) {
+        slot->fil.flag |= (BYTE)FATFS_FILE_MODIFIED;
+        if (f_close(&slot->fil) == FR_OK) {
+            result = FR_OK;
+        }
+    }
+    //the handle is spent whatever happened. failing twice, drop the unflushed changes and close again,
+    //which now has nothing to flush and so releases the entry; the file's new clusters may stay allocated
+    //unreferenced, which a host's disk check reclaims. after a removal this close fails too (the drive
+    //reports not ready), and the coordinator's unmount clears the table instead
     if (result != FR_OK && slot->fil.obj.fs != NULL) {
         slot->fil.flag &= (BYTE)~FATFS_FILE_MODIFIED;
         (void)f_close(&slot->fil);

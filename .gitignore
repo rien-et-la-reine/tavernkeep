@@ -25,5 +25,6 @@ Thumbs.db
 # Agent instructions
 AGENTS.md
 CLAUDE.md
-# Host test suite is kept locally only
-/tests/
+# Python caches, and the hardware tests' results (the logs of each run)
+__pycache__/
+/tests/hardware/results/

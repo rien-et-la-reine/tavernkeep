@@ -4,6 +4,7 @@
 
 #include "hardware/gpio.h"
 #include "pico/time.h"
+#include "platform/debug.h"
 #include "platform/gpio_irq.h"
 #include "sd_crc.h"
 
@@ -67,6 +68,7 @@ static uint32_t sd_spi_card_removal_edge(const sd_spi_t *sd) {
     return sd->config.card_detect_active_high ? GPIO_IRQ_EDGE_FALL : GPIO_IRQ_EDGE_RISE;
 }
 static block_device_result_t sd_spi_device_init(void *context);
+static block_device_result_t sd_spi_init_card(sd_spi_t *sd, const char **step);
 static block_device_result_t sd_spi_device_deinit(void *context);
 static block_device_result_t sd_spi_device_read_blocks(
     void *context,
@@ -146,7 +148,20 @@ uint32_t sd_spi_bus_rate_hz(const sd_spi_t *sd)
 
 static block_device_result_t sd_spi_device_init(void *context)
 {
-    sd_spi_t *const sd = context;
+    const char *step = "setup";
+    const block_device_result_t result = sd_spi_init_card(context, &step);
+    //which step failed is protocol detail the block-device result cannot carry (docs/architecture.md,
+    //"Protocol-specific diagnostic information"). a card that was not there (INVALID_DEVICE) is not a
+    //failure of the card, and its owner reports it
+    if (result != BLOCK_DEVICE_RESULT_OK && result != BLOCK_DEVICE_RESULT_INVALID_DEVICE) {
+        DEBUG_WARN("sd: init failed at %s, result %d", step, (int)result);
+    }
+    return result;
+}
+
+//the init sequence. *step names the part under way, for sd_spi_device_init's log
+static block_device_result_t sd_spi_init_card(sd_spi_t *sd, const char **step)
+{
     if (sd == NULL || !sd->configured || sd->initialized) {
         return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
     }
@@ -201,6 +216,7 @@ static block_device_result_t sd_spi_device_init(void *context)
     if (sd_spi_removal_latched(sd)) {
         return sd_spi_init_rollback(sd, BLOCK_DEVICE_RESULT_INVALID_DEVICE);
     }
+    *step = "power-up clocks";
     //mosi high, 80 clock cycles
     for (uint8_t i = 0; i < 10; i++)
     {
@@ -214,6 +230,7 @@ static block_device_result_t sd_spi_device_init(void *context)
 
     uint8_t r1 = 0xFF;
     block_device_result_t result;
+    *step = "CMD0";
     //cmd0
     result = sd_spi_command(sd, 0, 0, &r1);
     if (result != BLOCK_DEVICE_RESULT_OK) {
@@ -223,6 +240,7 @@ static block_device_result_t sd_spi_device_init(void *context)
     if (r1 != 0x01) {
         return sd_spi_init_rollback(sd, BLOCK_DEVICE_RESULT_IO_ERROR);
     }
+    *step = "CMD8";
     //cmd8 with arg 0x1AA
     result = sd_spi_command(sd, 8, 0x1AA, &r1);
     if (result != BLOCK_DEVICE_RESULT_OK) {
@@ -249,6 +267,7 @@ static block_device_result_t sd_spi_device_init(void *context)
     }
     //omitting ocr check since we're operating at 3v3 anyway and supporting that's basically mandated by the spec for all cards
     //cmd59 to enable command crc checking, done here as per spec recommendation to protect ACMD41 as well as remaining init procedure, ensures entire init sequence is crc protected
+    *step = "CMD59";
     result = sd_spi_command(sd, 59, 1, &r1);
     if (result != BLOCK_DEVICE_RESULT_OK) {
         return sd_spi_init_rollback(sd, result);
@@ -256,6 +275,7 @@ static block_device_result_t sd_spi_device_init(void *context)
     if (r1 > 0x01) { 
             return sd_spi_init_rollback(sd, BLOCK_DEVICE_RESULT_IO_ERROR);
     }
+    *step = "ACMD41";
     //repeat ACMD41 until card not idle, make sure to set the HCS bit if card is v2
     absolute_time_t timeout = make_timeout_time_ms(1200); //slightly higher to account for starting timer before first attempt
     do {
@@ -282,6 +302,7 @@ static block_device_result_t sd_spi_device_init(void *context)
     if (r1 != 0x00) { 
         return sd_spi_init_rollback(sd, BLOCK_DEVICE_RESULT_IO_ERROR);
     }
+    *step = "CMD58";
     //cmd58 to get ocr, check ccs to verify SDSC or SDHC card (byte addressing vs block addressing)
     result = sd_spi_command(sd, 58, 0, &r1);
     if (result != BLOCK_DEVICE_RESULT_OK) {
@@ -305,6 +326,7 @@ static block_device_result_t sd_spi_device_init(void *context)
         sd->card_type_hcxc = true;
     }
 
+    *step = "CSD read";
     result = sd_spi_read_csd(sd, &sd->block_count);
     if (result != BLOCK_DEVICE_RESULT_OK) {
         return sd_spi_init_rollback(sd, result);
@@ -312,6 +334,7 @@ static block_device_result_t sd_spi_device_init(void *context)
 
     if (!sd->card_type_hcxc) {
         //for sdsc card need to set block length to 512 with cmd16
+        *step = "CMD16";
         result = sd_spi_command(sd, 16, 512, &r1);
         if (result != BLOCK_DEVICE_RESULT_OK) {
             return sd_spi_init_rollback(sd, result);

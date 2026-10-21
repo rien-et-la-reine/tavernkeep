@@ -4,8 +4,8 @@
  *   owner / requested_owner   who has the card, and who should
  *   medium                    the card's condition for that owner (storage_medium_t)
  *   device_up                 block_device_init has succeeded and no deinit has completed since
- *   attempts, retry_at_ms     counted bring-up failures for the card in the socket, and when to try next;
- *                             while the owner is NONE, counted release attempts instead
+ *   attempts, retry_scheduled,  counted bring-up failures for the card in the socket, and whether and when
+ *   retry_at_ms                 to try next; while the owner is NONE, counted release attempts instead
  *   settling, settled,        the insertion settle wait (STORAGE_INSERT_SETTLE_MS): under way and when
  *   settle_at_ms              it ends, or over for the card in the socket
  *   epoch                     storage.h; bumped whenever READY ends and on every owner change
@@ -22,6 +22,7 @@
 
 #include "storage/storage.h"
 
+#include <assert.h>
 #include <stdatomic.h>
 #include <stddef.h>
 
@@ -32,7 +33,6 @@ static block_device_t *device;
 static storage_owner_t owner;
 static storage_owner_t requested_owner;
 static storage_medium_t medium;
-static bool format_requested;
 static bool device_up;
 static unsigned attempts;
 static bool retry_scheduled;
@@ -55,10 +55,20 @@ static void bump_epoch(void)
     atomic_fetch_add_explicit(&epoch, 1U, memory_order_release);
 }
 
-static void schedule_retry(uint32_t now_ms)
+//the wait before each bring-up retry: before attempt n + 2 after attempt n + 1 failed
+static const uint16_t bring_up_delays_ms[] = STORAGE_BRING_UP_DELAYS_MS;
+static_assert(sizeof bring_up_delays_ms / sizeof bring_up_delays_ms[0] == STORAGE_BRING_UP_ATTEMPTS - 1,
+    "STORAGE_BRING_UP_DELAYS_MS needs one wait for each attempt after the first");
+
+static void schedule_retry_after(uint32_t now_ms, uint32_t delay_ms)
 {
     retry_scheduled = true;
-    retry_at_ms = now_ms + STORAGE_RETRY_INTERVAL_MS;
+    retry_at_ms = now_ms + delay_ms;
+}
+
+static void schedule_retry(uint32_t now_ms)
+{
+    schedule_retry_after(now_ms, STORAGE_RETRY_INTERVAL_MS);
 }
 
 //forget the bring-up history of the card in the socket: its counted failures, a pending retry, and its
@@ -96,14 +106,24 @@ static void release_device(void)
     }
 }
 
+//release the device, and if its deinit failed and it is still held, try again at the retry interval
+//(handle_faulty). true if it is still held
+static bool let_go(uint32_t now_ms)
+{
+    release_device();
+    if (device_up) {
+        schedule_retry(now_ms);
+    }
+    return device_up;
+}
+
 //the card is gone: drop everything that depended on it, with no I/O
 static void lose_medium(void)
 {
     const bool was_ready = medium == STORAGE_MEDIUM_READY;
-    (void)filesystem_unmount();
+    filesystem_unmount();
     release_device();
     medium = STORAGE_MEDIUM_ABSENT;
-    format_requested = false;
     clear_retry();
     if (was_ready) {
         bump_epoch();
@@ -119,16 +139,12 @@ static void bring_up_failed(uint32_t now_ms, const char *kind, int result)
         STORAGE_BRING_UP_ATTEMPTS, kind, result);
     if (attempts < STORAGE_BRING_UP_ATTEMPTS) {
         medium = STORAGE_MEDIUM_PREPARING;
-        schedule_retry(now_ms);
+        schedule_retry_after(now_ms, bring_up_delays_ms[attempts - 1U]);
         return;
     }
     medium = STORAGE_MEDIUM_FAULTY;
     retry_scheduled = false;
-    release_device();
-    if (device_up) {
-        //could not let go of it either; try again at the retry interval (handle_faulty)
-        schedule_retry(now_ms);
-    }
+    (void)let_go(now_ms);
 }
 
 //one clean release attempt for the NONE owner. the deinit waits out any programming busy, so once it
@@ -191,16 +207,15 @@ static void watch_for_loss(void)
     }
 }
 
-//phase 2a: hand the card to the requested owner. unmount performs no I/O; mounting for the local owner
+//phase 2: hand the card to the requested owner. unmount performs no I/O; mounting for the local owner
 //is a fresh mount, because a USB host may have changed anything
 static void change_owner(uint32_t now_ms)
 {
     const storage_owner_t previous = owner;
     if (previous == STORAGE_OWNER_LOCAL) {
-        (void)filesystem_unmount();
+        filesystem_unmount();
     }
     owner = requested_owner;
-    format_requested = false;
     bump_epoch();
 
     if (owner == STORAGE_OWNER_NONE) {
@@ -217,13 +232,7 @@ static void change_owner(uint32_t now_ms)
         //a failed release is let go first; if even that fails it is faulty, like any card that cannot be
         //released (handle_faulty)
         clear_retry();
-        release_device();
-        if (device_up) {
-            medium = STORAGE_MEDIUM_FAULTY;
-            schedule_retry(now_ms);
-        } else {
-            medium = STORAGE_MEDIUM_ABSENT;
-        }
+        medium = let_go(now_ms) ? STORAGE_MEDIUM_FAULTY : STORAGE_MEDIUM_ABSENT;
         return;
     }
 
@@ -242,25 +251,6 @@ static void change_owner(uint32_t now_ms)
     mount_now(now_ms);
 }
 
-//phase 2b: format, then mount the result
-static void format_now(uint32_t now_ms)
-{
-    format_requested = false;
-    if (owner != STORAGE_OWNER_LOCAL
-            || (medium != STORAGE_MEDIUM_UNFORMATTED && medium != STORAGE_MEDIUM_READY)) {
-        return;
-    }
-    if (medium == STORAGE_MEDIUM_READY) {
-        (void)filesystem_unmount();
-        bump_epoch();
-    }
-    medium = STORAGE_MEDIUM_PREPARING;
-    //whatever format returns, the card now holds what mount finds: a new volume, the old one if the
-    //format never started, or nothing. a card removed meanwhile is noticed by the mount
-    (void)filesystem_format(device);
-    mount_now(now_ms);
-}
-
 //a faulty card is left alone until it leaves the socket
 static void handle_faulty(uint32_t now_ms)
 {
@@ -270,10 +260,7 @@ static void handle_faulty(uint32_t now_ms)
             return;
         }
         retry_scheduled = false;
-        release_device();
-        if (device_up) {
-            schedule_retry(now_ms);
-        }
+        (void)let_go(now_ms);
         return;
     }
     if (!card_in_socket()) {
@@ -287,9 +274,9 @@ static void bring_up(uint32_t now_ms)
 {
     if (owner == STORAGE_OWNER_NONE) {
         //released: nothing is brought up and the socket is not watched. only a release that has not
-        //succeeded yet is retried, until it succeeds or is given up as FAULTY
-        if (device_up && medium != STORAGE_MEDIUM_FAULTY && retry_scheduled
-                && reached(now_ms, retry_at_ms)) {
+        //succeeded yet is retried, until it succeeds or is given up as FAULTY (attempt_release stops
+        //scheduling retries then)
+        if (device_up && retry_scheduled && reached(now_ms, retry_at_ms)) {
             retry_scheduled = false;
             attempt_release(now_ms);
         }
@@ -368,7 +355,6 @@ bool storage_init(block_device_t *new_device)
     owner = STORAGE_OWNER_LOCAL;
     requested_owner = STORAGE_OWNER_LOCAL;
     medium = STORAGE_MEDIUM_ABSENT;
-    format_requested = false;
     device_up = false;
     clear_retry();
     return true;
@@ -388,10 +374,6 @@ void storage_step(uint32_t now_ms)
     //simply stays pending until it passes
     if (requested_owner != owner) {
         change_owner(now_ms);
-        return;
-    }
-    if (format_requested) {
-        format_now(now_ms);
         return;
     }
 
@@ -426,22 +408,12 @@ bool storage_request_owner(storage_owner_t new_owner)
     return true;
 }
 
-bool storage_request_format(void)
-{
-    if (device == NULL || owner != STORAGE_OWNER_LOCAL || requested_owner != STORAGE_OWNER_LOCAL
-            || (medium != STORAGE_MEDIUM_UNFORMATTED && medium != STORAGE_MEDIUM_READY)) {
-        return false;
-    }
-    format_requested = true;
-    return true;
-}
-
 bool storage_request_pending(void)
 {
     //a release is not done while the card is still held and still being retried; one given up as FAULTY
     //is no longer pending (storage.h)
     const bool releasing = owner == STORAGE_OWNER_NONE && device_up && medium != STORAGE_MEDIUM_FAULTY;
-    return requested_owner != owner || format_requested || releasing;
+    return requested_owner != owner || releasing;
 }
 
 block_device_t *storage_usb_device(void)

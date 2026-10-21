@@ -29,14 +29,6 @@
 #define SD_BAUD_HZ 1000000U
 #endif
 
-//the demo never formats a card unless this is 1: a demo that erases whatever card is in the socket is a
-//trap. set it by changing the line below or by defining it on the compiler command line
-//(-DTAVERNKEEP_DEMO_FORMAT=1); there is deliberately no CMake option that could be left switched on. with
-//it set, a card with no FAT volume is formatted once it is seen
-#ifndef TAVERNKEEP_DEMO_FORMAT
-#define TAVERNKEEP_DEMO_FORMAT 0
-#endif
-
 enum {
     STATUS_LED_TOGGLE_INTERVAL_MS = 500,
     MAIN_LOOP_IDLE_INTERVAL_MS = 10,
@@ -100,29 +92,20 @@ static uint32_t demo_bulk_buffer[DEMO_BULK_BYTES / sizeof(uint32_t)];
 //(nothing saved, or the first save was interrupted) reads as counter 0
 static bool demo_read_counter(uint32_t *counter)
 {
-    uint8_t bytes[4];
     size_t size = 0;
-    const filesystem_result_t result = save_point_read(DEMO_RECORD, bytes, sizeof bytes, &size);
+    const filesystem_result_t result = save_point_read(DEMO_RECORD, counter, sizeof *counter, &size);
     if (result == FILESYSTEM_RESULT_NOT_FOUND) {
         DEBUG_INFO("no saved counter yet");
         *counter = 0;
         return true;
     }
-    if (!demo_report(result == FILESYSTEM_RESULT_OK && size == sizeof bytes, "read counter", result)) {
-        return false;
-    }
-    *counter = (uint32_t)bytes[0] | ((uint32_t)bytes[1] << 8) | ((uint32_t)bytes[2] << 16)
-        | ((uint32_t)bytes[3] << 24);
-    return true;
+    return demo_report(result == FILESYSTEM_RESULT_OK && size == sizeof *counter, "read counter", result);
 }
 
 //save the counter: one save_point_write, which either lands whole or leaves the previous value readable
 static bool demo_write_counter(uint32_t counter)
 {
-    const uint8_t bytes[4] = {
-        (uint8_t)counter, (uint8_t)(counter >> 8), (uint8_t)(counter >> 16), (uint8_t)(counter >> 24),
-    };
-    const filesystem_result_t result = save_point_write(DEMO_RECORD, bytes, sizeof bytes);
+    const filesystem_result_t result = save_point_write(DEMO_RECORD, &counter, sizeof counter);
     return demo_report(result == FILESYSTEM_RESULT_OK, "save point write", result);
 }
 
@@ -308,12 +291,7 @@ static void storage_watch(void)
     DEBUG_INFO("storage: owner %s, medium %s, epoch %lu", owner_name(owner), medium_name(medium),
         (unsigned long)epoch);
     if (medium == STORAGE_MEDIUM_UNFORMATTED) {
-#if TAVERNKEEP_DEMO_FORMAT
-        DEBUG_INFO("no FAT volume; formatting (TAVERNKEEP_DEMO_FORMAT)");
-        (void)storage_request_format();
-#else
-        DEBUG_INFO("no FAT volume; not formatting (set TAVERNKEEP_DEMO_FORMAT to 1 to allow it; see main.c)");
-#endif
+        DEBUG_INFO("no FAT volume on this card; format it as FAT32 on a computer");
     }
     if (became_ready) {
         //the rate the card actually runs at: the nearest one at or below SD_BAUD_HZ that clk_peri divides to

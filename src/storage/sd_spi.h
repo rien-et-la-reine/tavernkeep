@@ -45,7 +45,7 @@ typedef struct {
      * device keeps it - across deinit and failed inits - because reading it is
      * the only way to see an insertion while the device is uninitialized
      * (block_device_is_present). Reconfiguring with a different pin fails
-     * with error invalid argument */
+     * with error invalid argument. */
     bool card_detect_claimed;
 } sd_spi_t;
 
