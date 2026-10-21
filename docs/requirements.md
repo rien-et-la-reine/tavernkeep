@@ -2,9 +2,10 @@
 
 This document is the maintained source for Tavernkeep requirements. Keep each
 requirement concise, unambiguous, and testable where practical. Use stable,
-simple identifiers: `FR-NNN` for functional requirements, `NFR-NNN` for
-non-functional requirements, and `CON-NNN` for constraints. Do not reuse an
-identifier after removing a requirement.
+simple identifiers: `FR-NNN` for functional requirements, `STRETCH-NNN` for
+stretch goals, `NFR-NNN` for non-functional requirements, `CON-NNN` for
+constraints, and `OPEN-NNN` for open questions. Do not reuse an identifier
+after removing a requirement.
 
 ## Purpose / Scope
 
@@ -40,6 +41,15 @@ explicit inputs, conditions, and outcomes where those details are known.
 
 - **FR-012 — System Operation:** Tavernkeep shall manage initialization, normal operation, shutdown, and recoverable error conditions required for Tome to operate as a standalone device.
 
+## Stretch Goals
+<!--
+Record optional capabilities that are wanted but not required. A stretch goal
+does not shape the required architecture; promote it to a functional
+requirement if it becomes required.
+-->
+
+- **STRETCH-001 — Audiobook Support:** Tavernkeep may support M4B audiobook files as first-class book content, accessible through the book-oriented interface rather than requiring the user to enter the music-player interface.
+
 ## Non-Functional Requirements
 <!--
 Record qualities or performance expectations such as timing, reliability,
@@ -70,8 +80,6 @@ hardware, interfaces, standards, dependencies, power budgets, or toolchains.
 -->
 - **CON-001 — Dual Displays:** Tome shall use two e-ink displays. Tavernkeep shall be designed around this dual-display hardware configuration.
 
-- **OPEN-001 — Physical Control Scheme:** The final physical control scheme has not yet been selected. It shall be resolved before hardware and firmware development progresses far enough for the choice to impose significant redesign. The selected controls shall support comfortable navigation of reading, music playback, menus, and system functions.
-
 ## Out of Scope
 <!--
 List capabilities or concerns intentionally excluded from the current project
@@ -86,7 +94,7 @@ Move resolved items into the appropriate section rather than keeping a history
 here; Git retains the chronological record.
 -->
 
-- **OPEN-002 — USB Mode Selection:** How the device enters USB mass-storage mode has not been decided: automatically whenever a USB host enumerates, by a prompt on enumeration, or by an explicit menu action. A charger-only supply does not enumerate, so the choice only affects behaviour when a host is present. It matters because it decides whether reading or playback can be interrupted by connecting a cable, which in turn decides whether the reader and audio modes must be able to survive an externally triggered storage handover (they can, through the same path as card removal, but the user-visible behaviour differs). Resolved by a product decision recorded against FR-010.
+- **OPEN-001 — Physical Control Scheme:** The final physical control scheme has not yet been selected. It shall be resolved before hardware and firmware development progresses far enough for the choice to impose significant redesign. The selected controls shall support comfortable navigation of reading, music playback, menus, and system functions.
 
-- **STRETCH-001 — Audiobook Support:** Tavernkeep may support M4B audiobook files as first-class book content, accessible through the book-oriented interface rather than requiring the user to enter the music-player interface.
+- **OPEN-002 — USB Mode Selection:** How the device enters USB mass-storage mode has not been decided: automatically whenever a USB host enumerates, by a prompt on enumeration, or by an explicit menu action. A charger-only supply does not enumerate, so the choice only affects behaviour when a host is present. It matters because it decides whether reading or playback can be interrupted by connecting a cable, which in turn decides whether the reader and audio modes must be able to survive an externally triggered storage handover (they can, through the same path as card removal, but the user-visible behaviour differs). Resolved by a product decision recorded against FR-010.
 

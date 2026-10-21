@@ -30,8 +30,12 @@
 /  f_findnext(). (0:Disable, 1:Enable 2:Enable with matching altname[] too) */
 
 
-#define FF_USE_MKFS		1
-/* This option switches f_mkfs(). (0:Disable or 1:Enable) */
+#ifndef FF_USE_MKFS
+#define FF_USE_MKFS		0
+#endif
+/* This option switches f_mkfs(). (0:Disable or 1:Enable)
+/  Tavernkeep: the firmware never formats a card (the user does, on a computer).
+/  The host tests define it as 1, to build the volumes they test on. */
 
 
 #define FF_USE_FASTSEEK	0
@@ -280,7 +284,7 @@
 */
 
 
-#define FF_FS_LOCK		0
+#define FF_FS_LOCK		5
 /* The option FF_FS_LOCK switches file lock function to control duplicated file open
 /  and illegal operation to open objects. This option must be 0 when FF_FS_READONLY
 /  is 1.

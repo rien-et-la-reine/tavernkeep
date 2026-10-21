@@ -4,6 +4,7 @@
 
 #include "hardware/gpio.h"
 #include "pico/time.h"
+#include "platform/debug.h"
 #include "platform/gpio_irq.h"
 #include "sd_crc.h"
 
@@ -11,6 +12,9 @@ enum {
     SD_SPI_CARD_DETECT_STABLE_SAMPLES = 10,
     SD_SPI_CARD_DETECT_MAX_SAMPLES = 30,
     SD_SPI_CARD_DETECT_SAMPLE_INTERVAL_MS = 1,
+    //settling time after the pull-up is first selected, before the level is trusted. the pull-up and the
+    //line's capacitance settle in microseconds; this leaves a wide margin for breadboard wiring
+    SD_SPI_CARD_DETECT_SETTLE_US = 100,
     //bytes read while waiting for an R1 response before giving up. the spec quotes N_CR as 0 to 8 bytes
     //for an sd card in spi mode; linux's mmc_spi driver raised its limit from 8 to 16 after real cards
     //were seen needing 12, and there is no reason to choose differently. a response is accepted on any
@@ -25,6 +29,7 @@ static void sd_spi_card_available_irq(
     uint32_t events
 );
 static bool sd_spi_removal_latched(const sd_spi_t *sd);
+static void sd_spi_card_detect_claim(sd_spi_t *sd);
 static block_device_result_t sd_spi_require_usable(const sd_spi_t *sd);
 static bool sd_spi_wait_ready_timeout(const sd_spi_t *sd, int timeout_ms);
 static bool sd_spi_wait_ready(const sd_spi_t *sd);
@@ -63,6 +68,7 @@ static uint32_t sd_spi_card_removal_edge(const sd_spi_t *sd) {
     return sd->config.card_detect_active_high ? GPIO_IRQ_EDGE_FALL : GPIO_IRQ_EDGE_RISE;
 }
 static block_device_result_t sd_spi_device_init(void *context);
+static block_device_result_t sd_spi_init_card(sd_spi_t *sd, const char **step);
 static block_device_result_t sd_spi_device_deinit(void *context);
 static block_device_result_t sd_spi_device_read_blocks(
     void *context,
@@ -77,6 +83,10 @@ static block_device_result_t sd_spi_device_write_blocks(
 static block_device_result_t sd_spi_device_get_info(
     void *context,
     block_device_info_t *info);
+static block_device_result_t sd_spi_device_sync(void *context);
+static block_device_result_t sd_spi_device_is_present(
+    void *context,
+    bool *present);
 
 static const block_device_operations_t sd_spi_operations = {
     .init = sd_spi_device_init,
@@ -84,6 +94,8 @@ static const block_device_operations_t sd_spi_operations = {
     .read_blocks = sd_spi_device_read_blocks,
     .write_blocks = sd_spi_device_write_blocks,
     .get_info = sd_spi_device_get_info,
+    .sync = sd_spi_device_sync,
+    .is_present = sd_spi_device_is_present,
 };
 
 block_device_result_t sd_spi_configure(
@@ -95,9 +107,15 @@ block_device_result_t sd_spi_configure(
         return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
     }
 
+    //the card-detect pin is hardwired and claimed for the life of the device, so it cannot change
+    if (sd->configured && sd->config.pin_card_available != config->pin_card_available) {
+        return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
+    }
+
     sd->config = *config;
     sd->initialized = false;
     sd->block_count = 0U;
+    sd->bus_rate_hz = 0U;
     sd->block_device.context = sd;
     sd->block_device.operations = &sd_spi_operations;
 
@@ -109,6 +127,9 @@ block_device_result_t sd_spi_configure(
         sd->configured = true;
         atomic_init(&sd->removal_latched, false);
     }
+    //claim and configure the card detect pin, used to check for card insertion/presence on startup
+    sd_spi_card_detect_claim(sd);
+
     return BLOCK_DEVICE_RESULT_OK;
 }
 
@@ -120,9 +141,27 @@ block_device_t *sd_spi_as_block_device(sd_spi_t *sd)
     return &sd->block_device;
 }
 
+uint32_t sd_spi_bus_rate_hz(const sd_spi_t *sd)
+{
+    return sd != NULL && sd->initialized ? sd->bus_rate_hz : 0U;
+}
+
 static block_device_result_t sd_spi_device_init(void *context)
 {
-    sd_spi_t *const sd = context;
+    const char *step = "setup";
+    const block_device_result_t result = sd_spi_init_card(context, &step);
+    //which step failed is protocol detail the block-device result cannot carry (docs/architecture.md,
+    //"Protocol-specific diagnostic information"). a card that was not there (INVALID_DEVICE) is not a
+    //failure of the card, and its owner reports it
+    if (result != BLOCK_DEVICE_RESULT_OK && result != BLOCK_DEVICE_RESULT_INVALID_DEVICE) {
+        DEBUG_WARN("sd: init failed at %s, result %d", step, (int)result);
+    }
+    return result;
+}
+
+//the init sequence. *step names the part under way, for sd_spi_device_init's log
+static block_device_result_t sd_spi_init_card(sd_spi_t *sd, const char **step)
+{
     if (sd == NULL || !sd->configured || sd->initialized) {
         return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
     }
@@ -131,17 +170,10 @@ static block_device_result_t sd_spi_device_init(void *context)
     sd->card_type_legacy = false;
     sd->card_type_hcxc = false;
     sd->block_count = 0U;
+    sd->bus_rate_hz = 0U;
 
-    //select the pull-up before gpio_init enables the input buffer on RP2350
-    //the pull-up is correct for both senses of the switch: in each case the open state must read high,
-    //only which state means "present" differs (card_detect_active_high)
-    gpio_pull_up(sd->config.pin_card_available);
-    //setup the card detect/write protect pin (again, validate hardware slot's truth table to ensure WP can serve both functions)
-    gpio_init(sd->config.pin_card_available);
-    gpio_set_dir(sd->config.pin_card_available, GPIO_IN);
     //check that a non write protected card is present, with debouncing
     if (!sd_spi_card_available(sd)) {
-        gpio_deinit(sd->config.pin_card_available);
         return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
     }
 
@@ -154,7 +186,6 @@ static block_device_result_t sd_spi_device_init(void *context)
             sd_spi_card_removal_edge(sd),
             sd_spi_card_available_irq,
             sd)) {
-        gpio_deinit(sd->config.pin_card_available);
         return BLOCK_DEVICE_RESULT_IO_ERROR;
     }
 
@@ -167,7 +198,6 @@ static block_device_result_t sd_spi_device_init(void *context)
     }
     if (card_unavailable || sd_spi_removal_latched(sd)) {
         platform_gpio_irq_unregister(sd->config.pin_card_available);
-        gpio_deinit(sd->config.pin_card_available);
         return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
     }
 
@@ -186,6 +216,7 @@ static block_device_result_t sd_spi_device_init(void *context)
     if (sd_spi_removal_latched(sd)) {
         return sd_spi_init_rollback(sd, BLOCK_DEVICE_RESULT_INVALID_DEVICE);
     }
+    *step = "power-up clocks";
     //mosi high, 80 clock cycles
     for (uint8_t i = 0; i < 10; i++)
     {
@@ -199,6 +230,7 @@ static block_device_result_t sd_spi_device_init(void *context)
 
     uint8_t r1 = 0xFF;
     block_device_result_t result;
+    *step = "CMD0";
     //cmd0
     result = sd_spi_command(sd, 0, 0, &r1);
     if (result != BLOCK_DEVICE_RESULT_OK) {
@@ -208,6 +240,7 @@ static block_device_result_t sd_spi_device_init(void *context)
     if (r1 != 0x01) {
         return sd_spi_init_rollback(sd, BLOCK_DEVICE_RESULT_IO_ERROR);
     }
+    *step = "CMD8";
     //cmd8 with arg 0x1AA
     result = sd_spi_command(sd, 8, 0x1AA, &r1);
     if (result != BLOCK_DEVICE_RESULT_OK) {
@@ -234,6 +267,7 @@ static block_device_result_t sd_spi_device_init(void *context)
     }
     //omitting ocr check since we're operating at 3v3 anyway and supporting that's basically mandated by the spec for all cards
     //cmd59 to enable command crc checking, done here as per spec recommendation to protect ACMD41 as well as remaining init procedure, ensures entire init sequence is crc protected
+    *step = "CMD59";
     result = sd_spi_command(sd, 59, 1, &r1);
     if (result != BLOCK_DEVICE_RESULT_OK) {
         return sd_spi_init_rollback(sd, result);
@@ -241,6 +275,7 @@ static block_device_result_t sd_spi_device_init(void *context)
     if (r1 > 0x01) { 
             return sd_spi_init_rollback(sd, BLOCK_DEVICE_RESULT_IO_ERROR);
     }
+    *step = "ACMD41";
     //repeat ACMD41 until card not idle, make sure to set the HCS bit if card is v2
     absolute_time_t timeout = make_timeout_time_ms(1200); //slightly higher to account for starting timer before first attempt
     do {
@@ -267,6 +302,7 @@ static block_device_result_t sd_spi_device_init(void *context)
     if (r1 != 0x00) { 
         return sd_spi_init_rollback(sd, BLOCK_DEVICE_RESULT_IO_ERROR);
     }
+    *step = "CMD58";
     //cmd58 to get ocr, check ccs to verify SDSC or SDHC card (byte addressing vs block addressing)
     result = sd_spi_command(sd, 58, 0, &r1);
     if (result != BLOCK_DEVICE_RESULT_OK) {
@@ -290,6 +326,7 @@ static block_device_result_t sd_spi_device_init(void *context)
         sd->card_type_hcxc = true;
     }
 
+    *step = "CSD read";
     result = sd_spi_read_csd(sd, &sd->block_count);
     if (result != BLOCK_DEVICE_RESULT_OK) {
         return sd_spi_init_rollback(sd, result);
@@ -297,6 +334,7 @@ static block_device_result_t sd_spi_device_init(void *context)
 
     if (!sd->card_type_hcxc) {
         //for sdsc card need to set block length to 512 with cmd16
+        *step = "CMD16";
         result = sd_spi_command(sd, 16, 512, &r1);
         if (result != BLOCK_DEVICE_RESULT_OK) {
             return sd_spi_init_rollback(sd, result);
@@ -316,8 +354,8 @@ static block_device_result_t sd_spi_device_init(void *context)
         return sd_spi_init_rollback(sd, BLOCK_DEVICE_RESULT_INVALID_DEVICE);
     }
     
-    //move to operational baud rate
-    spi_set_baudrate(sd->config.spi, sd->config.baud_rate_hz);
+    //move to operational baud rate, keeping the rate clk_peri actually divides to
+    sd->bus_rate_hz = spi_set_baudrate(sd->config.spi, sd->config.baud_rate_hz);
     
     //card initalized, update status accordingly
     sd->initialized = true;
@@ -359,12 +397,13 @@ static block_device_result_t sd_spi_device_deinit(void *context)
     gpio_deinit(sd->config.pin_controller_out);
     gpio_deinit(sd->config.pin_controller_in);
     gpio_deinit(sd->config.pin_chip_select);
-    gpio_deinit(sd->config.pin_card_available);
+    //the card-detect pin stays a pulled-up input (card_detect_claimed in sd_spi.h)
 
     sd->initialized = false;
     sd->card_type_legacy = false;
     sd->card_type_hcxc = false;
     sd->block_count = 0U;
+    sd->bus_rate_hz = 0U;
 
     return BLOCK_DEVICE_RESULT_OK;
 }
@@ -638,7 +677,7 @@ static block_device_result_t sd_spi_device_write_blocks(
                 //reset crc
                 crc = 0x0000;
                 //transmit start block token (0b11111100 for multi block write) + load data block into transmit buffer
-                sd_spi_transfer(sd, 0b11111100);
+                sd_spi_transfer(sd, 0xFC);
                 do {
                     //transmit byte
                     sd_spi_transfer(sd, buf[(sent_blocks * 512) + (byte_counter)]);
@@ -660,7 +699,7 @@ static block_device_result_t sd_spi_device_write_blocks(
                     sd_spi_release_bus(sd);
                     return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
                 }
-                if ((token == 0b00001011) || (token == 0b00001101)) { //data CRC or data write error
+                if ((token == 0x0B) || (token == 0x0D)) { //data CRC or data write error
                     //ensure card not busy
                     if (!sd_spi_wait_ready_timeout(sd, 1000)) {
                         sd_spi_release_bus(sd);
@@ -682,7 +721,7 @@ static block_device_result_t sd_spi_device_write_blocks(
                     }
                     return BLOCK_DEVICE_RESULT_IO_ERROR;
                 }
-                if (!(token == 0b00000101)) {
+                if (!(token == 0x05)) {
                     //unknown token, TODO: robust cleanup procedure, card likely never recieved data start token
                     sd_spi_release_bus(sd);
                     return sd_spi_removal_latched(sd)
@@ -698,7 +737,7 @@ static block_device_result_t sd_spi_device_write_blocks(
                 }
             } while(++sent_blocks < block_count); //repeat for block_count number of blocks
             //stop transmission token (0b11111101)
-            sd_spi_transfer(sd, 0b11111101);
+            sd_spi_transfer(sd, 0xFD);
             //spec mandated byte gap
             sd_spi_transfer(sd, 0xFF);
             if (sd_spi_removal_latched(sd)) {
@@ -733,7 +772,7 @@ static block_device_result_t sd_spi_device_write_blocks(
             //seed crc
             crc = 0x0000;
             //transmit start block token (0b11111110 for single block write)
-            sd_spi_transfer(sd, 0b11111110);
+            sd_spi_transfer(sd, 0xFE);
             do {
                 //transmit byte
                 sd_spi_transfer(sd, buf[byte_counter]);
@@ -755,7 +794,7 @@ static block_device_result_t sd_spi_device_write_blocks(
                 sd_spi_release_bus(sd);
                 return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
             }
-            if ((token == 0b00001011) || (token == 0b00001101)) { //data CRC or data write error
+            if ((token == 0x0B) || (token == 0x0D)) { //data CRC or data write error
                 //ensure card not busy
                 if (!sd_spi_wait_ready_timeout(sd, 1000)) {
                     sd_spi_release_bus(sd);
@@ -772,7 +811,7 @@ static block_device_result_t sd_spi_device_write_blocks(
                 }
                 return BLOCK_DEVICE_RESULT_IO_ERROR;
             }
-            if (!(token == 0b00000101)) {
+            if (!(token == 0x05)) {
                 //unknown token, TODO: robust cleanup procedure, card likely never recieved data start token
                 sd_spi_release_bus(sd);
                 return sd_spi_removal_latched(sd)
@@ -828,6 +867,30 @@ static block_device_result_t sd_spi_device_get_info(
     info->writable = true;
 
     return BLOCK_DEVICE_RESULT_OK;
+}
+
+//block_device_sync. every write currently waits out the card's programming busy before it returns, so
+//nothing accepted is still in flight and this only confirms the card is idle. once writes return before
+//the card has finished with them (DMA), waiting for them belongs here, ahead of the ready check
+static block_device_result_t sd_spi_device_sync(void *context)
+{
+    sd_spi_t *const sd = context;
+    if (sd == NULL || !sd->configured) {
+        return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
+    }
+    const block_device_result_t usability = sd_spi_require_usable(sd);
+    if (usability != BLOCK_DEVICE_RESULT_OK) {
+        return usability;
+    }
+
+    //the card only drives its busy signal while selected. same timeout as the wait after a write
+    sd_spi_capture_bus(sd);
+    const bool ready = sd_spi_wait_ready_timeout(sd, 1000);
+    sd_spi_release_bus(sd);
+    if (sd_spi_removal_latched(sd)) {
+        return BLOCK_DEVICE_RESULT_INVALID_DEVICE;
+    }
+    return ready ? BLOCK_DEVICE_RESULT_OK : BLOCK_DEVICE_RESULT_BUSY_TIMEOUT;
 }
 
 // The caller owns the captured bus and remains responsible for releasing it.
@@ -999,12 +1062,40 @@ static block_device_result_t sd_spi_init_rollback(
     gpio_deinit(sd->config.pin_controller_out);
     gpio_deinit(sd->config.pin_controller_in);
     gpio_deinit(sd->config.pin_chip_select);
-    gpio_deinit(sd->config.pin_card_available);
+    //the card-detect pin stays a pulled-up input (card_detect_claimed in sd_spi.h)
     sd->initialized = false;
     sd->card_type_legacy = false;
     sd->card_type_hcxc = false;
     sd->block_count = 0U;
+    sd->bus_rate_hz = 0U;
     return result;
+}
+
+//set up the card-detect pin as a pulled-up input, once. the pull-up is selected before gpio_init enables
+//the input buffer on RP2350, and it is correct for both senses of the switch: in each case the open state
+//must read high, only which state means "present" differs (card_detect_active_high)
+static void sd_spi_card_detect_claim(sd_spi_t *sd)
+{
+    if (sd->card_detect_claimed) {
+        return;
+    }
+    gpio_pull_up(sd->config.pin_card_available);
+    gpio_init(sd->config.pin_card_available);
+    gpio_set_dir(sd->config.pin_card_available, GPIO_IN);
+    busy_wait_us(SD_SPI_CARD_DETECT_SETTLE_US);
+    sd->card_detect_claimed = true;
+}
+
+//one undebounced sample of the socket, whether or not the device is initialized; no bus traffic. the
+//debounced check is init's (sd_spi_card_available)
+static block_device_result_t sd_spi_device_is_present(void *context, bool *present)
+{
+    sd_spi_t *const sd = context;
+    if (sd == NULL || !sd->configured || present == NULL) {
+        return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
+    }
+    *present = gpio_get(sd->config.pin_card_available) == sd_spi_card_present_level(sd);
+    return BLOCK_DEVICE_RESULT_OK;
 }
 
 static bool sd_spi_card_available(const sd_spi_t *sd)

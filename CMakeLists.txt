@@ -58,6 +58,8 @@ set(TAVERNKEEP_SOURCES
     src/storage/filesystem.c
     src/storage/sd_spi.c
     src/storage/sd_crc.c
+    src/storage/storage.c
+    src/storage/save_point.c
 )
 
 # FatFs, vendored under third_party/fatfs. Its own diskio.c is a stub and is
@@ -78,7 +80,21 @@ pico_set_program_version(tavernkeep "${PROJECT_VERSION}")
 
 target_include_directories(tavernkeep PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fatfs/source
+)
+
+# FatFs is opaque outside the filesystem layer, so its include path is given
+# only to the files that may include ff.h: the filesystem layer itself
+# (filesystem.c, which also supplies get_fattime(), and diskio.c). An
+# #include "ff.h" anywhere else fails to build. FatFs's own sources find their
+# headers in their own directory and are listed for completeness.
+set(TAVERNKEEP_FATFS_CLIENTS
+    src/storage/diskio.c
+    src/storage/filesystem.c
+)
+set_source_files_properties(
+    ${TAVERNKEEP_FATFS_CLIENTS} ${TAVERNKEEP_FATFS_SOURCES}
+    PROPERTIES INCLUDE_DIRECTORIES
+        ${CMAKE_CURRENT_SOURCE_DIR}/third_party/fatfs/source
 )
 
 # FF_USE_LFN=2 keeps each FatFs call's long-file-name working buffer
@@ -126,5 +142,14 @@ endif()
 set_source_files_properties(${TAVERNKEEP_SOURCES} PROPERTIES
     COMPILE_OPTIONS "-Wall;-Wextra;-Wpedantic"
 )
+# The same goes for SDK headers those sources include: the SDK's <stdatomic.h>
+# wrapper uses #include_next, which -Wpedantic reports in every file that
+# includes it. Listing its header library's directories as system include
+# directories includes them with -isystem, so the warning flags still apply to
+# Tavernkeep's own code and nothing else. (The SYSTEM target property would do
+# the same but needs CMake 3.25; this property has existed since 3.0.)
+get_target_property(PICO_ATOMIC_INCLUDE_DIRS pico_atomic_headers INTERFACE_INCLUDE_DIRECTORIES)
+set_property(TARGET pico_atomic_headers APPEND PROPERTY
+    INTERFACE_SYSTEM_INCLUDE_DIRECTORIES ${PICO_ATOMIC_INCLUDE_DIRS})
 
 pico_add_extra_outputs(tavernkeep)

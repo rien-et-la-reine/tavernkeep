@@ -38,6 +38,13 @@ typedef struct {
     block_device_result_t (*get_info)(
         void *context,
         block_device_info_t *info);
+    /* See block_device_sync. */
+    block_device_result_t (*sync)(void *context);
+    /* Optional; NULL for a device with no presence signal. See
+     * block_device_is_present. */
+    block_device_result_t (*is_present)(
+        void *context,
+        bool *present);
 } block_device_operations_t;
 
 typedef struct {
@@ -86,6 +93,12 @@ static inline block_device_result_t block_device_read_blocks(
         device->context, first_lba, buffer, block_count);
 }
 
+/* BLOCK_DEVICE_RESULT_OK means the device has accepted the data, not that it
+ * is on the medium: a device may return while the transfer or the medium's
+ * own programming is still under way (a DMA transfer in flight, for example).
+ * block_device_sync is where the caller learns that accepted writes have
+ * landed. A read issued after a write has been accepted returns that write's
+ * data, whether or not it has been synced. */
 static inline block_device_result_t block_device_write_blocks(
     const block_device_t *device,
     uint64_t first_lba,
@@ -110,6 +123,44 @@ static inline block_device_result_t block_device_get_info(
         return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
     }
     return device->operations->get_info(device->context, info);
+}
+
+/* Wait until every write the device has accepted is on the medium.
+ * BLOCK_DEVICE_RESULT_OK means all of them are, so a caller may treat that
+ * data as durable. Any other result means at least one may not be: a write
+ * that fails after write_blocks accepted it is reported here, and after a
+ * removal (INVALID_DEVICE) accepted writes may have been lost. Required of
+ * every device, including one whose writes always land before write_blocks
+ * returns: for that device sync only confirms it is idle. */
+static inline block_device_result_t block_device_sync(
+    const block_device_t *device)
+{
+    if (!block_device_is_valid(device) || device->operations->sync == NULL) {
+        return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
+    }
+    return device->operations->sync(device->context);
+}
+
+/* Whether a medium appears to be in the socket right now: one sample of the
+ * presence signal, with no debounce and no bus traffic, so it is cheap enough
+ * to poll. It works whether or not the device is initialized, which is what
+ * makes an insertion visible: an uninitialized device has nothing else that
+ * watches the socket. It is a hint, not a promise - init does the debounced
+ * check and may still refuse with INVALID_DEVICE. It reports the socket, not
+ * the removal latch: after a removal and reinsertion it reads true again while
+ * the device still refuses operations until it is re-initialized.
+ * NOT_IMPLEMENTED for a device without a presence signal. */
+static inline block_device_result_t block_device_is_present(
+    const block_device_t *device,
+    bool *present)
+{
+    if (!block_device_is_valid(device) || present == NULL) {
+        return BLOCK_DEVICE_RESULT_INVALID_ARGUMENT;
+    }
+    if (device->operations->is_present == NULL) {
+        return BLOCK_DEVICE_RESULT_NOT_IMPLEMENTED;
+    }
+    return device->operations->is_present(device->context, present);
 }
 
 #endif
