@@ -52,5 +52,7 @@ extern const test_case_t storage_tests[];
 extern const size_t storage_test_count;
 extern const test_case_t save_point_tests[];
 extern const size_t save_point_test_count;
+extern const test_case_t msc_disk_tests[];
+extern const size_t msc_disk_test_count;
 
 #endif

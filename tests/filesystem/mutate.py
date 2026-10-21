@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Mutation testing for the storage-layer tests.
 
-Each mutation plants one deliberate bug in a copy of src/storage/filesystem.c, diskio.c or storage.c,
-rebuilds fs_tests against the copy and runs it. A mutation the suite fails on is "killed"; one it still
+Each mutation plants one deliberate bug in a copy of src/storage/filesystem.c, diskio.c or storage.c, or
+src/usb/msc_disk.c, rebuilds fs_tests against the copy and runs it. A mutation the suite fails on is "killed"; one it still
 passes is a SURVIVOR, meaning the suite cannot detect that bug. The sources in the repository are never
 modified.
 
@@ -29,10 +29,12 @@ ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
 FILESYSTEM = "filesystem.c"
 DISKIO = "diskio.c"
 STORAGE = "storage.c"
+MSC_DISK = "msc_disk.c"
 SOURCES = {
     FILESYSTEM: os.path.join(ROOT, "src", "storage", "filesystem.c"),
     DISKIO: os.path.join(ROOT, "src", "storage", "diskio.c"),
     STORAGE: os.path.join(ROOT, "src", "storage", "storage.c"),
+    MSC_DISK: os.path.join(ROOT, "src", "usb", "msc_disk.c"),
 }
 
 # (file, description, old text, new text)
@@ -502,6 +504,86 @@ MUTATIONS = [
     (STORAGE, "reclaim keeps the released medium",
      "        medium = let_go(now_ms) ? STORAGE_MEDIUM_FAULTY : STORAGE_MEDIUM_ABSENT;",
      "        if (let_go(now_ms)) {\n            medium = STORAGE_MEDIUM_FAULTY;\n        }"),
+    # ------------------------------------------------------------------ msc_disk.c: what the host is offered
+    (MSC_DISK, "a withheld medium is offered again",
+     "    if (device == NULL || (withheld && epoch == withheld_epoch)) {", "    if (device == NULL) {"),
+    (MSC_DISK, "a withheld medium stays withheld after a new lend",
+     "    if (device == NULL || (withheld && epoch == withheld_epoch)) {",
+     "    if (device == NULL || withheld) {"),
+    (MSC_DISK, "a medium changed unseen is not announced",
+     "    if (!presented || epoch != presented_epoch) {", "    if (!presented) {"),
+    (MSC_DISK, "UNIT ATTENTION reported as NOT READY",
+     "        set_sense(sense, SENSE_UNIT_ATTENTION, ASC_NOT_READY_TO_READY_CHANGE);",
+     "        set_sense(sense, SENSE_NOT_READY, ASC_NOT_READY_TO_READY_CHANGE);"),
+    (MSC_DISK, "the command that gets UNIT ATTENTION goes ahead",
+     "        set_sense(sense, SENSE_UNIT_ATTENTION, ASC_NOT_READY_TO_READY_CHANGE);\n        return NULL;",
+     "        set_sense(sense, SENSE_UNIT_ATTENTION, ASC_NOT_READY_TO_READY_CHANGE);"),
+    (MSC_DISK, "the sense qualifier is left as it was",
+     "    sense->qualifier = 0;\n", ""),
+
+    # ------------------------------------------------------------------ msc_disk.c: failures
+    (MSC_DISK, "a removal found by a transfer is offered until the coordinator notices",
+     "        withhold();\n        no_medium(sense);\n        return;", "        no_medium(sense);\n        return;"),
+    (MSC_DISK, "NOT_INITIALIZED is a target failure",
+     "    case BLOCK_DEVICE_RESULT_NOT_INITIALIZED:\n",
+     "    case BLOCK_DEVICE_RESULT_NOT_INITIALIZED:\n        if (result == BLOCK_DEVICE_RESULT_NOT_INITIALIZED) {\n"
+     "            break;\n        }\n"),
+    (MSC_DISK, "OUT_OF_RANGE from the device is a target failure",
+     "        set_sense(sense, SENSE_ILLEGAL_REQUEST, ASC_LBA_OUT_OF_RANGE);\n        return;\n"
+     "    case BLOCK_DEVICE_RESULT_IO_ERROR:",
+     "        break;\n    case BLOCK_DEVICE_RESULT_IO_ERROR:"),
+    (MSC_DISK, "BUSY_TIMEOUT is a target failure",
+     "    case BLOCK_DEVICE_RESULT_BUSY_TIMEOUT:\n",
+     "    case BLOCK_DEVICE_RESULT_BUSY_TIMEOUT:\n        if (result == BLOCK_DEVICE_RESULT_BUSY_TIMEOUT) {\n"
+     "            break;\n        }\n"),
+    (MSC_DISK, "a failed write is reported as a read error",
+     "        report_failure(result, ASC_WRITE_ERROR, sense);",
+     "        report_failure(result, ASC_UNRECOVERED_READ_ERROR, sense);"),
+    (MSC_DISK, "a failed geometry lookup is a target failure",
+     "        report_failure(result, medium_code, sense);",
+     "        (void)medium_code;\n        set_sense(sense, SENSE_HARDWARE_ERROR, ASC_INTERNAL_TARGET_FAILURE);"),
+    (MSC_DISK, "a block size over 16 bits accepted",
+     " || info->block_size_bytes > UINT16_MAX", ""),
+    (MSC_DISK, "a medium of no blocks accepted",
+     " || info->block_count == 0U", ""),
+
+    # ------------------------------------------------------------------ msc_disk.c: transfers
+    (MSC_DISK, "writes not synced",
+     "    if (result == BLOCK_DEVICE_RESULT_OK) {\n        result = block_device_sync(device);\n    }\n", ""),
+    (MSC_DISK, "the offset is ignored",
+     "    *first = (uint64_t)lba + offset / block_size;", "    *first = (uint64_t)lba;"),
+    (MSC_DISK, "the first block is worked out in 32 bits",
+     "    *first = (uint64_t)lba + offset / block_size;", "    *first = (uint32_t)(lba + offset / block_size);"),
+    (MSC_DISK, "partial blocks accepted",
+     " || offset % block_size != 0U || size % block_size != 0U", ""),
+    (MSC_DISK, "a transfer of nothing accepted",
+     "    if (size == 0U || size > INT32_MAX", "    if (size > INT32_MAX"),
+    (MSC_DISK, "an address past the end reaches the device",
+     "    if (*first >= info.block_count || *count > info.block_count - *first) {",
+     "    if (*count > info.block_count - *first) {"),
+    (MSC_DISK, "a transfer running off the end accepted",
+     "    if (*first >= info.block_count || *count > info.block_count - *first) {",
+     "    if (*first >= info.block_count) {"),
+
+    # ------------------------------------------------------------------ msc_disk.c: capacity, writable, eject
+    (MSC_DISK, "capacity not clamped to 32 bits",
+     "    *block_count = info.block_count > UINT32_MAX ? UINT32_MAX : (uint32_t)info.block_count;",
+     "    *block_count = (uint32_t)info.block_count;"),
+    (MSC_DISK, "capacity left as it was on failure",
+     "    *block_count = 0;\n    *block_size = 0;\n", ""),
+    (MSC_DISK, "writable false with no medium",
+     "    return device == NULL || block_device_get_info(device, &info) != BLOCK_DEVICE_RESULT_OK || info.writable;",
+     "    return device != NULL && block_device_get_info(device, &info) == BLOCK_DEVICE_RESULT_OK && info.writable;"),
+    (MSC_DISK, "writable ignores the device",
+     " != BLOCK_DEVICE_RESULT_OK || info.writable;", " != BLOCK_DEVICE_RESULT_OK || !info.writable || true;"),
+    (MSC_DISK, "a load ejects",
+     "    if (!load_eject || start) {", "    if (!load_eject || (start && false)) {"),
+    (MSC_DISK, "an eject does not withhold the medium",
+     "    withhold();\n    presented = false;\n    eject_pending = true;", "    presented = false;\n    eject_pending = true;"),
+    (MSC_DISK, "an eject is not reported",
+     "    presented = false;\n    eject_pending = true;", "    presented = false;"),
+    (MSC_DISK, "an eject is reported forever",
+     "    eject_pending = false;\n    return ejected;", "    return ejected;"),
 ]
 
 
@@ -530,7 +612,8 @@ def main():
     configure = run(["cmake", "-S", HERE, "-B", build, *generator,
                      "-DFS_TESTS_FILESYSTEM_SOURCE=" + copies[FILESYSTEM],
                      "-DFS_TESTS_DISKIO_SOURCE=" + copies[DISKIO],
-                     "-DFS_TESTS_STORAGE_SOURCE=" + copies[STORAGE]])
+                     "-DFS_TESTS_STORAGE_SOURCE=" + copies[STORAGE],
+                     "-DFS_TESTS_MSC_DISK_SOURCE=" + copies[MSC_DISK]])
     if configure.returncode != 0:
         print(configure.stdout)
         return 2
@@ -619,6 +702,15 @@ if __name__ == "__main__":
 #     counted attempt clears it first (a loss in lose_medium, a change to USB or NONE in change_owner,
 #     and a return from USB mounts only after the lend cleared it). the format path went from READY
 #     straight into a mount and made it observable; it was removed, and the clear stays as defence in depth.
+#
+# msc_disk.c
+#   - not clearing presented in no_medium or msc_disk_start_stop: the coordinator bumps the epoch whenever
+#     a lent medium stops being READY and on every owner change, so a medium the host was told was missing
+#     always comes back at a new epoch and is announced by the epoch comparison alone. presented covers the
+#     first lend and keeps the rule independent of that guarantee.
+#   - >= weakened to > in the first-block bound: the count check after it refuses first == block_count as
+#     well, since every transfer is at least one block. the first comparison is what keeps
+#     block_count - first from wrapping, and dropping it is caught.
 #
 # Not equivalent, but not reliably detectable either:
 #   - dir_slot's bound check off by one (> instead of >=): slot 1 of the one-slot pool reads one element

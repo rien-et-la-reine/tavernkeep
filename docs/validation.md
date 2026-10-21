@@ -413,6 +413,32 @@ has no margin there; 5 MHz the conservative one.
 - Not covered: removal during a multi-block read; physical removal above
   1 MHz; other cards; the final board
 
+### VAL-H08 — USB mass-storage device with nothing lent, and the storage cases again, 2026-10-21
+
+- Test method: the firmware with the USB mass-storage device (TinyUSB, one
+  mass-storage interface over `msc_disk`) at 1 MHz, the Pico 2's USB port
+  connected to the bench computer (Linux), so a host configured the device on
+  every boot and the main loop no longer idled between passes. The hardware
+  tests' `core`, `removal` and `faults` groups, then the device as the host
+  saw it (`lsusb`, `lsblk`, the kernel log). Nothing lends the card to USB
+  yet, so the demo kept it throughout
+- Environment / hardware: as VAL-H06, with the Pico 2's USB port on the bench
+  computer
+- Expected result: every case as in VAL-H06, the loop's change and the USB
+  stack running alongside making no difference; the host finding a removable
+  disk with no medium in it
+- Observed result: all 14 cases passed, with the same results as VAL-H06:
+  bulk write 98-99 KiB/s and read 106 KiB/s, the deepest stack use 1628 of
+  4096 bytes, and the bring-up retries on their schedule. The host found the
+  device as `cafe:4002`, "Tavernkeep Tome", with the inquiry "Tome SD card
+  0.1", attached it as a removable SCSI disk, and reported its size as 0
+  bytes: no medium
+- Covered: enumeration and the no-medium answer on Linux; the storage cases
+  with a host on the bus
+- Not covered, **pending**: the card lent to USB (reads, writes, eject,
+  removal while lent), which needs the USB-mode policy; other host operating
+  systems; the stack use of a USB transfer, which nothing triggers yet
+
 ## Measurements / Performance Characterization
 
 <!--
@@ -473,5 +499,6 @@ of it in one wait), which is the card taking longer to program some blocks.
 - The storage coordinator's release and reclaim (the none owner) has run only
   in the host tests; nothing requests a release on hardware until the power
   manager exists.
-- DMA, PIO, USB mass storage and power management are not implemented, so
-  nothing to test.
+- The USB mass-storage disk has run only in the host tests: nothing lends it
+  the card on hardware until the USB-mode policy exists.
+- DMA, PIO and power management are not implemented, so nothing to test.

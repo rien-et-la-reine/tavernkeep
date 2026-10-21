@@ -2,7 +2,7 @@
 
 Tests for everything in `src/storage/` above the SD driver: the storage coordinator (`storage.c`),
 the filesystem layer (`filesystem.c`) and its FatFs adapter (`diskio.c`), running the real FatFs over a
-RAM-backed fake block device. Standalone until they are folded into the main host suite. (The folder
+RAM-backed fake block device; and the USB mass-storage disk over the coordinator (`src/usb/msc_disk.c`). Standalone until they are folded into the main host suite. (The folder
 keeps its first name; it grew the coordinator's tests later.)
 
 ```sh
@@ -24,6 +24,7 @@ time: the coordinator can be initialized only once per process, as it can only o
 | `test_diskio.c` | The adapter, driven directly through FatFs's `disk_*()` entry points |
 | `test_filesystem.c` | The layer, through `filesystem.h`, with the adapter and FatFs underneath |
 | `test_storage.c` | The coordinator, through `storage.h`, with everything above underneath and explicit time |
+| `test_msc_disk.c` | The USB mass-storage disk, through `msc_disk.h`, over the coordinator lending the fake card; sense values from SPC-4 |
 | `fake_block_device.c/.h` | RAM card that mirrors the SPI SD driver's contract (including `is_present`), counts calls, injects faults (once or several calls in a row) into reads, writes, `get_info`, `init` and `deinit`, can mark one sector unreadable until it is rewritten, and can pull the card during a chosen `get_info` |
 | `fake_platform.c/.h` | Settable clock (`platform/clock.h`) and a log that counts warnings (`platform/debug.h`) |
 | `harness.h`, `test_main.c` | `EXPECT`/`REQUIRE` macros, fixture, runner |
@@ -66,7 +67,7 @@ time: the coordinator can be initialized only once per process, as it can only o
 
 ## Mutation testing
 
-`mutate.py` plants 150 single bugs, one at a time, in copies of the three sources (the repository is
+`mutate.py` plants 181 single bugs, one at a time, in copies of the four sources (the repository is
 never touched), rebuilds and runs the suite. Every one must be caught. Each mutation names the behaviour
 it breaks. In the filesystem layer and adapter: every row of both result-mapping tables, every status
 bit, every geometry check, binding, gating, slot bounds and generations, mount/unmount cleanup, the retry
@@ -75,7 +76,9 @@ unmount doing no I/O, access modes, byte counts, seek/tell/size, pattern copying
 end-of-directory, entry fields and the timestamp packing. In the coordinator: noticing removal and
 insertion, everything the loss path must and must not do, the attempt count and when it resets, retry
 timing and its wraparound, unseated versus failed cards, removal versus an unusable card, every request
-rule, the order of a step's phases, and what is lent to USB and when. If you change either source, re-run it: a mutation whose target text has
+rule, the order of a step's phases, and what is lent to USB and when. In the mass-storage disk: when the
+medium is offered, withheld and announced, every sense it reports, block addressing and its bounds, the
+sync after a write, the capacity clamp, the write-protect answer and ejects. If you change any of them, re-run it: a mutation whose target text has
 gone is reported as STALE rather than silently skipped.
 
 Validation history, kept because it shaped the suite:
