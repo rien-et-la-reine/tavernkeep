@@ -657,6 +657,8 @@ At the current stage:
 
 - USB mode is entered only on request (`usb_mode_request`, from GDB): automatic entry waits for the consumer safe-point hook, and the charger timeout with it. A cable's removal has run only in the host tests
 
+- the USB device descriptor still uses TinyUSB's example vendor and product IDs; they must be replaced with IDs of our own before any device is distributed
+
 - the final physical input hardware has not been selected
 
 - EPUB parsing and rendering architecture has not yet been defined
