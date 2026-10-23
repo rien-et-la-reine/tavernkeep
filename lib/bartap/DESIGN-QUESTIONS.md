@@ -5,12 +5,9 @@ SPDX-License-Identifier: MIT
 
 # Design questions
 
-These are open questions about Bartap's draft interfaces. Most were forced by making the drafts
-portable; a few were found along the way. None is decided here. The drafts in `include/bartap/` are
-kept as close as possible to their earlier form, and they refer to these questions by number (Q1,
-Q2, ...).
-
-Each question gives the draft as it stands, then the options with their trade-offs.
+Open questions about Bartap's draft interfaces, numbered so that the headers in `include/bartap/` can
+refer to them (Q1, Q2, ...). Each gives the draft as it stands, then the options and their trade-offs.
+Settled questions move to [DECISIONS.md](DECISIONS.md), as a decision that names the question's number.
 
 ---
 
@@ -69,8 +66,8 @@ The window's size is a macro.
 
 **Also part of "working memory": stack.** Callers on small devices need each call's worst-case stack
 depth (tavernkeep's main stack is 4 KiB). The options are to publish a measured figure per call (from
-`-fstack-usage` in CI), to promise a ceiling and test against it, or to say nothing. Whatever Q7 and Q8
-decide about scratch buffers feeds into this directly.
+`-fstack-usage` in CI), to promise a ceiling and test against it, or to say nothing. Whatever Q7 decides
+about its scratch buffer feeds into this directly.
 
 ---
 
@@ -147,8 +144,7 @@ the streaming API, enforcing in one combined result:
 - **D. B or C with output as the window** (Q1 D), saving 32 KiB. But then it is no longer purely built
   on the streaming API.
 
-**Smaller decisions within it:** whether the cap is a parameter or a build-time constant; which result
-says "declared size too large" (a new `TOO_LARGE`, or `UNSUPPORTED`); what the buffer holds after a
+**Smaller decisions within it:** which result says "declared size too large" (a new `TOO_LARGE`, or `UNSUPPORTED`); what the buffer holds after a
 failure (unspecified, or zeroed, which costs a pass over it); and whether stored entries go through the
 same call (presumably yes).
 
@@ -156,49 +152,48 @@ same call (presumably yes).
 
 ## Q6. Bounded work in `bartap_zip_entry_read`
 
-**Draft:** "fewer than size bytes only at the end of the entry". Each call must keep reading until it
-has produced `size` bytes. A deflated entry can consume input without producing output (runs of empty
-stored blocks, long dynamic headers) for as long as its compressed size allows, which a hostile file
-sets.
+**Draft:** D5 (DECISIONS.md) requires the call to be bounded. Without a budget, a deflated entry can
+consume input without producing output (runs of empty stored blocks, long dynamic headers) for as long
+as its compressed size allows, which a hostile file sets. So the call returns OK with fewer than `size`
+bytes, possibly none, once its budget is spent, and reports the end of the entry separately (`*end`, as
+`bartap_zip_next` does) rather than by a short read. What sets the budget is open.
 
 **Options:**
-- **A. Keep the contract** and document the call as bounded by the entry's compressed size, not by
-  anything the caller chooses. Simplest for callers; breaks the rule on hostile input.
-- **B. A per-call budget** (a number of source reads or input bytes) after which the call returns OK
-  with fewer bytes, possibly none. End of entry is then reported separately (a `bool *end`, as
-  `bartap_zip_next` does) rather than by a short read.
-- **C. As B, with the budget a parameter.** The caller tunes it to its deadline, at the cost of one more
-  argument.
-- **D. As B, with a fixed internal budget** (a build-time constant; Q11).
+- **A. A budget passed per call** (a number of source reads or input bytes). The caller tunes it to its
+  deadline, at the cost of one more argument.
+- **B. A fixed internal budget** (a build-time constant; Q11). No extra argument, but one setting for
+  every caller.
 
 ---
 
 ## Q7. `bartap_zip_open`'s end-record scan: run to completion, and where its buffer lives
 
-**Draft:** scans backwards over up to 22 + 65535 bytes, a sector at a time, inside one call. No memory
-for the sector buffer is named.
+**Draft:** scans backwards over up to 22 + 65535 bytes, a sector at a time, inside one call. D5
+(DECISIONS.md) allows that only for a convenience call built on bounded steps, and the steps are not
+drafted yet. No memory for the sector buffer is named.
 
 **Options for the buffer:** on the stack (512 B, an eighth of a 4 KiB stack); inside `bartap_zip_t`
 (512 B kept for the life of the archive for a one-off use); a caller-supplied scratch argument (the
 most explicit); or borrowing a stream's input buffer (couples opening to having a stream).
 
-**Options for bounded work:** keep it running to completion (as drafted); split it into begin/step
-calls; or a fast path that checks the last 22 bytes first, which is bounded for the overwhelmingly
-common case of an archive with no comment, with the full scan as a fallback (still unbounded in the
-worst case).
+**Options for bounded work:** D5 rules out a call that only runs to completion, so the scan becomes
+begin/step calls, with `bartap_zip_open` kept, if at all, as a convenience call built on them. A fast
+path that checks the last 22 bytes first makes the overwhelmingly common case (an archive with no
+comment) a single step, with the full scan still needed as the fallback.
 
 ---
 
-## Q8. `bartap_zip_find`: run to completion, and the memory for comparing names
+## Q8. `bartap_zip_find`: run to completion, or in steps
 
-**Draft:** walks the directory until it finds the name, in one call, so its work grows with the number
-of entries. It compares the whole name, even past `BARTAP_ZIP_NAME_MAX`, so it needs to read names in
-pieces into some buffer.
+**Draft:** a convenience call built on `bartap_zip_next`, which D5 (DECISIONS.md) allows: it walks the
+directory until it finds the name, in one call, so its work grows with the number of entries. A name
+longer than `BARTAP_ZIP_NAME_MAX` is never matched through a truncated copy; how such an entry is
+handled is Q10.
 
-**Options:** keep it, documented as running to completion (as drafted); a cursor-based step version
-returning "in progress"; or drop it in favour of `bartap_zip_next` plus a caller-side lookup or cache,
-which the package layer will want anyway for the spine. A caller-built index (hashes of names, in
-caller memory) is a possible later addition. For the comparison buffer, the same choices as Q7.
+**Options:** keep it as drafted; a cursor-based step version returning "in progress"; or drop it in
+favour of `bartap_zip_next` plus a caller-side lookup or cache, which the package layer will want
+anyway for the spine. A caller-built index (hashes of names, in caller memory) is a possible later
+addition.
 
 ---
 
@@ -310,11 +305,34 @@ Unicode-normalised) before they can match a byte-exact zip name.
 
 ## Q16. Minimum C standard
 
-**Draft:** C11 without extensions (`C_STANDARD 11`, `C_EXTENSIONS OFF`), as the rest of tavernkeep.
-Nothing C11-specific is used yet: `//` comments, `stdbool.h` and `stdint.h` are all C99.
+Settled: ISO C11 without extensions. See D7 in [DECISIONS.md](DECISIONS.md).
 
-**Options:** stay at C11, which allows `static_assert` (useful for Q2 B) and `_Alignas`; or require
-only C99, which reaches some older vendor toolchains for small devices, at the cost of those two
-features (workarounds exist).
+---
 
-Tavernkeep builds as C11 (gnu11); the library's standard is a deliberate choice for portability.
+## Q17. Does Bartap turn XHTML content documents into a styled text stream?
+
+**Draft:** no. Bartap's scope ends at delivering a content document's bytes (D2 in DECISIONS.md),
+through `bartap_zip_entry_read`. Bartap will parse XML anyway, for `container.xml`, the OPF and the
+navigation document or NCX.
+
+**Options:**
+- **A. Stop at document bytes.** The smallest scope, and it keeps Bartap to what specifications define
+  (D2's rationale). But every caller writes its own XHTML parser, so the largest body of untrusted
+  parsing in a reader sits outside Bartap's guarantees (D6). It also leaves CFI resolution (D2)
+  stopping at the spine item: resolving the path inside a content document means walking its element
+  structure.
+- **B. A streaming XHTML tokenizer:** start tag, attribute, text and end tag events, with entities
+  decoded, and no styling. Bartap needs a tokenizer for its own XML documents anyway, so exposing it
+  costs little, keeps untrusted parsing inside Bartap's checks, and lets CFI resolution reach inside a
+  document. Callers still resolve CSS and decide what each element means.
+- **C. A styled text stream:** text runs carrying resolved style (emphasis, headings, paragraph and line
+  breaks, alignment, a chosen subset of CSS), with images as references. The most useful output for a
+  small reader. But it brings in the CSS cascade, which is policy: which properties, how much of the
+  cascade, how user settings override the book. That is where D2 says readers differ. It also needs
+  memory for stylesheets and the open element stack (D3), and bounded selector matching (D5).
+- **D. C as a separate, optional layer over B** (a `bartap/text.h`, say). Callers that want bytes or
+  tokens don't pay for it, and it can come later without changing the layers under it.
+
+**Smaller decisions within it:** a limit on element nesting depth, since the file is untrusted;
+encodings (EPUB allows UTF-8 and UTF-16 content documents); and how much of CSS, if any, counts as
+spec-defined rather than policy.

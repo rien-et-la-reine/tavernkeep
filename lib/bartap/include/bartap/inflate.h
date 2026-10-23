@@ -35,6 +35,10 @@
  * - The state is a plain struct the caller allocates, so no allocation and no
  *   hidden static state: two entries can be decoded at once by keeping two.
  *   How its size is communicated, given that its contents are private, is Q2.
+ * - Total output is bounded by the caller: the decoder writes only into the
+ *   output it is given, so a caller decoding a raw stream stops a
+ *   decompression bomb by offering no more output than it will accept (D6 in
+ *   DECISIONS.md; zip.h does this with max_size).
  * - The decoder is told when the input has ended, so that a stream which
  *   stops before its final block is reported as truncated rather than left
  *   waiting for input that will never come.

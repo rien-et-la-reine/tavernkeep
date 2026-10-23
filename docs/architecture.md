@@ -10,7 +10,7 @@ Tavernkeep is firmware for the RP2350-based Tome e-reader and MP3 player.
 
 The firmware is divided into platform-level hardware support and higher-level subsystems responsible for storage, filesystems, book handling, audio playback, display output, physical input, USB functionality, and system operation.
 
-Development is currently proceeding from the lowest-level hardware interfaces upward. Removable storage is the first substantial subsystem: the SPI SD driver, the filesystem layer and the storage coordinator are implemented and validated on hardware. EPUB, display, audio, USB, input, and power-management functionality remains planned or only scaffolded unless otherwise documented.
+Development is currently proceeding from the lowest-level hardware interfaces upward. Removable storage is the first substantial subsystem: the SPI SD driver, the filesystem layer and the storage coordinator are implemented and validated on hardware. USB mass storage over it is implemented and validated too, entered on request until automatic entry is added. EPUB, display, audio, input, and power-management functionality remains planned or only scaffolded unless otherwise documented.
 
 Tome's final hardware uses two e-ink displays and removable SD storage. The exact physical control scheme remains unresolved and must be settled before significant hardware development proceeds.
 
@@ -40,8 +40,6 @@ The platform layer owns board-level initialization and low-level facilities shar
 
 Current responsibilities include board support, debugging/logging support, and the GPIO interrupt dispatcher that owns the Pico SDK's shared GPIO callback and routes edge events to registered subsystem handlers on the core that initialized it.
 
-The exact long-term boundary of this layer has not yet been finalized.
-
 **Storage**
 
 The storage subsystem owns access to removable SD storage.
@@ -70,7 +68,7 @@ Filesystem interpretation does not belong to the block-device backend.
 
 The filesystem layer operates above the block-device interface and provides file-level access to removable storage.
 
-FatFs is vendored, configured and built as this layer's implementation. The layer and its FatFs disk I/O adapter are implemented (see "Filesystem" under Major Interfaces) and validated on a real card (VAL-H02 to VAL-H07 in `docs/validation.md`). They have not yet run against the card model, a host simulation of an SD card kept outside the repository (see Concurrency / Execution Model).
+FatFs is vendored, configured and built as this layer's implementation. The layer and its FatFs disk I/O adapter are implemented (see "Filesystem" under Major Interfaces) and validated on a real card (VAL-H02 to VAL-H07 in `docs/validation.md`).
 
 The filesystem layer should not depend on whether the underlying SD implementation uses SPI or the planned 4-bit interface.
 
@@ -80,7 +78,9 @@ The book subsystem will be responsible for opening and navigating supported book
 
 EPUB and plain-text files are required book formats.
 
-The internal architecture of EPUB parsing, text layout, caching, and rendering has not yet been defined.
+The container and package layer - zip, DEFLATE, the OCF container, the OPF package and spine, navigation, and EPUB CFI parsing and resolution - is Bartap, a first-party library in `lib/bartap/` with draft interfaces and no implementation yet (see "Develop the EPUB container layer as a portable library, Bartap" under Important Design Decisions and Rationale). Whether it also turns XHTML into a styled text stream is open (Q17 in `lib/bartap/DESIGN-QUESTIONS.md`). The firmware supplies what Bartap needs from the platform, such as a byte source over a file on the card (`src/epub/bartap_adapter.c`).
+
+Text layout and rendering stay in the firmware and are not yet defined. Nothing derived from a book is written to the card; any caching is in RAM (see "Write only user state to the SD card" under Important Design Decisions and Rationale).
 
 M4B audiobook support is a stretch feature and therefore does not currently form part of the required architecture.
 
@@ -289,7 +289,7 @@ removable storage
 → PAM8908
 → headphones
 
-Detailed buffering and concurrency behavior remain to be designed.
+Audio's read-ahead has priority on the card (see "Reading and audio are separate modes, with concurrency kept possible" under Important Design Decisions and Rationale); detailed buffering and concurrency behavior remain to be designed.
 
 **USB storage**
 
@@ -343,7 +343,7 @@ Tavernkeep runs in exactly one of three operating modes at a time:
 | Audio | filesystem layer, through the storage coordinator | keeping the I2S output fed | input, occasional display updates, storage, persistent-state writes at defined points |
 | USB mass storage | the USB mass-storage class, holding the bare block device | servicing the USB stack promptly | charging/status display only |
 
-Reading and playback never run concurrently. (Audiobook read-along, if ever implemented, would be the one exception and would be designed as a fourth mode rather than by relaxing this rule.) USB mass storage runs with every other function stopped: a plugged-in cable means either a host is using the storage or the device is in use while charging, never both. The consequence for the rest of the system is that **no mode ever has more than one hard-deadline domain**, which is what lets the cooperative execution model stand without an RTOS (see Concurrency).
+Reading and playback are separate modes, switched by a toggle in the user interface, and do not run concurrently. Reading while audio plays is not required, but the design keeps it possible (see "Reading and audio are separate modes, with concurrency kept possible" under Important Design Decisions and Rationale). (Audiobook read-along, if ever implemented, would be designed as a fourth mode.) USB mass storage runs with every other function stopped: a plugged-in cable means either a host is using the storage or the device is in use while charging, never both. The consequence for the rest of the system is that **no mode ever has more than one hard-deadline domain**, which is what lets the cooperative execution model stand without an RTOS (see Concurrency).
 
 **Storage has one owner at a time.** The owner is the filesystem layer in reader and audio modes and the mass-storage class in USB mode. Higher layers obtain storage only through the filesystem. The `block_device_t` is held by the storage coordinator, which initializes and deinitializes it and alone decides who may use it; by the filesystem adapter while a volume is mounted; and, in USB mode, by the mass-storage glue. Nothing else holds it. This is what makes ownership enforceable rather than conventional.
 
@@ -478,6 +478,8 @@ The initial storage implementation intentionally uses polling rather than DMA.
 
 Two test suites live in `tests/`. The host tests (`tests/filesystem/`) are unit and contract tests of the save points, the coordinator, the filesystem layer and the adapter, and of the USB mass-storage disk over the coordinator, with the real FatFs over a RAM-backed fake card that follows the SD driver's contract. They cover what hardware cannot reach precisely - a failure at every write, retry timing to the millisecond, every result path - and mutation testing checks that they catch planted bugs. The hardware tests (`tests/hardware/`) run the demo on a Pico 2 through the Debug Probe, injecting removals and errors at breakpoints, and ask a person at the bench for physical removals; they produce the runs in `docs/validation.md`. The card model, a host simulation of an SD card that `main.c` was compiled against so that host and hardware logs compare directly, is kept on another machine and has not yet been run against the filesystem layer and the coordinator, so the current demo has not run on it.
 
+Bartap's host tests live with the library, in `lib/bartap/tests/`, so that they move with it, and build only when Bartap is built standalone. The firmware build runs Bartap's symbol check over its own Arm build of the library.
+
 DMA is planned for bulk storage transfers after the polling implementation has been validated.
 
 Interrupt-driven or asynchronous operation will be introduced where required by later subsystems, but a complete system-wide execution and scheduling model has not yet been defined beyond the following rule: each core runs one cooperative loop of bounded-work steps, and no operating mode places more than one hard-deadline domain on a core (see "Operating Modes and Storage Ownership"). Audio is the only current domain with a hard deadline; its decoder is written as a bounded step reading compressed data from a ring the storage coordinator fills, so whether it runs in the core 0 loop or on the second core is a launch-time placement decision sized by measurement (chiefly the display driver's blocking time), not a structural one. The no-RTOS decision is to be re-evaluated if a mode ever needs two hard-deadline domains on one core, or if long operations start acquiring hand-written yield points.
@@ -575,6 +577,76 @@ enough to justify a separate decision-record system.
 
 - Consequences and tradeoffs: Connecting to a computer only to charge interrupts reading or playback until the host ejects the storage. Reader and audio modes must reach a save point on an outside request at any time (the consumer safe-point hook). The device must sense VBUS.
 
+### Decision — Develop the EPUB container layer as a portable library, Bartap
+
+*Drafted for review.*
+
+- Context: Opening an EPUB means reading its zip container, inflating DEFLATE-compressed entries, parsing the OCF container and the OPF package for the spine, and reading its navigation (the EPUB 3 navigation document or the EPUB 2 NCX). None of this depends on Tome's hardware.
+
+- Decision: This layer is Bartap, a first-party library in `lib/bartap/`, built as its own CMake project and intended to move to its own repository. Its scope is zip, inflate, OCF, OPF and spine, navigation, and EPUB CFI parsing and resolution. Layout and rendering are out of scope, and whether it also produces a styled text stream from XHTML is open (Q17). Bartap's own decisions are recorded in `lib/bartap/DECISIONS.md` and its open questions in `lib/bartap/DESIGN-QUESTIONS.md`, not here. Tavernkeep supplies its platform side (`src/epub/bartap_adapter.c`) and keeps layout, rendering and caching policy. `lib/` holds first-party libraries intended to become separate repositories, distinct from the vendored code in `third_party/`, which keeps its upstream licences.
+
+- Rationale: With no Pico SDK, FatFs or TinyUSB includes, the boundary is enforced by the build rather than by convention; every malformed-input path can be tested on a host under sanitizers and several compilers and word sizes; and the layer stays usable outside Tome.
+
+- Alternatives considered: Keeping the layer in `src/epub/` as part of the firmware, where it began. Bartap's own alternatives are in `lib/bartap/DECISIONS.md` (D1).
+
+- Consequences and tradeoffs: Bartap keeps rules the firmware itself does not need - no allocation, no mutable global state, caller-supplied memory and I/O, bounded work per call - and checks that enforce them, in its own tests and, for the Arm build, in the firmware build. EPUB code lives in two places, and Bartap's interfaces stay drafts until Bartap settles them.
+
+### Decision — Open EPUB files directly on the device
+
+*Drafted for review.*
+
+- Context: FR-001 requires opening EPUB files stored on the device. Books reach the card by being copied, over USB mass storage (FR-010) or from a card reader.
+
+- Decision: Tavernkeep reads EPUB files as they are on the card. No tool on a computer converts or prepares books for the device.
+
+- Rationale: Copying a file is the whole workflow and works from any computer, with no companion software to maintain or require.
+
+- Alternatives considered: Converting books on a computer into a form prepared for the device, such as pre-decompressed or pre-paginated.
+
+- Consequences and tradeoffs: Everything an EPUB needs - zip, DEFLATE with its 32 KiB window, XHTML and CSS parsing, layout - runs on the device, within its memory and time, on books as they are found, malformed ones included. Since nothing derived from a book is kept on the card, that work is redone whenever a cache in RAM does not already hold its result.
+
+### Decision — Write only user state to the SD card
+
+*Drafted for review.*
+
+- Context: The card is removable, and in USB mode a host can change anything on it. Tavernkeep already treats a medium it gets back as new and reuses no cached state ("Operating Modes and Storage Ownership").
+
+- Decision: The only thing Tavernkeep writes to the card is user state - bookmarks and settings - through save points. No caches, derived data or layout are written to the card. Any caching lives in RAM: on-chip SRAM, or PSRAM if one is fitted.
+
+- Rationale: A cache on the card can be made stale by a host or a swapped card at any time and would need validating before every use. Every card write adds programming-busy time that audio mode must buffer around, and the save-point rule already limits writes to named points. The card holds nothing the user did not put there besides the state files.
+
+- Alternatives considered: A cache folder on the card, keyed to each book's size and timestamp.
+
+- Consequences and tradeoffs: Derived data is rebuilt after a restart, a card change or a USB session, so opening a book costs time; whether caches in RAM can survive sleep is open (see "Power management" under Planned / Future Architecture). PSRAM is not assumed (NFR-005), so caching must work, if smaller, in SRAM alone, and Bartap streams content rather than needing a whole chapter in memory. Reading positions and bookmarks must be stored in a form that does not depend on layout - a position in the book's content, not a page number.
+
+### Decision — Reading and audio are separate modes, with concurrency kept possible
+
+*Drafted for review.*
+
+- Context: Reader and audio are separate operating modes, and audio is the only domain with a hard deadline (NFR-002). Reading while audio plays is not required.
+
+- Decision: Reading and audio playback are separate modes, switched by a toggle in the user interface. Reading while audio plays must stay possible, and three rules keep it so: the reader works within an explicit memory budget that leaves room for audio's buffers; audio's read-ahead has priority on the card; and the audio decoder may run on core 1.
+
+- Rationale: Separate modes keep each one simple to build and validate now. The rules are cheap to keep from the start and expensive to retrofit: a reader that has grown to fill RAM, or storage service with no priority order, would both need redesigning. A decoder on core 1 keeps audio's deadline away from the reader's and the displays' work on core 0.
+
+- Alternatives considered: Strictly exclusive modes, letting each mode use all memory and the card freely; designing concurrent reading and playback now.
+
+- Consequences and tradeoffs: The reader's memory budget must be set before layout and caching are designed. Audio's read-ahead runs first in the storage coordinator's service work, at the place reserved for it at the end of `storage_step`. A decoder on core 1 takes its compressed data from the ring the coordinator fills, never from the filesystem, and needs more stack than the default memory map gives core 1 (see Stacks under Concurrency / Execution Model). Running both together would still place only one hard-deadline domain on a core, so the execution model would not change.
+
+### Decision — Built-in glyph strikes with SD-card expansion
+
+*Drafted for review.*
+
+- Context: Text is drawn from bitmap fonts; a strike is one typeface at one pixel size. Every glyph built into the firmware costs flash.
+
+- Decision: The firmware carries built-in strikes covering Latin, Greek and the characters likely in English and French books, plus a replacement glyph. More strikes can be loaded from a `fonts` folder at the card's root, in the same versioned format the built-in strikes use. Glyphs are found through a chain of providers: the built-in strikes, then the card's, then the replacement glyph. Strikes on the card extend which books Tavernkeep can render; they are not for changing how text looks.
+
+- Rationale: Built-in strikes let the device show text - menus, errors, a missing-card message - with no card at all, and cover what most books need. One versioned format for both means one loader and one set of tests, and a format change cannot make old strikes on a card misread. The chain means a missing glyph always draws something.
+
+- Alternatives considered: Built-in strikes only; strikes only from the card; card strikes taking precedence over built-in ones, so that a user could change how text looks.
+
+- Consequences and tradeoffs: Built-in strikes take flash. A book in a script with no strike on the card shows replacement glyphs. Because the built-in strikes come first, a card strike adds glyphs the built-in strikes lack and never replaces one of theirs. Fonts embedded in EPUBs are likely to be ignored. The strike format and how a strike is chosen are not yet defined. Strikes on the card are content the user put there, like books, so they do not conflict with writing only user state.
+
 ## Hardware Assumptions Relevant to Firmware
 
 **Processor**
@@ -643,8 +715,6 @@ Tome runs from a single-cell lithium-ion battery charged from USB. The charger I
 
 ## Known Architectural Limitations
 
-The current firmware architecture is incomplete because development is still concentrated on storage bring-up.
-
 At the current stage:
 
 - only the SPI SD transport exists; it is functionally complete against the block-device contract and has run on one SDHC card at up to 25 MHz (VAL-H01 to VAL-H07)
@@ -661,7 +731,9 @@ At the current stage:
 
 - the final physical input hardware has not been selected
 
-- EPUB parsing and rendering architecture has not yet been defined
+- the EPUB container and package layer (Bartap, `lib/bartap/`) is scaffolded with draft interfaces and no implementation; text layout and rendering have not yet been defined
+
+- the reader's memory budget, and the room it leaves for audio's buffers, have not yet been set
 
 - display buffering and update scheduling have not yet been defined
 
@@ -670,8 +742,6 @@ At the current stage:
 - the overall asynchronous/concurrency model beyond the current blocking storage implementation has not yet been defined
 
 - system-wide power management is designed only in outline (see "Power management" under Planned / Future Architecture): the storage coordinator can release the card for a power-down, but there is no power manager, no rail switch and no safe-point hook for consumers yet
-
-These are development-state limitations rather than necessarily permanent restrictions.
 
 ## Planned / Future Architecture
 
@@ -689,12 +759,6 @@ After the polling SD implementation has been validated, bulk block transfers are
 
 The exact asynchronous API and DMA ownership model have not yet been designed. They must implement the cancellation, IRQ ordering, buffer invalidation, RP2350-E5 abort sequence, and resource-release rules described in Removable-Media Detection and Hot Removal.
 
-**Filesystem integration**
-
-FatFs runs above the block-device interface, behind the filesystem layer's interface.
-
-The filesystem layer, the adapter between FatFs and block_device_t, and the storage coordinator above them are implemented and have run on hardware (VAL-H02 to VAL-H07); a run on the card model, kept outside the repository, remains.
-
 **Input/events**
 
 A general input/event mechanism is expected to be required as Tavernkeep gains display, audio, and physical controls, but its structure should be designed after the physical control scheme and actual subsystem needs become clearer.
@@ -709,13 +773,13 @@ Framebuffer strategy, partial-update policy, rendering ownership, and display sc
 
 Tavernkeep will require EPUB file access, parsing, layout, navigation, persistent reading position, and bookmark support.
 
-The internal architecture for these functions has not yet been designed.
+The container and package layer (zip, DEFLATE, OCF, the OPF package and spine, navigation, and EPUB CFI parsing and resolution) is Bartap's, in `lib/bartap/`, with draft interfaces and no implementation yet; whether it also produces a styled text stream from XHTML is open (Q17). The internal architecture of the rest - file access through the Bartap adapter, layout, reading position and bookmarks - has not yet been designed.
 
 **Audio**
 
 Tavernkeep will require MP3 decoding and continuous delivery of audio to the hardware audio path.
 
-Buffering, DMA use, timing, decoder selection or implementation, and interaction with simultaneous storage/display activity remain to be determined.
+Audio's read-ahead has priority on the card, and the decoder may run on core 1 (see "Reading and audio are separate modes, with concurrency kept possible" under Important Design Decisions and Rationale). Buffering, DMA use, timing, decoder selection or implementation, and interaction with display activity remain to be determined.
 
 **USB mass storage**
 
@@ -760,3 +824,5 @@ Waking therefore takes the settle wait plus the card's own initialization before
 - the development socket's detect switch closes to ground when the socket is empty, so an empty socket draws about 66 µA through the card-detect pull-up for as long as the device sleeps. Whether insertion should wake the device is still open; if it should not, either the driver switches that pull-up off during sleep (a small addition that partly reverses the rule that the detect pin is claimed for the life of the device), or the board uses a weaker external pull-up or a socket whose switch is open when empty
 
 *Built so far:* the storage coordinator's release and reclaim (the none owner, in `storage.h`), tested on the host. Not yet built: the power manager itself, the rail switch, the pin safe-state for each peripheral, a forced release for a card that never stops being busy (the "separate forced-shutdown path" under Resource Ownership), and the consumer safe-point hook in `storage_step`. Automatic USB-mode entry needs the same hook, since a cable can arrive at any moment.
+
+*Open: caches across sleep.* Book-derived caches live in RAM (see "Write only user state to the SD card" under Important Design Decisions and Rationale), and RAM is kept through sleep. But releasing the card for sleep is an owner change, which changes the storage coordinator's epoch, so every consumer discards what it cached and the first page after waking costs a reopen. The options: accept that, which is simplest but costs reopening time after every wake; keep the epoch when the same card comes back, which needs the coordinator to compare the card's identity (its CID) on reclaim, and still misses a card edited elsewhere and returned while the device slept; or validate caches by something other than the epoch, such as the card's CID with the book file's size and timestamp, checked after waking. To be decided with the power manager and the reader's caching.

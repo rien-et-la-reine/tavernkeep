@@ -2,13 +2,13 @@
 
 Tavernkeep is a learning and portfolio firmware project for an eventual custom
 RP2350-based device. It currently contains bring-up firmware with a working
-removable-storage stack.
+removable-storage stack and USB mass storage.
 
 ## Status and roadmap
 
-The firmware initializes Pico SDK stdio, prints a startup banner, runs the
-storage coordinator in a cooperative loop with a filesystem demo reported over
-RTT, and blinks the Pico 2 status LED when the selected board defines one.
+The firmware initializes Pico SDK stdio, prints a startup banner, runs the USB
+device and the storage coordinator in a cooperative loop with a filesystem demo
+reported over RTT, and blinks the Pico 2 status LED when the selected board defines one.
 
 - **SD driver (SPI):** card detection with debounce, SDSC/SDHC/SDXC
   initialization, CSD capacity parsing, single- and multiple-block reads and
@@ -48,15 +48,17 @@ Planned work, none of which is implemented yet:
 3. Encoder/button input and event handling
 4. I2S audio transfers using DMA
 5. MP3 and audiobook streaming/playback
-6. Streaming EPUB/ZIP/XHTML parsing and layout
+6. EPUB parsing and layout. The container and package layer is being written
+   as Bartap (`lib/bartap/`), a library intended to become its own repository;
+   its interfaces are drafts
 7. Power-management policy and low-power states
-
-EPUB container parsing is being written as Bartap (`lib/bartap/`), an
-allocation-free EPUB container and package library intended to become its own
-repository. Its interfaces are drafts and nothing is implemented yet.
 
 ## License
 
 The firmware is released under the MIT License (`LICENSE`). Vendored FatFs
 (`third_party/fatfs/`) keeps its own licence; see `third_party/README.md`. The
 hardware lives in the separate `tome` repository under CERN-OHL-S-2.0.
+
+`lib/` holds first-party libraries intended to become separate repositories,
+such as Bartap (`lib/bartap/`, MIT, with its own `LICENSE`); they are distinct
+from the vendored code in `third_party/`.

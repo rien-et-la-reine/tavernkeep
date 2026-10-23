@@ -1,10 +1,9 @@
 # Storage-layer host tests
 
 Tests for everything in `src/storage/` above the SD driver: the storage coordinator (`storage.c`),
-the filesystem layer (`filesystem.c`) and its FatFs adapter (`diskio.c`), running the real FatFs over a
-RAM-backed fake block device; and the USB mass-storage disk and USB-mode policy over the coordinator
-(`src/usb/msc_disk.c`, `usb_mode.c`). Standalone until they are folded into the main host suite. (The folder
-keeps its first name; it grew the coordinator's tests later.)
+the filesystem layer (`filesystem.c`) and its FatFs adapter (`diskio.c`), and save points
+(`save_point.c`), running the real FatFs over a RAM-backed fake block device; and the USB mass-storage
+disk and USB-mode policy over the coordinator (`src/usb/msc_disk.c`, `usb_mode.c`).
 
 ```sh
 cmake -S tests/filesystem -B build-fs-tests -G Ninja
@@ -24,6 +23,7 @@ time: the coordinator can be initialized only once per process, as it can only o
 |---|---|
 | `test_diskio.c` | The adapter, driven directly through FatFs's `disk_*()` entry points |
 | `test_filesystem.c` | The layer, through `filesystem.h`, with the adapter and FatFs underneath |
+| `test_save_point.c` | Save points, through `save_point.h`, including a removal at every device write of a save |
 | `test_storage.c` | The coordinator, through `storage.h`, with everything above underneath and explicit time |
 | `test_msc_disk.c` | The USB mass-storage disk, through `msc_disk.h`, over the coordinator lending the fake card; sense values from SPC-4 |
 | `test_usb_mode.c` | The USB-mode policy, through `usb_mode.h`, with the coordinator carrying out its requests, the disk reporting ejects, and explicit time |

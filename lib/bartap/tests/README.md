@@ -33,12 +33,11 @@ python3 tests/run_matrix.py         # all of it under gcc and clang, 64- and 32-
 | `harness_selftest` | The harness reports a failing check, a case with no checks, and a crash |
 | `include_check` | Every file in `include/` and `src/` includes only `<stdint.h>`, `<stddef.h>`, `<stdbool.h>`, `<string.h>` and `"bartap/..."` headers (`check_includes.cmake`) |
 | `include_check_selftest` | That check finds all five planted violations in `check_selftest/includes/` |
-| `symbol_check` | An uninstrumented build of the library has no writable data (no mutable global or static state) and calls nothing but `memcpy`, `memset`, `memcmp`, `memmove` and the stack protector's symbols: no `malloc`, `abort`, `assert` or stdio (`check_symbols.cmake`) |
+| `symbol_check` | An uninstrumented build of the library has no writable data (no mutable global or static state) and calls nothing but `memcpy`, `memset`, `memcmp`, `memmove`, the stack protector's symbols and, on 32-bit x86, the linker's `_GLOBAL_OFFSET_TABLE_`: no `malloc`, `abort`, `assert` or stdio (`check_symbols.cmake`) |
 | `symbol_check_selftest` | That check finds both planted violations in `check_selftest/symbols/` |
 
-`symbol_check` here covers the host build. Tavernkeep's firmware build runs the same
-`check_symbols.cmake` over its Arm `libbartap.a` on every rebuild of the library, where the Arm
-run-time ABI's `__aeabi_*` helpers are also allowed, and prints the symbols that build pulls in.
+`symbol_check` covers the host build. Tavernkeep's firmware build runs the same check over its Arm
+`libbartap.a`, where the Arm run-time ABI's `__aeabi_*` helpers are also allowed.
 
 The library's rules apply to `include/` and `src/`. The tests themselves may use the whole C library and
 POSIX: the runner needs stdio and `fork()`.

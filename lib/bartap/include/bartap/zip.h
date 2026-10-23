@@ -46,7 +46,8 @@
  *   (0) and deflated (8).
  * - Every offset and size read from the archive is checked against the
  *   archive before it is used, and an entry may not decompress to more than
- *   its directory entry says. A damaged or hostile file is
+ *   its directory entry says, nor to more than the max_size its caller
+ *   accepts (D6 in DECISIONS.md). A damaged or hostile file is
  *   BARTAP_ZIP_RESULT_CORRUPT, never an overrun.
  * - Every field is decoded from the archive's bytes explicitly, as the
  *   little-endian value the format defines, one byte at a time: no struct is
@@ -62,16 +63,17 @@
  *   and for entry_open one local header read).
  * - bartap_zip_next: bounded: one directory entry, read with a fixed number
  *   of source reads however long its name, extra field or comment.
- * - bartap_zip_open: runs to completion. Finding the end record may read up to
- *   22 + 65535 bytes, in up to about 128 sector-sized reads (Q7).
- * - bartap_zip_find: runs to completion. It walks the directory until it finds
+ * - bartap_zip_open: runs to completion, as drafted. Finding the end record may
+ *   read up to 22 + 65535 bytes, in up to about 128 sector-sized reads. D5 in
+ *   DECISIONS.md allows that only for a convenience call built on bounded
+ *   steps, and those steps are not drafted yet (Q7).
+ * - bartap_zip_find: runs to completion, as a convenience call built on
+ *   bartap_zip_next, which D5 allows. It walks the directory until it finds
  *   the name, so its work grows with the number of entries (Q8). A caller that
- *   needs bounded steps can list with bartap_zip_next instead.
- * - bartap_zip_entry_read: NOT bounded as drafted. "Fewer than size bytes only
- *   at the end" means a call must keep reading until it has produced size
- *   bytes, and a deflated entry can consume input without producing output
- *   (empty stored blocks, for instance) for as long as its compressed size
- *   allows. Q6 has the options. */
+ *   needs bounded steps lists with bartap_zip_next itself.
+ * - bartap_zip_entry_read: bounded (D5). It stops once its budget is spent,
+ *   with fewer than size bytes if need be, even none, and reports the end of
+ *   the entry separately. What sets the budget is Q6. */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -106,9 +108,9 @@ typedef enum {
 /* Longest entry name kept in a bartap_zip_entry_t, in bytes, excluding the
  * terminator. 255 is the longest name FAT and most other filesystems allow,
  * so a name can always be copied into a filesystem's directory entry. Whether
- * it should be configurable is Q10. A longer name still has its entry listed,
- * with name_truncated set, and bartap_zip_find compares the whole name against
- * the directory, so it still finds it. */
+ * it should be configurable is Q10. A longer name is never truncated, since a
+ * truncated name can match a different entry's; whether its entry is rejected
+ * or skipped is Q10 too. */
 #define BARTAP_ZIP_NAME_MAX 255
 
 /* An open archive: what its end record says, checked against the source. */
@@ -120,9 +122,8 @@ typedef struct {
 } bartap_zip_t;
 
 typedef struct {
-    char name[BARTAP_ZIP_NAME_MAX + 1];
-    uint16_t name_length;               //the whole name's, even if truncated
-    bool name_truncated;
+    uint8_t name[BARTAP_ZIP_NAME_MAX + 1];  //UTF-8, NUL-terminated
+    uint16_t name_length;               //bytes in name, excluding the terminator
     uint16_t index;                     //0 for the first entry in the directory
     uint16_t method;                    //a bartap_zip_method_t, or what the archive said if unsupported
     uint16_t flags;                     //general-purpose bit flags, from the directory
@@ -175,25 +176,33 @@ bartap_zip_result_t bartap_zip_next(
     bartap_zip_entry_t *entry,
     bool *end);
 
-/* Find the entry named name (UTF-8, not terminated by '/' unless it names a
- * directory entry). BARTAP_ZIP_RESULT_NOT_FOUND if there is none. */
-bartap_zip_result_t bartap_zip_find(const bartap_zip_t *zip, const char *name, bartap_zip_entry_t *entry);
+/* Find the entry named name (UTF-8, NUL-terminated, not terminated by '/'
+ * unless it names a directory entry). BARTAP_ZIP_RESULT_NOT_FOUND if there is
+ * none. Built on bartap_zip_next, so it never matches an entry through a
+ * truncated copy of its name (Q10). */
+bartap_zip_result_t bartap_zip_find(const bartap_zip_t *zip, const uint8_t *name, bartap_zip_entry_t *entry);
 
 /* ------------------------------------------------------------ entries */
 
 /* Start reading *entry, as returned by bartap_zip_next or bartap_zip_find.
- * Reads and checks its local header. window is BARTAP_INFLATE_WINDOW_SIZE
- * bytes for a deflated entry and may be NULL for a stored one; it is used
- * until the stream is abandoned. */
+ * Reads and checks its local header. max_size is the most the caller will
+ * accept: an entry whose directory says it is larger is refused before
+ * anything else is read (with which result is a smaller decision in Q5), so a
+ * decompression bomb fails cleanly (D6 in DECISIONS.md). window is
+ * BARTAP_INFLATE_WINDOW_SIZE bytes for a deflated entry and may be NULL for a
+ * stored one; it is used until the stream is abandoned. */
 bartap_zip_result_t bartap_zip_entry_open(
     bartap_zip_stream_t *stream,
     const bartap_zip_t *zip,
     const bartap_zip_entry_t *entry,
+    uint32_t max_size,
     uint8_t *window);
 
-/* Read up to size bytes of the entry's contents. Fewer than size bytes are
- * read only at the end of the entry. The CRC-32 and size are checked when the
- * end is reached, and the read that reaches it returns
+/* Read up to size bytes of the entry's contents. Bounded (D5 in
+ * DECISIONS.md): a call returns OK with fewer than size bytes, possibly none,
+ * once its budget is spent (what sets the budget is Q6), so a short read does
+ * not mean the end. *end is set by the read that reaches the end of the entry.
+ * The CRC-32 and size are checked then, and that read returns
  * BARTAP_ZIP_RESULT_CORRUPT if either does not match; so does any read that
  * would take the entry past its uncompressed size. A caller that reads to the
  * end and gets OK has had every byte checked; bytes it was given before then
@@ -203,6 +212,7 @@ bartap_zip_result_t bartap_zip_entry_read(
     bartap_zip_stream_t *stream,
     void *buffer,
     size_t size,
-    size_t *bytes_read);
+    size_t *bytes_read,
+    bool *end);
 
 #endif

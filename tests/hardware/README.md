@@ -1,6 +1,6 @@
 # Hardware tests
 
-The hardware runs behind the validation records (VAL-H04 to VAL-H07 in `docs/validation.md`):
+The hardware runs behind the validation records (VAL-H04 to VAL-H09 in `docs/validation.md`):
 automated cases that need no hands on the card, and a `manual` group that asks for physical removal and
 insertion. They drive a Pico 2 through the Raspberry Pi Debug Probe with OpenOCD: flash, reset, hardware
 breakpoints, memory reads and writes, and RTT for the demo's log.

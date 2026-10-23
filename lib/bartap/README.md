@@ -8,31 +8,31 @@ SPDX-License-Identifier: MIT
 Bartap is an allocation-free, streaming, platform-agnostic EPUB container and package library for small
 devices.
 
-It reads what an EPUB file is made of: the zip container, the DEFLATE-compressed entries in it and,
-later, the OCF container and OPF package documents that describe the book. Layout and rendering are out
-of scope. Bartap hands its caller the book's documents and resources, and what is done with them is the
-caller's business.
+It covers the zip container and its DEFLATE-compressed entries, the OCF container, the OPF package and
+spine, navigation (the EPUB 3 navigation document or the EPUB 2 NCX), and EPUB CFI parsing and
+resolution. Layout and rendering are left to the caller. Whether Bartap also turns XHTML content
+documents into a styled text stream is open (Q17).
 
-**Status: scaffolding.** The interfaces in `include/bartap/` are drafts, marked as such, and nothing is
-implemented yet. The open design questions are in [DESIGN-QUESTIONS.md](DESIGN-QUESTIONS.md).
+**Status: scaffolding.** The interfaces in `include/bartap/` are drafts and nothing is implemented yet.
+Decisions are in [DECISIONS.md](DECISIONS.md), open questions in
+[DESIGN-QUESTIONS.md](DESIGN-QUESTIONS.md).
 
 ## Rules the library keeps
 
-These hold for everything in `include/` and `src/`. The tests check the first and third mechanically.
+These hold for everything in `include/` and `src/`; the reasons are in DECISIONS.md. The tests check
+the header and memory rules mechanically.
 
 - **Headers:** only `<stdint.h>`, `<stddef.h>`, `<stdbool.h>` and `<string.h>` (for `memcpy`, `memset`
-  and `memcmp`). No stdio, stdlib, `assert.h` or platform headers.
+  and `memcmp`).
 - **Names:** every public symbol and type starts with `bartap_`, and every macro with `BARTAP_`.
-- **Memory:** no global or static mutable state, and no dynamic allocation. All state lives in structs
-  the caller owns, and the caller provides all working memory and output buffers, so the caller decides
-  where each lives (SRAM, PSRAM, ...).
-- **I/O:** only through callbacks the caller supplies. No file or OS calls.
-- **Errors:** explicit result codes. Nothing in the library aborts or asserts.
-- **Untrusted input:** values read from files use fixed-width integer types and are decoded from bytes
-  explicitly, with no assumptions about the host's byte order or alignment.
-- **Bounded work:** every streaming call does a bounded amount of work and returns, so a caller with
-  real-time deadlines can interleave it with other work in a cooperative loop. Each header says which
-  of its calls meet this and which run to completion.
+- **Memory:** no dynamic allocation and no global or static mutable state. The caller owns all state
+  and provides all working memory and output buffers (D3).
+- **I/O:** only through callbacks the caller supplies (D4).
+- **Errors:** result codes. Nothing in the library aborts or asserts.
+- **Bytes:** byte data is `uint8_t`, never plain `char`, and values in files are decoded byte by byte,
+  with no assumptions about byte order or alignment (D7).
+- **Bounded work:** every streaming call does a bounded amount of work and returns. Each header says
+  which of its calls run to completion instead (D5).
 
 ## Building
 
@@ -65,6 +65,7 @@ See [tests/README.md](tests/README.md) for the tests and their fixtures.
 | `include/bartap/` | Public headers: `byte_source.h`, `zip.h`, `inflate.h` |
 | `src/` | Implementation |
 | `tests/` | Host tests, fixture generator, portability checks, the compiler-matrix runner |
+| `DECISIONS.md` | Decisions that shape Bartap, with their reasoning |
 | `DESIGN-QUESTIONS.md` | Open questions about the draft interfaces |
 
 ## Licence
