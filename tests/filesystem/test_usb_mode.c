@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
+
 //tests for src/usb/usb_mode.c, the USB-mode policy, through usb_mode.h, with the real storage coordinator
 //carrying out its requests, the real mass-storage disk reporting ejects, and the fake card
 //

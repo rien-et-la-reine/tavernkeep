@@ -1,3 +1,6 @@
+/* SPDX-FileCopyrightText: 2026 Harsh Patel
+ * SPDX-License-Identifier: MIT */
+
 /* Save points (save_point.h): each record in two slot files, written alternately, each carrying a
  * sequence number and a CRC, so that the newest record that checks out is always one that was
  * written completely.

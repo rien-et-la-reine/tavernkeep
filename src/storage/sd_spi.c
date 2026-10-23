@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
+
 #include "storage/sd_spi.h"
 
 #include <stddef.h>

@@ -1,3 +1,6 @@
+/* SPDX-FileCopyrightText: 2026 Harsh Patel
+ * SPDX-License-Identifier: MIT */
+
 #ifndef TAVERNKEEP_USB_MSC_DISK_H
 #define TAVERNKEEP_USB_MSC_DISK_H
 

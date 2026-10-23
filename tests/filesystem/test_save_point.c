@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
+
 //tests for src/storage/save_point.c through its interface (save_point.h), with the real filesystem layer,
 //adapter and FatFs underneath and the fake block device at the bottom
 //

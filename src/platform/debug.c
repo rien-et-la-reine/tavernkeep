@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
+
 #include "platform/debug.h"
 
 #include <stdarg.h>

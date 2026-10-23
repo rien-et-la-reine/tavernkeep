@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
+
 //wall-clock time
 //
 //see clock.h for why the clock is not valid on the development hardware. FatFs's time seam,

@@ -1,3 +1,6 @@
+/* SPDX-FileCopyrightText: 2026 Harsh Patel
+ * SPDX-License-Identifier: MIT */
+
 #ifndef TAVERNKEEP_STORAGE_STORAGE_H
 #define TAVERNKEEP_STORAGE_STORAGE_H
 

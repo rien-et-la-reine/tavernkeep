@@ -1,3 +1,6 @@
+/* SPDX-FileCopyrightText: 2026 Harsh Patel
+ * SPDX-License-Identifier: MIT */
+
 #ifndef TAVERNKEEP_USB_USB_MODE_H
 #define TAVERNKEEP_USB_USB_MODE_H
 

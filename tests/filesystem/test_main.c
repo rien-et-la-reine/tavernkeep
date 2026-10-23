@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
+
 //runner for the filesystem-layer host tests
 //
 //usage: fs_tests [--list] [--shuffle SEED] [--no-fork] [--selftest] [NAME_SUBSTRING...]

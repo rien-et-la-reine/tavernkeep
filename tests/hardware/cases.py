@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Harsh Patel
+# SPDX-License-Identifier: MIT
+
 """The hardware test cases: everything the validation records (VAL-H04 to VAL-H06) need that takes no
 hands on the card.
 

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Harsh Patel
+# SPDX-License-Identifier: MIT
+
 """Mutation testing for the storage-layer tests.
 
 Each mutation plants one deliberate bug in a copy of src/storage/filesystem.c, diskio.c or storage.c, or

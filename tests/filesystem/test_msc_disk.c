@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
+
 //tests for src/usb/msc_disk.c, the disk the USB mass-storage class presents to a host, through
 //msc_disk.h, with the real storage coordinator lending the fake card
 //

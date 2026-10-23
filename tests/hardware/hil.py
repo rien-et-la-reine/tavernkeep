@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Harsh Patel
+# SPDX-License-Identifier: MIT
+
 """Hardware-in-the-loop plumbing for the Tavernkeep hardware tests.
 
 Everything goes through OpenOCD's Tcl RPC port: flashing, reset, hardware breakpoints, register reads,

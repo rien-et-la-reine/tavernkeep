@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
+
 //glue layer for FatFs
 //
 //implements the five disk_*() functions FatFs calls over the block-device interface. this file replaces the

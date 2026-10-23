@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Harsh Patel
+# SPDX-License-Identifier: MIT
+
 # Locate an existing Pico SDK without downloading or hard-coding a host path.
 # The SDK's supported importer performs the actual CMake integration.
 

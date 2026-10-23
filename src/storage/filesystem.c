@@ -1,3 +1,6 @@
+/* SPDX-FileCopyrightText: 2026 Harsh Patel
+ * SPDX-License-Identifier: MIT */
+
 /* Filesystem layer: the only code that calls FatFs.
  *
  * upper layers -> filesystem.c -> FatFs (ff.c) -> diskio.c -> block device

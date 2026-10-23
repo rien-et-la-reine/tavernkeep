@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
+
 #include <stdbool.h>
 
 #include "storage/sd_crc.h"

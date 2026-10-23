@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
+
 //tests for src/storage/filesystem.c through its public interface (filesystem.h), with the real adapter
 //and FatFs underneath and the fake block device at the bottom
 //

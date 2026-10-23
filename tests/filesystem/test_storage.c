@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
+
 //tests for src/storage/storage.c, the storage coordinator, through storage.h, with the real filesystem
 //layer, adapter and FatFs underneath and the fake card at the bottom
 //

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-FileCopyrightText: 2026 Harsh Patel
+# SPDX-License-Identifier: MIT
+
 """Run the Tavernkeep hardware tests on a Pico 2 through the Raspberry Pi Debug Probe.
 
     python3 tests/hardware/run.py                    # every core and removal case

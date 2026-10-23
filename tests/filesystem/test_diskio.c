@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
+
 //tests for src/storage/diskio.c, the FatFs disk I/O adapter, driven directly through the disk_*()
 //functions FatFs calls. expected values come from the mapping and status tables in diskio.c's header
 //comment and from FatFs's documented disk I/O contract (third_party/fatfs/documents/doc/dio*.html),

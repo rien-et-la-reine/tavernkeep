@@ -1,3 +1,6 @@
+/* SPDX-FileCopyrightText: 2026 Harsh Patel
+ * SPDX-License-Identifier: MIT */
+
 /* USB-mode policy (usb_mode.h).
  *
  * State, all private to this file but the request:

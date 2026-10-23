@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
+
 #ifndef TAVERNKEEP_TESTS_FILESYSTEM_FAKE_PLATFORM_H
 #define TAVERNKEEP_TESTS_FILESYSTEM_FAKE_PLATFORM_H
 

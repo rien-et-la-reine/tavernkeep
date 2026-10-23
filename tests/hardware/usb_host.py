@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Harsh Patel
+# SPDX-License-Identifier: MIT
+
 """The bench computer's side of the USB cases: the device as a Linux host sees it.
 
 The Pico 2's USB port must be connected to the computer running the tests. The disk is found by its

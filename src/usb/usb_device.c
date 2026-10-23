@@ -1,3 +1,6 @@
+/* SPDX-FileCopyrightText: 2026 Harsh Patel
+ * SPDX-License-Identifier: MIT */
+
 /* USB device (usb_device.h): the descriptors and TinyUSB callbacks for one mass-storage interface, each
  * callback handing straight on to msc_disk.h.
  *

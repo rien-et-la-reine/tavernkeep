@@ -1,3 +1,6 @@
+/* SPDX-FileCopyrightText: 2026 Harsh Patel
+ * SPDX-License-Identifier: MIT */
+
 /* USB mass-storage disk (msc_disk.h).
  *
  * State, all private to this file:

@@ -22,8 +22,7 @@ How it is built (`CMakeLists.txt`):
 - `get_fattime()`, FatFs's time source, is supplied by
   `src/storage/filesystem.c` from `platform/clock.h`.
 
-Host tests for the layer, including FatFs, live in `tests/filesystem/` (kept
-locally, not in the repository).
+Host tests for the layer, including FatFs, live in `tests/filesystem/`.
 
 FatFs config options changed from default (`source/ffconf.h`):
 - FF_CODE_PAGE: 437 (US, smaller than JIS, only comes up for files without long names, long names use unicode regardless)

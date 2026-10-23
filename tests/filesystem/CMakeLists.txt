@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Harsh Patel
+# SPDX-License-Identifier: MIT
+
 # Host tests for the storage layer above the SD driver (src/storage/filesystem.c, diskio.c, storage.c, save_point.c) and the USB
 # mass-storage disk and USB-mode policy over it (src/usb/msc_disk.c, usb_mode.c), running the real
 # FatFs over a RAM-backed fake block device. Standalone for now; see README.md.

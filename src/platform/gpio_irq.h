@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
+
 #ifndef TAVERNKEEP_PLATFORM_GPIO_IRQ_H
 #define TAVERNKEEP_PLATFORM_GPIO_IRQ_H
 
