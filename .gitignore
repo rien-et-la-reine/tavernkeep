@@ -28,3 +28,7 @@ CLAUDE.md
 # Python caches, and the hardware tests' results (the logs of each run)
 __pycache__/
 /tests/hardware/results/
+
+# Books stay out of the repository, except the one committed test fixture
+*.epub
+!/tests/epub/fixtures/pride-and-prejudice.epub

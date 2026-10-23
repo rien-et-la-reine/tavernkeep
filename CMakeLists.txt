@@ -69,6 +69,9 @@ set(TAVERNKEEP_SOURCES
     src/storage/sd_crc.c
     src/storage/storage.c
     src/storage/save_point.c
+    src/epub/byte_source.c
+    src/epub/zip.c
+    src/epub/inflate.c
 )
 if(TAVERNKEEP_USB_MSC)
     list(APPEND TAVERNKEEP_SOURCES
