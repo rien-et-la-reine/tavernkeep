@@ -1,5 +1,8 @@
-/* Zip reader (zip.h).
- *
- * TODO: implement the interface in zip.h. Nothing here yet. */
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
 
-#include "epub/zip.h"
+/* Zip reader (bartap/zip.h).
+ *
+ * TODO: implement the interface in bartap/zip.h. Nothing here yet. */
+
+#include "bartap/zip.h"

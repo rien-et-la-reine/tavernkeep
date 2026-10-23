@@ -1,6 +1,9 @@
-//runner for the EPUB container-layer host tests, adapted from tests/filesystem/test_main.c
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
+
+//runner for Bartap's host tests, adapted from the tavernkeep firmware's storage-layer tests
 //
-//usage: epub_tests [--list] [--shuffle SEED] [--no-fork] [--selftest] [NAME_SUBSTRING...]
+//usage: bartap_tests [--list] [--shuffle SEED] [--no-fork] [--selftest] [NAME_SUBSTRING...]
 //  --list       print the case names and exit
 //  --shuffle    run the cases in an order derived from SEED, to expose hidden order dependencies
 //  --no-fork    run the selected cases in this process, for a debugger

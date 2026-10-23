@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Generate inputs for the EPUB container-layer host tests.
+# SPDX-FileCopyrightText: 2026 Harsh Patel
+# SPDX-License-Identifier: MIT
+"""Generate inputs for Bartap's host tests.
 
 Writes raw DEFLATE streams and small zip archives, each with what reading it must give, into a build
 directory (never the source tree), and a manifest.json that lists and describes every case. Uses only
 the standard library.
 
-    python3 tests/epub/make_fixtures.py [--out DIR]
+    python3 tests/make_fixtures.py [--out DIR]
 
-The default DIR is build-epub-tests/generated, the directory the host-test build itself uses, which
-.gitignore already covers (/build-*/). The CMake build runs this script whenever it changes.
+Paths are relative to Bartap's root. The default DIR is build/tests/generated, the directory a build in
+build/ itself uses, which Bartap's .gitignore already covers (/build*/). The CMake build runs this
+script whenever it changes.
 
 Layout of DIR:
 
@@ -29,8 +32,8 @@ hand-encoded stream, do not change.
 
 zlib is the oracle. Every valid stream is checked to decode to its expected output, every truncated one
 to be incomplete, and every invalid one to be rejected, before anything is written. For bit-flipped
-streams, whose damage is random, zlib's verdict is the expectation: inflate.h's acceptance rules are
-chosen to be exactly zlib's.
+streams, whose damage is random, zlib's verdict is the expectation: bartap/inflate.h's acceptance rules
+are chosen to be exactly zlib's.
 
 zlib cannot produce some cases (its matches never reach the full 32768-byte distance, and it chooses
 its own match lengths), so a small fixed-Huffman encoder here writes those by hand. It is an encoder
@@ -50,8 +53,8 @@ import zipfile
 import zlib
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-ROOT = os.path.normpath(os.path.join(HERE, "..", ".."))
-DEFAULT_OUT = os.path.join(ROOT, "build-epub-tests", "generated")
+ROOT = os.path.normpath(os.path.join(HERE, ".."))
+DEFAULT_OUT = os.path.join(ROOT, "build", "tests", "generated")
 
 SEED = 20261023
 
@@ -248,7 +251,7 @@ class Fixtures:
             with open(full, "wb") as f:
                 f.write(data)
         manifest = {
-            "about": "Inputs for the EPUB container-layer host tests, made by tests/epub/make_fixtures.py. "
+            "about": "Inputs for Bartap's host tests, made by tests/make_fixtures.py. "
                      "Paths are relative to this file.",
             "seed": SEED,
             "zlib": zlib.ZLIB_RUNTIME_VERSION,
@@ -504,7 +507,7 @@ CONTENT_OPF = b"""<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="uid">
 \t<metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
 \t\t<dc:identifier id="uid">urn:uuid:00000000-0000-4000-8000-000000000000</dc:identifier>
-\t\t<dc:title>Tavernkeep test fixture</dc:title>
+\t\t<dc:title>Bartap test fixture</dc:title>
 \t\t<dc:language>en</dc:language>
 \t\t<meta property="dcterms:modified">2026-01-01T00:00:00Z</meta>
 \t</metadata>

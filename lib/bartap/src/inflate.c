@@ -1,5 +1,8 @@
-/* Inflate (inflate.h).
- *
- * TODO: implement the interface in inflate.h. Nothing here yet. */
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
 
-#include "epub/inflate.h"
+/* Inflate (bartap/inflate.h).
+ *
+ * TODO: implement the interface in bartap/inflate.h. Nothing here yet. */
+
+#include "bartap/inflate.h"

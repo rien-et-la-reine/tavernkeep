@@ -31,4 +31,4 @@ __pycache__/
 
 # Books stay out of the repository, except the one committed test fixture
 *.epub
-!/tests/epub/fixtures/pride-and-prejudice.epub
+!/lib/bartap/tests/fixtures/pride-and-prejudice.epub

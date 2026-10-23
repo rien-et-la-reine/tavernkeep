@@ -1,7 +1,10 @@
-#ifndef TAVERNKEEP_TESTS_EPUB_HARNESS_H
-#define TAVERNKEEP_TESTS_EPUB_HARNESS_H
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
 
-//minimal test harness for the EPUB container-layer host tests, adapted from tests/filesystem/harness.h
+#ifndef BARTAP_TESTS_HARNESS_H
+#define BARTAP_TESTS_HARNESS_H
+
+//minimal test harness for Bartap's host tests, adapted from the tavernkeep firmware's storage-layer tests
 //
 //a test case is a void function listed in its test file's case table, and every table is registered in
 //test_main.c. EXPECT* records a failure and carries on; REQUIRE* records a failure and returns from the
@@ -10,9 +13,9 @@
 //because an early return or an empty loop skipped everything it was meant to verify.
 //
 //the build supplies two directories as string literals:
-//  EPUB_TESTS_FIXTURE_DIR    tests/epub/fixtures, the committed fixtures
-//  EPUB_TESTS_GENERATED_DIR  where make_fixtures.py wrote its inputs for this build (manifest.json
-//                            lists them)
+//  BARTAP_TESTS_FIXTURE_DIR    tests/fixtures, the committed fixtures
+//  BARTAP_TESTS_GENERATED_DIR  where make_fixtures.py wrote its inputs for this build (manifest.json
+//                              lists them)
 
 #include <stdbool.h>
 #include <stddef.h>

@@ -1,4 +1,7 @@
-//placeholder case for the EPUB host tests: it checks only that the build wiring is in place, that is,
+// SPDX-FileCopyrightText: 2026 Harsh Patel
+// SPDX-License-Identifier: MIT
+
+//placeholder case for Bartap's host tests: it checks only that the build wiring is in place, that is,
 //the committed fixture and the generated inputs are where the build says they are. replace or delete it
 //once real cases exist
 
@@ -18,8 +21,8 @@ static bool file_exists(const char *path)
 
 static void scaffold_fixtures_are_in_place(void)
 {
-    EXPECT(file_exists(EPUB_TESTS_FIXTURE_DIR "/pride-and-prejudice.epub"));
-    EXPECT(file_exists(EPUB_TESTS_GENERATED_DIR "/manifest.json"));
+    EXPECT(file_exists(BARTAP_TESTS_FIXTURE_DIR "/pride-and-prejudice.epub"));
+    EXPECT(file_exists(BARTAP_TESTS_GENERATED_DIR "/manifest.json"));
 }
 
 const test_case_t scaffold_tests[] = {

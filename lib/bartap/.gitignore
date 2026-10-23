@@ -1,0 +1,10 @@
+# SPDX-FileCopyrightText: 2026 Harsh Patel
+# SPDX-License-Identifier: MIT
+
+# Build output: build/ for a plain build, build-matrix/ for tests/run_matrix.py
+/build*/
+__pycache__/
+
+# Books stay out of the repository, except the one committed test fixture
+*.epub
+!/tests/fixtures/pride-and-prejudice.epub

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Harsh Patel
+# SPDX-License-Identifier: MIT
+
 # == DO NOT EDIT THE FOLLOWING LINES for the Raspberry Pi Pico VS Code Extension to work ==
 if(WIN32)
     set(USERHOME $ENV{USERPROFILE})
@@ -69,9 +72,7 @@ set(TAVERNKEEP_SOURCES
     src/storage/sd_crc.c
     src/storage/storage.c
     src/storage/save_point.c
-    src/epub/byte_source.c
-    src/epub/zip.c
-    src/epub/inflate.c
+    src/epub/bartap_adapter.c
 )
 if(TAVERNKEEP_USB_MSC)
     list(APPEND TAVERNKEEP_SOURCES
@@ -91,6 +92,32 @@ set(TAVERNKEEP_FATFS_SOURCES
     third_party/fatfs/source/ff.c
     third_party/fatfs/source/ffunicode.c
 )
+
+# Bartap, the EPUB container and package library, is a standalone CMake project under lib/bartap/
+# (its README.md), meant to move to its own repository. It builds as its own static library with its
+# own warnings; its host tests are off when it is a subproject. Everything platform-specific it needs -
+# a byte source over a file on the card, logging - is src/epub/bartap_adapter.c.
+add_subdirectory(lib/bartap)
+
+# Bartap's symbol check (lib/bartap/tests/check_symbols.cmake) over the Arm libbartap.a this build makes:
+# no writable data, and no calls beyond the <string.h> functions and the compiler's __aeabi_* helpers.
+# Its host tests check only a host build; this checks the code the firmware links. Runs whenever the
+# library is rebuilt, fails the build on a violation, and lists the symbols the library pulls in.
+set(TAVERNKEEP_BARTAP_SYMBOL_STAMP ${CMAKE_CURRENT_BINARY_DIR}/bartap_symbol_check.stamp)
+add_custom_command(
+    OUTPUT ${TAVERNKEEP_BARTAP_SYMBOL_STAMP}
+    COMMAND ${CMAKE_COMMAND}
+        -DNM=${CMAKE_NM}
+        -DLIBRARY=$<TARGET_FILE:bartap>
+        "-DOBJECTS=byte_source.c;zip.c;inflate.c"
+        -DEXPECT_VIOLATIONS=0
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/lib/bartap/tests/check_symbols.cmake
+    COMMAND ${CMAKE_COMMAND} -E touch ${TAVERNKEEP_BARTAP_SYMBOL_STAMP}
+    DEPENDS bartap ${CMAKE_CURRENT_SOURCE_DIR}/lib/bartap/tests/check_symbols.cmake
+    COMMENT "Checking libbartap.a's symbols"
+    VERBATIM
+)
+add_custom_target(bartap_symbol_check ALL DEPENDS ${TAVERNKEEP_BARTAP_SYMBOL_STAMP})
 
 add_executable(tavernkeep ${TAVERNKEEP_SOURCES} ${TAVERNKEEP_FATFS_SOURCES})
 
@@ -130,6 +157,7 @@ target_link_libraries(tavernkeep PRIVATE
     pico_stdlib
     hardware_gpio
     hardware_spi
+    bartap
 )
 
 target_compile_definitions(tavernkeep PRIVATE
