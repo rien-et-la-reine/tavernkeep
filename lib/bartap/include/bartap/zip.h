@@ -38,8 +38,15 @@
  *   through the byte source each time: an EPUB has tens to hundreds of
  *   entries, which is too much RAM to keep and too little time to matter.
  *   The layer above caches what it looks up often (the spine's entries).
- * - Names are compared byte for byte, case-sensitively, as OCF requires. They
- *   are UTF-8 in an EPUB; nothing is converted (Q15).
+ * - Names are compared byte for byte, case-sensitively, as OCF requires, with
+ *   memcmp, never strcmp (no str* function is used). They are UTF-8 in an
+ *   EPUB; nothing is converted (Q15).
+ * - Bytes read from the archive, entry names included, are uint8_t: Bartap's
+ *   own code inspects them (UTF-8 validation, path parsing), where plain
+ *   char's implementation-defined signedness matters. A string the caller
+ *   passes in only to be matched (bartap_zip_find's name) is const char *, so
+ *   a string literal needs no cast; memcmp compares bytes as unsigned char, so
+ *   its signedness never matters.
  * - Only what an EPUB needs is supported. Anything else is refused as
  *   BARTAP_ZIP_RESULT_UNSUPPORTED rather than misread: ZIP64 (Q13),
  *   encryption (flag bit 0), split archives, and methods other than stored
@@ -179,8 +186,10 @@ bartap_zip_result_t bartap_zip_next(
 /* Find the entry named name (UTF-8, NUL-terminated, not terminated by '/'
  * unless it names a directory entry). BARTAP_ZIP_RESULT_NOT_FOUND if there is
  * none. Built on bartap_zip_next, so it never matches an entry through a
- * truncated copy of its name (Q10). */
-bartap_zip_result_t bartap_zip_find(const bartap_zip_t *zip, const uint8_t *name, bartap_zip_entry_t *entry);
+ * truncated copy of its name (Q10). name's length is found by Bartap's own
+ * scan for the terminator, not strlen, and it is compared with each entry's
+ * name bytewise with memcmp. */
+bartap_zip_result_t bartap_zip_find(const bartap_zip_t *zip, const char *name, bartap_zip_entry_t *entry);
 
 /* ------------------------------------------------------------ entries */
 

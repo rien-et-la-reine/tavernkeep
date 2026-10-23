@@ -102,8 +102,11 @@ settled one moves here, naming its number.
     changes.
   - Language: ISO C11 without extensions (this settles Q16). Only `<stdint.h>`, `<stddef.h>`,
     `<stdbool.h>` and `<string.h>` (for memcpy, memset and memcmp).
-  - Byte data is `uint8_t`, never plain `char`, whose signedness C leaves to the implementation (it is
-    signed on x86 and unsigned on Arm and RISC-V).
+  - Bytes read from files are `uint8_t`, never plain `char`, whose signedness C leaves to the
+    implementation (it is signed on x86 and unsigned on Arm and RISC-V): Bartap's own code inspects them
+    (UTF-8 validation, path parsing), where that signedness matters. Strings a caller passes in only to
+    be matched are `const char *`, so callers can pass string literals without casts; Bartap compares
+    them with memcmp, which compares as unsigned char, so their signedness never matters.
   - Values in files are decoded byte by byte, with no assumptions about byte order or alignment.
 - Rationale: Platform independence becomes a property of the code rather than of a list of tested
   platforms.

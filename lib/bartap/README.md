@@ -29,8 +29,9 @@ the header and memory rules mechanically.
   and provides all working memory and output buffers (D3).
 - **I/O:** only through callbacks the caller supplies (D4).
 - **Errors:** result codes. Nothing in the library aborts or asserts.
-- **Bytes:** byte data is `uint8_t`, never plain `char`, and values in files are decoded byte by byte,
-  with no assumptions about byte order or alignment (D7).
+- **Bytes:** bytes read from files are `uint8_t`, never plain `char`, and values in files are decoded
+  byte by byte, with no assumptions about byte order or alignment. Strings a caller passes in only to
+  be matched are `const char *`, compared with `memcmp` (D7).
 - **Bounded work:** every streaming call does a bounded amount of work and returns. Each header says
   which of its calls run to completion instead (D5).
 
