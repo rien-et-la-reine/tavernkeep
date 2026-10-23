@@ -37,7 +37,8 @@ the user to format as FAT32 on a computer.
 Planned work, none of which is implemented yet:
 
 1. Native 4-bit SD using PIO on the custom hardware
-2. USB mass-storage class (the storage ownership model it plugs into exists)
+2. USB mass-storage class, entered automatically when a host configures the
+   device (the storage ownership model it plugs into exists)
 3. E-paper display driver and update scheduling
 4. Encoder/button input and event handling
 5. I2S audio transfers using DMA

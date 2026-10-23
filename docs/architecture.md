@@ -110,7 +110,7 @@ The final physical control scheme has not yet been selected. Two rotary encoders
 
 USB mass-storage access to Tome's removable storage is a required feature.
 
-USB mass storage is an exclusive operating mode: while a USB host has the storage, no local reading or playback runs, and vice versa. Coordination with local filesystem access is therefore a mode transition, not concurrent sharing; see "Operating Modes and Storage Ownership". The USB class implementation itself has not yet been defined.
+USB mass storage is an exclusive operating mode: while a USB host has the storage, no local reading or playback runs, and vice versa. Coordination with local filesystem access is therefore a mode transition, not concurrent sharing; see "Operating Modes and Storage Ownership". The class is TinyUSB's mass-storage device, from the Pico SDK, over the bare block device; when the device enters and leaves USB mode is set out under "USB Mode Entry and Exit". Both the class and the policy that decides when to lend it the card are implemented (see "USB mass-storage disk" and "USB-mode policy" under Major Interfaces); entry is by request until automatic entry is added.
 
 **Power / System Operation**
 
@@ -204,7 +204,7 @@ Its state is two values. The *owner* is who may use the card: the filesystem lay
 - **The epoch** is a counter that changes whenever something a consumer may have cached stops being valid: whenever the medium stops being ready for its owner, and on every owner change. Consumers record it with what they cache and discard the cache when it differs; it is readable from either core. Stale filesystem handles enforce the same thing as a backstop.
 - **Release** is the change to the none owner. It unmounts with no I/O and deinitializes the card cleanly: unlike the removal path, the card is present, so the driver waits out any programming busy, and once the deinit succeeds the card can lose power safely. A card being settled or brought up is dropped. While released, bring-up stops and the socket is not watched, so an idle step costs nothing. A card that stays busy is retried at the retry interval, `STORAGE_RELEASE_ATTEMPTS` times, and the request stays pending until it succeeds; after the last attempt the medium is reported faulty with the card still held, the request stops being pending, and whether to cut the rail anyway is the power manager's decision. A removal still releases a held card through the latch. Leaving the none owner treats whatever is in the socket as a card just inserted, settle wait included, because the rail was probably off and the card may have been swapped.
 
-The coordinator is built for the consumers it does not have yet. A consumer that must reach a safe point before a transition - persistent state written before a USB handover, the audio stream stopped - adds that check where requests are carried out, and the request simply stays pending until it passes; the interface does not change. Bounded service work for consumers, such as the audio stream's read-ahead into the decoder's ring, has a marked place at the end of the step, after transitions, so it never runs against a card that is being lost or handed over. The USB mass-storage class will take the device from `storage_usb_device` and compare epochs to report a medium change to the host.
+The coordinator is built for the consumers it does not have yet. A consumer that must reach a safe point before a transition - persistent state written before a USB handover, the audio stream stopped - adds that check where requests are carried out, and the request simply stays pending until it passes; the interface does not change. Bounded service work for consumers, such as the audio stream's read-ahead into the decoder's ring, has a marked place at the end of the step, after transitions, so it never runs against a card that is being lost or handed over. The USB mass-storage disk takes the device from `storage_usb_device` and compares epochs to report a medium change to the host (see below).
 
 **Save points**
 
@@ -215,6 +215,27 @@ The coordinator is built for the consumers it does not have yet. A consumer that
 - A read checks both slots and returns the valid one with the higher sequence number. A slot that is missing, short, the wrong length or fails its CRC holds no record; it is not an error. A slot the card fails to read is read once more, so a passing error changes nothing; one that fails again, while the other can be read, is not an error either: the read returns the other's record, and the next save rewrites the unreadable slot, which repairs it. Sequence numbers are compared across a wrap.
 - An interrupted save can damage only the slot it was rewriting, which then fails its checks, so a read still finds the previous record - or, if the slot holding that record could not be read when the save began, the newest record the card could still read. That holds for the very first save too: it leaves no valid record, and the read reports that there is none, rather than returning a partial one.
 - Nothing is renamed or removed. FatFs writes a renamed entry's new name before removing the old one, so an interrupted rename can leave two names sharing one cluster chain, and removing either then frees the other's data (`filesystem_rename` in `filesystem.h`). An earlier temporary-file-and-rename scheme was replaced for that reason, and because an interrupted first save left only an incomplete temporary that its recovery rule would have promoted.
+
+**USB mass-storage disk**
+
+`src/usb/msc_disk.h` is the disk a USB host sees: SCSI semantics over the block device the coordinator lends to the USB owner. It holds no device and changes no owner; each command asks `storage_usb_device()` for the device afresh. `src/usb/usb_device.c` is the TinyUSB side - the descriptors and the mass-storage callbacks, each handing straight on to `msc_disk` - so that `msc_disk` builds without TinyUSB and runs in the host tests over the real coordinator.
+
+- **No medium** (NOT READY, MEDIUM NOT PRESENT) whenever `storage_usb_device()` is NULL: before a handover, with no card or a faulty one, while a card is brought up, after the card has gone back to the local owner. A card that a transfer finds removed counts as no medium at once, for every command, without waiting for the coordinator's next step to notice the removal.
+- **UNIT ATTENTION** (NOT READY TO READY CHANGE) on the first command that finds a medium the host has not been told about, which the host then retries. The disk records the epoch of the medium it presented, so the first lend, a reinsertion during USB mode and a new handover are each announced, even if the host sent nothing while the card was away.
+- **Transfers** arrive one TinyUSB buffer at a time (`CFG_TUD_MSC_EP_BUFSIZE`, 4 KiB, eight blocks), each one multi-block read or write. Writes are synced (`block_device_sync`) before they complete, so the host is told data is written only when it is on the card, and SYNCHRONIZE CACHE succeeds with nothing to do. Failures map to SCSI sense: a removal to no medium, a medium failure or busy timeout to UNRECOVERED READ ERROR or WRITE ERROR, an address outside the medium to LBA OUT OF RANGE (refused before the device is asked), a fault of the firmware's own to INTERNAL TARGET FAILURE. TinyUSB 0.18 overwrites the sense of every failed READ (10) or WRITE (10) with MEDIUM NOT PRESENT after the callback returns, so `usb_device.c` keeps the real sense and writes it into the answer to the host's next REQUEST SENSE.
+- **Capacity** is offered through READ CAPACITY (10), which carries the last block in 32 bits: a 2 TB card, 2^32 blocks, is offered one block short.
+- **Eject** (START STOP UNIT with LoEj set and Start clear) withholds the medium until the epoch moves on, and is recorded for the USB-mode policy (`msc_disk_take_eject`), whose job it is to return the card to the local owner. A load is accepted and changes nothing; PREVENT ALLOW MEDIUM REMOVAL likewise, since the socket has no lock.
+
+The device descriptor uses TinyUSB's example vendor and product IDs, which are for development only; a device given to anyone else needs IDs of its own. The serial number is the flash chip's unique ID.
+
+**USB-mode policy**
+
+`src/usb/usb_mode.h` decides when the card is lent to USB and when it comes back, as set out under "USB Mode Entry and Exit", and asks the coordinator through `storage_request_owner`; it holds no device and does no I/O. Its step takes one sample of the VBUS sense pin (`board_vbus_present`) and whether a host has the device configured (`tud_mounted`), and returns whether the device should be on the bus, which `usb_device_attach` applies.
+
+- **Entry** is by request: `usb_mode_request`, written by the GDB harness, asks for it, and the card is lent once a host has the device configured. Automatic entry on configuration waits for the consumer safe-point hook (see the work list under "USB mass storage" in Planned / Future Architecture).
+- **The card comes back** on an eject (`msc_disk_take_eject`), on the cable's removal, when the host stops having the device configured (a bus reset, or unconfiguring it), or on request. A host that suspends the bus keeps the card.
+- **VBUS** is believed once it has read the same for `USB_MODE_VBUS_DEBOUNCE_MS` (50 ms). The device is on the bus while the cable is there. TinyUSB forces the controller's own VBUS detection on, so without the pin the device could not tell a removed cable from an idle host; on a board without VBUS sensing the cable is taken to be always there.
+- It logs each decision (`usb: ...`): a host configuring the device or leaving, the cable, an entry asked for, the card lent, and the card returned with the reason. The hardware tests key on these lines.
 
 *Other subsystem interfaces*
 
@@ -342,7 +363,38 @@ From the filesystem layer's point of view, entering USB mode is indistinguishabl
 
 The one function is `save_point_write` (see "Save points" under Major Interfaces). Each save rewrites whichever of a record's two slot files does not hold the newest valid copy, so an interruption at any moment - a removal, a USB handover forced by a cable, a power loss - leaves the previous record readable, and a read never returns a partly written one.
 
-**How USB mode is selected** - automatically on host enumeration, by prompt, or by menu - is an open product decision (`requirements.md`, OPEN-002). It decides whether reader or audio mode can be interrupted by a cable, in which case the interruption is one more caller of the ownership transition above.
+**USB mode is entered automatically** when a host configures the device (`requirements.md`, FR-010), so a cable can interrupt reader or audio mode. That interruption is one more caller of the ownership transition above; how the device tells a host from a charger, and when it hands the card over and takes it back, is the next section.
+
+## USB Mode Entry and Exit
+
+Plugging in a cable does not by itself mean a host wants the storage: a wall charger, a cable without data lines, a powered-off computer and a locked phone all supply VBUS and never talk. The device therefore keeps the card where it is when VBUS appears, and hands it to the mass-storage class only once a host has configured the device. A charger never reaches that point, so it never interrupts reading or playback.
+
+**The policy is separate from the handover.** A small USB-mode policy, run as a bounded step in the cooperative loop, watches VBUS and the USB stack and decides when to ask for an owner. The asking is always `storage_request_owner`, the same call every other ownership change uses; the policy holds no block device and does no I/O. That separation is what lets the test build swap the trigger (below) without touching the handover.
+
+**Entering:**
+
+1. VBUS rises (seen on the VBUS sense pin, debounced). The policy connects the device to the bus (`tud_connect`); the card stays with its current owner.
+2. A host shows itself by resetting the bus and sending its first request (`tud_connected`). If none does within a bounded time, the connection is taken to be a charger: the policy disconnects from the bus and the device carries on charging, with the USB controller idle until VBUS next rises. The time is a named constant to be set by measurement; a host normally starts within a few hundred milliseconds of attach.
+3. The host configures the device (`tud_mount_cb`). The policy asks the active mode to reach a save point - the consumer safe-point hook, which the power manager needs too (see "Power management") - and then requests `STORAGE_OWNER_USB`. Configuration rather than the first request is the trigger because a host that resets the bus but never configures (a charging port with data lines, some hubs) does not want the storage either.
+4. Until `storage_usb_device()` returns the block device (the USB owner, with the medium READY), the class answers the host as an empty card reader does: TEST UNIT READY fails with NOT READY, MEDIUM NOT PRESENT (sense 02h/3Ah/00h). Once it has the device, the next command gets UNIT ATTENTION, NOT READY TO READY CHANGE (06h/28h/00h), and the host mounts the volume. The class records `storage_epoch()` with the device and treats any change in it as the medium having changed, so a removal and reinsertion in USB mode reaches the host as a new medium rather than as the old one with its caches still valid.
+
+The host can therefore enumerate the device before the card is released; it sees a reader with no card, not an error.
+
+**Leaving:**
+
+- **The host ejects** (START STOP UNIT with LoEj set and Start clear): the policy requests `STORAGE_OWNER_LOCAL`, and the class reports MEDIUM NOT PRESENT again. The device stays on the bus, so it keeps charging and can be used in the meantime (FR-010). It does not re-enter USB mode until the cable is next connected.
+- **The cable is removed** (VBUS falls): the policy disconnects from the bus and requests `STORAGE_OWNER_LOCAL`. The coordinator mounts the card as a new medium, as step 5 of the ownership transition requires, since the host may have changed anything and may not have finished writing.
+- **The host stops having the device configured** (it reset the bus or unconfigured the device, with the cable still in): the policy requests `STORAGE_OWNER_LOCAL` and the device stays on the bus.
+- **The host suspends the bus** (a computer going to sleep with VBUS kept up): the device stays in USB mode. Taking the card back while the host may still hold writes in its cache is how volumes are corrupted; the host resumes or the cable is removed.
+- **The card is removed in USB mode:** the removal latch fails every block operation, and the class reports MEDIUM NOT PRESENT, as under "Operating Modes and Storage Ownership". A card inserted while USB mode lasts is brought up for the USB owner.
+
+PREVENT ALLOW MEDIUM REMOVAL is accepted and ignored: the socket has no lock, and a removal is handled the same way whether or not the host asked to prevent it.
+
+**USB mode is entered by hand for now.** Until the safe-point hook and the reader and audio modes exist, there is no automatic entry: the GDB harness writes `usb_mode_request` (`usb_mode.h`), and the policy's next step carries it out as step 3 will, through `storage_request_owner`, once a host has the device configured. Leaving is requested the same way, or by ejecting on the host. No RTT input is read by the firmware. The Pico 2 is powered from a computer's USB port for these runs, so a host is always present and the device is always configured; without the request it remains a reader with no card. That also means a cable removal cannot be tried on that bench: pulling the cable is a power cut. Trying it needs the Pico 2 powered through VSYS as well.
+
+**USB stdio is unavailable in a build with the mass-storage class.** TinyUSB's device stack has one owner, and its descriptors are the mass-storage class's; stdio stays on RTT (`TAVERNKEEP_STDIO_RTT`) or UART, and `TAVERNKEEP_STDIO_USB` is refused alongside it.
+
+**Throughput** in USB mode is set by the SD transport, not by USB: full-speed USB carries roughly 1 MB/s of mass-storage traffic, and the SPI backend writes about 0.5 MB/s at 25 MHz (see `validation.md`, Measurements). The 4-bit backend is what would make USB the limit.
 
 ## Removable-Media Detection and Hot Removal
 
@@ -422,9 +474,9 @@ Current SD communication is synchronous and blocking. Individual SPI transfers a
 
 The initial storage implementation intentionally uses polling rather than DMA.
 
-`src/main.c` is the demo of the highest layer that currently works, replaced as each layer lands: today it runs the storage coordinator in the loop, logs every change of owner, medium and epoch, and each time the card becomes ready runs a filesystem demo (label, root listing, a counter read from and saved through a save point, and a 16 KiB file written and read back in single calls so that FatFs issues multi-block transfers) whose steps are reported over RTT.
+`src/main.c` is the demo of the highest layer that currently works, replaced as each layer lands: today it runs the USB device and the storage coordinator in the loop, logs every change of owner, medium and epoch, and each time the card becomes ready runs a filesystem demo (label, root listing, a counter read from and saved through a save point, and a 16 KiB file written and read back in single calls so that FatFs issues multi-block transfers) whose steps are reported over RTT. While a USB host is on the bus the loop does not idle between passes: each of the host's commands waits for the next call into TinyUSB's task, and a mass-storage READ (10) or WRITE (10) is carried out inside that task, one 4 KiB buffer per call.
 
-Two test suites live in `tests/`. The host tests (`tests/filesystem/`) are unit and contract tests of the save points, the coordinator, the filesystem layer and the adapter, with the real FatFs over a RAM-backed fake card that follows the SD driver's contract. They cover what hardware cannot reach precisely - a failure at every write, retry timing to the millisecond, every result path - and mutation testing checks that they catch planted bugs. The hardware tests (`tests/hardware/`) run the demo on a Pico 2 through the Debug Probe, injecting removals and errors at breakpoints, and ask a person at the bench for physical removals; they produce the runs in `docs/validation.md`. The card model, a host simulation of an SD card that `main.c` was compiled against so that host and hardware logs compare directly, is kept on another machine and has not yet been run against the filesystem layer and the coordinator, so the current demo has not run on it.
+Two test suites live in `tests/`. The host tests (`tests/filesystem/`) are unit and contract tests of the save points, the coordinator, the filesystem layer and the adapter, and of the USB mass-storage disk over the coordinator, with the real FatFs over a RAM-backed fake card that follows the SD driver's contract. They cover what hardware cannot reach precisely - a failure at every write, retry timing to the millisecond, every result path - and mutation testing checks that they catch planted bugs. The hardware tests (`tests/hardware/`) run the demo on a Pico 2 through the Debug Probe, injecting removals and errors at breakpoints, and ask a person at the bench for physical removals; they produce the runs in `docs/validation.md`. The card model, a host simulation of an SD card that `main.c` was compiled against so that host and hardware logs compare directly, is kept on another machine and has not yet been run against the filesystem layer and the coordinator, so the current demo has not run on it.
 
 DMA is planned for bulk storage transfers after the polling implementation has been validated.
 
@@ -511,6 +563,18 @@ enough to justify a separate decision-record system.
 
 - Consequences and tradeoffs: Input architecture should not become unnecessarily coupled to an unfinalized physical control arrangement during early development.
 
+### Decision — Enter USB mode automatically, once a host configures the device
+
+- Context: FR-010 requires USB mass-storage access as an exclusive mode, and the same connector charges the device. A cable may lead to a host that wants the storage, or only to a supply.
+
+- Decision: Connect to the bus whenever VBUS is present, and hand the card to the mass-storage class when a host configures the device, with no prompt. A connection on which no host appears within a bounded time is a charger and changes nothing. Leave USB mode on eject or cable removal.
+
+- Rationale: Copying files is the reason to connect to a computer, so asking first adds a step to every transfer. Waiting for configuration, rather than acting on VBUS, keeps chargers and data-less cables from ever interrupting reading or playback, and needs no extra hardware beyond VBUS sensing.
+
+- Alternatives considered: A prompt on the displays when a host appears; an explicit menu action; entering on VBUS alone.
+
+- Consequences and tradeoffs: Connecting to a computer only to charge interrupts reading or playback until the host ejects the storage. Reader and audio modes must reach a save point on an outside request at any time (the consumer safe-point hook). The device must sense VBUS.
+
 ## Hardware Assumptions Relevant to Firmware
 
 **Processor**
@@ -569,7 +633,13 @@ Two rotary encoders with push input have been explored but are not currently a f
 
 Tome provides USB connectivity and is required to support USB mass-storage access to removable storage.
 
-Ownership of the storage during this access is defined under "Operating Modes and Storage Ownership"; how USB mode is selected remains open.
+Ownership of the storage during this access is defined under "Operating Modes and Storage Ownership", and when the device enters and leaves USB mode under "USB Mode Entry and Exit".
+
+The firmware needs to see VBUS to know a cable is connected: TinyUSB forces the controller's own VBUS detection on, so the controller never sees a cable go. The Pico 2 brings VBUS to GPIO 24 through a divider (`PICO_VBUS_PIN` in the SDK's board header), which `board_vbus_present` reads; the final board needs the same, a divider from VBUS to a GPIO that stays readable with the peripheral rail off. Its values, 5.6 kΩ over 8.2 kΩ, and the reasons for them are in the board design notes under "Power management".
+
+**Battery and charging**
+
+Tome runs from a single-cell lithium-ion battery charged from USB. The charger IC has not been selected. A power-path charger is preferred, one that supplies the device from USB separately from the battery's charge current: with a charger whose load sits directly on the battery, a device in use while charging can draw more than the charger's termination current, so the charge never ends and the battery is held at full voltage. How the battery level is measured, and how charge status reaches the firmware, depend on that choice and have not been decided.
 
 ## Known Architectural Limitations
 
@@ -585,7 +655,9 @@ At the current stage:
 
 - DMA-based storage transfer has not yet been implemented
 
-- the USB mass-storage class has not yet been implemented; the storage coordinator's handover to it has
+- USB mode is entered only on request (`usb_mode_request`, from GDB): automatic entry waits for the consumer safe-point hook, and the charger timeout with it. A cable's removal has run only in the host tests
+
+- the USB device descriptor still uses TinyUSB's example vendor and product IDs; they must be replaced with IDs of our own before any device is distributed
 
 - the final physical input hardware has not been selected
 
@@ -649,7 +721,12 @@ Buffering, DMA use, timing, decoder selection or implementation, and interaction
 
 USB mass-storage access to removable storage is required.
 
-The ownership model between the USB host and Tavernkeep's own filesystem access is defined under "Operating Modes and Storage Ownership"; the mass-storage class itself remains to be designed.
+The ownership model between the USB host and Tavernkeep's own filesystem access is defined under "Operating Modes and Storage Ownership", and entry and exit under "USB Mode Entry and Exit". The work, in order:
+
+1. done: TinyUSB in device mode with a mass-storage-only configuration, its read, write, capacity and sense callbacks over `storage_usb_device()`, write-through, with block-device results mapped to SCSI sense (see "USB mass-storage disk" under Major Interfaces; VAL-H08, VAL-H09)
+2. done: the USB-mode policy with the hand trigger the hardware tests use (`usb_mode_request`, written by GDB), and VBUS sensing for cable removal (see "USB-mode policy" under Major Interfaces)
+3. done but for the cable: host tests of the policy's transitions; hardware cases (the `usb` group) for entering by request, a copy from the computer and an eject, leaving by request, and a removal of the card while the host has the storage (VAL-H09). A cable removal is host-tested only, since the bench Pico 2 is powered through its cable
+4. automatic entry on configuration, with the charger timeout, once the consumer safe-point hook exists
 
 **Power management**
 
@@ -676,6 +753,10 @@ Waking therefore takes the settle wait plus the card's own initialization before
 - pull-ups on the SD lines (DO, CS, and the data lines) belong on the switched rail, not on the microcontroller's 3.3 V, so that they cannot back-power an unpowered card. The internal pull-ups `main.c` enables on DO and CS are breadboard stand-ins and go away with them. The card-detect switch is the exception: it has to be readable with the rail off, so its pull-up stays on the microcontroller side
 - switching the rail on charges the bulk capacitance of everything on it at once. A bare MOSFET can sag the shared 3.3 V enough to brown out the RP2350 on wake; a load switch with a controlled turn-on time, or a slowed gate drive, avoids it
 - an SD card needs its supply to fall close to zero, and stay there briefly, before it is powered again, or it may not reset cleanly. Sleep satisfies that naturally, but the power manager needs a minimum off time for any quick off-and-on, and the rail must actually discharge when switched off, which may need a weak pull-down on it
+- VBUS reaches a GPIO through a divider powered by VBUS itself, not by the peripheral rail, so that the firmware sees a cable whatever the rail's state. Whether a cable should wake the device is open; if it should, the pin is also a wake source, and the wake sequence then continues into "USB Mode Entry and Exit"
+- the VBUS divider is 5.6 kΩ from VBUS to the pin and 8.2 kΩ from the pin to ground, a ratio of about 0.59: 3.1 V at the pin at 5.25 V, the top of the USB range, and about 2.6 V at a sagging 4.4 V, both clear highs, and never above the pin's own 3.3 V supply. The pin is a digital input with its pulls disabled (the pull-down every pad has at reset, in parallel with the 8.2 kΩ, would lower the high level) and an edge interrupt, debounced in software. A 10-100 nF capacitor from the pin to ground may be added to filter the ringing of a plug-in; its time constant, under 0.5 ms, does not slow detection
+- the divider's low resistance is deliberate. Erratum RP2350-E9, on the A2 stepping, makes a pad with its input buffer enabled leak enough to hold a weakly pulled-down node near 2 V, where it reads high: with a divider of hundreds of kΩ, removing the cable would go unseen. The errata's workaround is a pull-down of 8.2 kΩ or less (to be confirmed against the errata for the stepping fitted), and the A2 stepping cannot be ruled out for Tome. The cost is about 0.36 mA, drawn from USB and only while a cable is connected. The 5.6 kΩ still limits the current into the pin's clamp diodes from a plug-in overshoot (a cable hot-plugged into ceramic input capacitors can ring to 8-10 V) to about 1 mA; the resistances should not go much lower than a few kΩ
+- the VBUS net must carry nothing but VBUS. If anything on the board can drive it from the battery side - a boost converter, USB OTG, a diode-OR into the 5 V net, or a charger that feeds its own input - the divider becomes a constant drain on the battery and reports a cable that is not there. This constrains the choice of charger (see "Battery and charging" under Hardware Assumptions)
 - the development socket's detect switch closes to ground when the socket is empty, so an empty socket draws about 66 µA through the card-detect pull-up for as long as the device sleeps. Whether insertion should wake the device is still open; if it should not, either the driver switches that pull-up off during sleep (a small addition that partly reverses the rule that the detect pin is claimed for the life of the device), or the board uses a weaker external pull-up or a socket whose switch is open when empty
 
-*Built so far:* the storage coordinator's release and reclaim (the none owner, in `storage.h`), tested on the host. Not yet built: the power manager itself, the rail switch, the pin safe-state for each peripheral, a forced release for a card that never stops being busy (the "separate forced-shutdown path" under Resource Ownership), and the consumer safe-point hook in `storage_step`.
+*Built so far:* the storage coordinator's release and reclaim (the none owner, in `storage.h`), tested on the host. Not yet built: the power manager itself, the rail switch, the pin safe-state for each peripheral, a forced release for a card that never stops being busy (the "separate forced-shutdown path" under Resource Ownership), and the consumer safe-point hook in `storage_step`. Automatic USB-mode entry needs the same hook, since a cable can arrive at any moment.

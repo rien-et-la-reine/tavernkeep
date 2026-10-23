@@ -20,8 +20,9 @@ import sys
 import time
 
 from hil import (BRING_UP_FAILED, INIT_FAILED, IO_ERROR, NOT_SEATED, RES_ERROR, STORAGE_ERROR, IN_USE,
-                 COUNTER, CheckFailed, HilError, bring_up_schedule, build, check, message, states,
-                 wait_demo)
+                 COUNTER, LISTED, USB_CONFIGURED, USB_LENDING, USB_RETURNING, CheckFailed, HilError, bring_up_schedule,
+                 build, check, message, states, wait_demo)
+import usb_host
 
 CASES = []
 
@@ -895,3 +896,179 @@ def manual_host_check(board, opts):
     if note:
         notes["note"] = note
     return notes
+
+
+# ------------------------------------------------------------------------------------------- usb
+#
+# The card lent to USB and returned, with the bench computer as the host: the Pico 2's USB port must be
+# connected to the computer running the tests (usb_host.py). The policy is asked through its request
+# variable, as the GDB harness is meant to; nothing here needs hands at the bench. A cable removal cannot
+# be tested on this bench: the Pico 2 is powered through the same cable, so pulling it is a power cut.
+
+USB_ENTER = 1           # USB_MODE_REQUEST_ENTER (src/usb/usb_mode.h)
+USB_LEAVE = 2           # USB_MODE_REQUEST_LEAVE
+HOST_FILE = "tome-hil.txt"
+
+
+def every(seconds, poll):
+    """poll, but run at most once per interval: the host-side checks start processes, and a wait polls
+    after every round of log reading."""
+    last = [float("-inf")]
+
+    def limited():
+        if time.monotonic() - last[0] < seconds:
+            return False
+        last[0] = time.monotonic()
+        return poll()
+    return limited
+
+
+def wait_host(board, poll, timeout, what, interval=0.2):
+    """Keep reading the log and servicing breakpoints until poll() holds on the host side."""
+    if not poll():
+        board.wait_for(lambda line: False, timeout, what, poll=every(interval, poll))
+
+
+def usb_disk(board):
+    """The device's disk on the host, once the host has attached it: it enumerates afresh on every reset."""
+    found = {}
+
+    def attached():
+        found["name"] = usb_host.disk()
+        return found["name"] is not None
+    wait_host(board, attached, 10, "the host to attach the device")
+    return found["name"]
+
+
+def wait_medium(board, name, present, timeout, what):
+    wait_host(board, lambda: (usb_host.blocks(name) > 0) == present, timeout, what)
+    return usb_host.blocks(name)
+
+
+def run_start(board):
+    """Where the case's own work starts in the log: the request that lent the card. Before it, a counted
+    bring-up failure can be the last case's doing: a reset while the card was lent, with the host reading
+    it, can catch the card mid-transfer, and the first CMD0 after it then goes unanswered."""
+    return next((i for i, line in enumerate(board.lines) if USB_LENDING.match(message(line))), 0)
+
+
+def lend(board):
+    """Boot with a clean pass, check the host finds no medium, and ask for USB mode until the host finds
+    the card. Returns (the pass, the disk, its size on the host in sectors)."""
+    board.boot()
+    run = wait_demo(board)
+    expect_clean(run)
+    #the request waits for a host to configure the device, and the device enumerates afresh after every
+    #reset, which can take the host a few seconds; the disk in /sys/block may still be the last boot's
+    if not any(USB_CONFIGURED.match(message(line)) for line in board.lines):
+        board.wait_message(USB_CONFIGURED.pattern, 20, "a host to configure the device")
+    name = usb_disk(board)
+    check(usb_host.blocks(name) == 0, "the host found a medium before the card was lent")
+    board.request_usb(USB_ENTER, "lend the card to the host")
+    board.wait_message(USB_LENDING.pattern, 5, "the policy to lend the card")
+    board.wait_message(r"^storage: owner usb, medium ready", 10, "the card ready for USB")
+    return run, name, wait_medium(board, name, True, 15, "the host to find the medium")
+
+
+def mount(board, name):
+    """Mount the volume through udisks, once udev has identified it; returns (device, mount point)."""
+    found = {}
+
+    def mounted():
+        found["device"] = usb_host.partition(name)
+        found["point"] = usb_host.try_mount(found["device"])
+        return found["point"] is not None
+    wait_host(board, mounted, 120, "udisks to mount the volume", interval=1.0)
+    board.note(f"host: /dev/{found['device']} mounted at {found['point']}")
+    return found["device"], found["point"]
+
+
+def wait_returned(board, why):
+    match = board.wait_message(USB_RETURNING.pattern, 10, "the policy to return the card")
+    check(match.group(1) == why, f"the card was returned because {match.group(1)!r}, expected {why!r}")
+
+
+def listing(lines):
+    """The demo's root listing in a list of log lines: name -> size."""
+    return {m.group(1): int(m.group(3)) for m in (LISTED.match(message(l)) for l in lines) if m}
+
+
+@case("usb_round_trip", "The card lent on request; the host mounts it, writes a file and ejects it; the "
+                        "card comes back with a clean pass whose listing has the host's file at its size, "
+                        "and the host is left with no medium", group="usb")
+def usb_round_trip(board, opts):
+    run, name, blocks = lend(board)
+    device, point = mount(board, name)
+    #a different size each run, so a file left by an earlier run cannot pass for this one
+    text = "written by the host over USB after demo pass %d\n" % run.counter
+    text += "." * (run.counter % 97) + "\n"
+    size = usb_host.write_file(point, HOST_FILE, text)
+    usb_host.unmount(device)
+    start = len(board.lines)
+    usb_host.eject(name)
+    board.note(f"host: wrote {HOST_FILE} ({size} bytes), unmounted and ejected")
+    wait_returned(board, "the host ejected it")
+    after = wait_demo(board)
+    expect_clean(after, "the pass after the return")
+    check(after.counter == run.counter + 1, f"counter {after.counter} after {run.counter}")
+    listed = listing(board.lines[start:])
+    check(HOST_FILE in listed, f"{HOST_FILE} is not in the listing after the return: {sorted(listed)}")
+    check(listed[HOST_FILE] == size, f"{HOST_FILE} listed at {listed[HOST_FILE]} bytes, written {size}")
+    wait_medium(board, name, False, 10, "the host to lose the medium")
+    check(usb_host.disk() == name, "the device left the bus after the eject; it should stay on it, charging")
+    expect_never(board.lines[run_start(board):], "faulty")
+    expect_no_counted_failure(board.lines[run_start(board):])
+    return {"host size": f"{blocks} sectors", "file": f"{size} bytes", "counter": after.counter}
+
+
+@case("usb_leave_by_request", "The card lent, then asked back through the request variable: returned with "
+                              "a clean pass, and the host left with no medium", group="usb")
+def usb_leave_by_request(board, opts):
+    run, name, _ = lend(board)
+    usb_host.unmount(usb_host.partition(name))      #in case the desktop mounted it
+    board.request_usb(USB_LEAVE, "ask for the card back")
+    wait_returned(board, "requested")
+    after = wait_demo(board)
+    expect_clean(after, "the pass after the return")
+    check(after.counter == run.counter + 1, f"counter {after.counter} after {run.counter}")
+    wait_medium(board, name, False, 10, "the host to lose the medium")
+    return {"counter": after.counter}
+
+
+@case("usb_removal_while_lent", "A removal injected while the card is lent: ABSENT for the USB owner with "
+                                "no return to the local owner, the seated card brought up for USB again at a "
+                                "new epoch and found by the host; then asked back, with a clean pass",
+      group="usb")
+def usb_removal_while_lent(board, opts):
+    run, name, _ = lend(board)
+    usb_host.unmount(usb_host.partition(name))
+    start = len(board.lines)
+    board.inject_removal("while lent to USB")
+    #the card stays seated, so the step that loses it starts settling it again: the log shows the loss as
+    #PREPARING at the new epoch, or ABSENT if a step falls between
+    lost = board.wait_message(r"^storage: owner usb, medium (absent|preparing), epoch (\d+)$", 5,
+                              "the card lost for USB")
+    ready = board.wait_message(r"^storage: owner usb, medium ready, epoch (\d+)$", 10,
+                               "the card brought up for USB again")
+    check(int(lost.group(2)) == run.epoch + 2, f"lost at epoch {lost.group(2)}: the lend is epoch "
+                                               f"{run.epoch + 1}, so the loss should be {run.epoch + 2}")
+    check(int(ready.group(1)) == int(lost.group(2)), "the epoch changed again between the loss and READY")
+    check(not any(USB_RETURNING.match(message(l)) for l in board.lines[start:]),
+          "the policy returned the card on a removal; it should stay lent")
+    wait_medium(board, name, True, 15, "the host to find the medium again")
+    board.request_usb(USB_LEAVE, "ask for the card back")
+    wait_returned(board, "requested")
+    after = wait_demo(board)
+    expect_clean(after, "the pass after the return")
+    expect_never(board.lines[run_start(board):], "faulty")
+    #an injected removal leaves the card powered, and if the host was reading it (udev probes a new
+    #medium for tens of seconds at 1 MHz) the card is left mid multi-block read: the first CMD0 after it
+    #can go unanswered and be retried. a physical removal takes the card's power, so it cannot happen
+    #there. any other counted failure is one
+    failures = [message(l) for l in board.lines[start:] if BRING_UP_FAILED.match(message(l))]
+    cmd0 = [message(l) for l in board.lines[start:] if (m := INIT_FAILED.match(message(l))) and m.group(1) == "CMD0"]
+    check(len(failures) <= 1 and len(cmd0) == len(failures),
+          "counted bring-up failures other than one CMD0 retry: " + "; ".join(failures))
+    expect_no_counted_failure(board.lines[run_start(board):start])
+    return {"epoch": f"lost and ready again at {ready.group(1)}", "counter": after.counter,
+            "CMD0 retries": len(cmd0)}

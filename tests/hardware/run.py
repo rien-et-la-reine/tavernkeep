@@ -199,7 +199,7 @@ def offline(opts):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("cases", nargs="*", help="case names or groups (core, removal, faults, rates, manual)")
+    parser.add_argument("cases", nargs="*", help="case names or groups (core, removal, faults, rates, manual, usb)")
     parser.add_argument("--list", action="store_true", help="list the cases and exit")
     parser.add_argument("--offline", action="store_true", help="run only the checks that need no board")
     parser.add_argument("--boots", type=int, default=10, help="reboots in the soak case (default 10)")

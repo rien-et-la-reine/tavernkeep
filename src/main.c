@@ -14,6 +14,11 @@
 #include "storage/sd_spi.h"
 #include "storage/storage.h"
 
+#if TAVERNKEEP_USB_MSC_ENABLED
+#include "usb/usb_device.h"
+#include "usb/usb_mode.h"
+#endif
+
 //spi pin numbers for hardware testing
 #define PIN_MISO 16
 #define PIN_CS   17
@@ -324,14 +329,30 @@ int main(void)
     //start' before continuing)
     const bool storage_ready = storage_bring_up();
 
+#if TAVERNKEEP_USB_MSC_ENABLED
+    //the device joins the bus now and a host sees a reader with no card in it. the card is lent to USB when
+    //the GDB harness asks (usb_mode_request) and a host has configured the device
+    if (usb_device_init()) {
+        DEBUG_INFO("PASS usb_device_init; vbus sense %s", board_vbus_sense_available() ? "on" : "absent");
+    } else {
+        DEBUG_ERROR("FAIL usb_device_init");
+    }
+#endif
+
     bool status_led_on = false;
     absolute_time_t next_led_toggle =
         make_timeout_time_ms(STATUS_LED_TOGGLE_INTERVAL_MS);
 
     //cooperative foreground loop: each subsystem gets one bounded step per pass
     while (true) {
+        const uint32_t now_ms = to_ms_since_boot(get_absolute_time());
+#if TAVERNKEEP_USB_MSC_ENABLED
+        usb_device_task();
+        //the policy asks the coordinator for owner changes, which the storage step below carries out
+        usb_device_attach(usb_mode_step(now_ms, board_vbus_present(), usb_device_configured()));
+#endif
         if (storage_ready) {
-            storage_step(to_ms_since_boot(get_absolute_time()));
+            storage_step(now_ms);
             storage_watch();
         }
 
@@ -342,6 +363,12 @@ int main(void)
                 make_timeout_time_ms(STATUS_LED_TOGGLE_INTERVAL_MS);
         }
 
+#if TAVERNKEEP_USB_MSC_ENABLED
+        //while a host is on the bus, each of its commands waits for the next pass, so the loop does not idle
+        if (usb_device_host_present()) {
+            continue;
+        }
+#endif
         sleep_ms(MAIN_LOOP_IDLE_INTERVAL_MS);
     }
 }

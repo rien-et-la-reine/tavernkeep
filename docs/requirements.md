@@ -35,7 +35,7 @@ explicit inputs, conditions, and outcomes where those details are known.
 
 - **FR-009 — Removable Storage:** Tavernkeep shall read content from and write persistent device data to removable storage.
 
-- **FR-010 — USB Mass Storage:** Tavernkeep shall allow a connected USB host to access the device's removable storage for transferring and managing books, audio, and other supported files. USB mass-storage access is an exclusive operating mode: while a host has the storage, reading and playback are unavailable, and the device may otherwise be used while charging from the same connection.
+- **FR-010 — USB Mass Storage:** Tavernkeep shall allow a connected USB host to access the device's removable storage for transferring and managing books, audio, and other supported files. USB mass-storage access is an exclusive operating mode: while a host has the storage, reading and playback are unavailable, and the device may otherwise be used while charging from the same connection. Tavernkeep shall enter USB mass-storage mode automatically when a USB connection is made and a host configures the device; a connection on which no host appears within a bounded time (a charger, or a cable without data lines) shall leave reading and playback uninterrupted. Tavernkeep shall leave USB mass-storage mode and resume normal operation when the host ejects the storage or the connection is removed.
 
 - **FR-011 — Device Navigation:** Tavernkeep shall provide an interface through which the user can browse available books and audio content and select content to open or play.
 
@@ -95,6 +95,3 @@ here; Git retains the chronological record.
 -->
 
 - **OPEN-001 — Physical Control Scheme:** The final physical control scheme has not yet been selected. It shall be resolved before hardware and firmware development progresses far enough for the choice to impose significant redesign. The selected controls shall support comfortable navigation of reading, music playback, menus, and system functions.
-
-- **OPEN-002 — USB Mode Selection:** How the device enters USB mass-storage mode has not been decided: automatically whenever a USB host enumerates, by a prompt on enumeration, or by an explicit menu action. A charger-only supply does not enumerate, so the choice only affects behaviour when a host is present. It matters because it decides whether reading or playback can be interrupted by connecting a cable, which in turn decides whether the reader and audio modes must be able to survive an externally triggered storage handover (they can, through the same path as card removal, but the user-visible behaviour differs). Resolved by a product decision recorded against FR-010.
-

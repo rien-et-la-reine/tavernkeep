@@ -47,6 +47,15 @@ option(TAVERNKEEP_ENABLE_LOGGING "Enable firmware log output" ON)
 option(TAVERNKEEP_STDIO_UART "Enable Pico SDK UART stdio" OFF)
 option(TAVERNKEEP_STDIO_USB "Enable Pico SDK USB CDC stdio" OFF)
 option(TAVERNKEEP_STDIO_RTT "Enable Pico SDK RTT stdio" ON)
+option(TAVERNKEEP_USB_MSC "Enable the USB mass-storage device" ON)
+
+# TinyUSB's device stack has one owner, and in a build with the mass-storage class its descriptors are
+# the class's (docs/architecture.md, "USB Mode Entry and Exit")
+if(TAVERNKEEP_USB_MSC AND TAVERNKEEP_STDIO_USB)
+    message(FATAL_ERROR
+        "TAVERNKEEP_STDIO_USB cannot be used with TAVERNKEEP_USB_MSC: use RTT or UART stdio, "
+        "or turn the mass-storage device off")
+endif()
 
 set(TAVERNKEEP_SOURCES
     src/main.c
@@ -61,6 +70,13 @@ set(TAVERNKEEP_SOURCES
     src/storage/storage.c
     src/storage/save_point.c
 )
+if(TAVERNKEEP_USB_MSC)
+    list(APPEND TAVERNKEEP_SOURCES
+        src/usb/msc_disk.c
+        src/usb/usb_device.c
+        src/usb/usb_mode.c
+    )
+endif()
 
 # FatFs, vendored under third_party/fatfs. Its own diskio.c is a stub and is
 # deliberately not compiled: src/storage/diskio.c implements the disk I/O
@@ -112,6 +128,21 @@ target_link_libraries(tavernkeep PRIVATE
     hardware_gpio
     hardware_spi
 )
+
+target_compile_definitions(tavernkeep PRIVATE
+    TAVERNKEEP_VERSION_MAJOR=${PROJECT_VERSION_MAJOR}
+    TAVERNKEEP_VERSION_MINOR=${PROJECT_VERSION_MINOR}
+    TAVERNKEEP_VERSION_PATCH=${PROJECT_VERSION_PATCH}
+)
+
+if(TAVERNKEEP_USB_MSC)
+    target_compile_definitions(tavernkeep PRIVATE TAVERNKEEP_USB_MSC_ENABLED=1)
+    # TinyUSB's sources find their configuration as "tusb_config.h"
+    target_include_directories(tavernkeep PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src/usb)
+    target_link_libraries(tavernkeep PRIVATE tinyusb_device pico_unique_id)
+else()
+    target_compile_definitions(tavernkeep PRIVATE TAVERNKEEP_USB_MSC_ENABLED=0)
+endif()
 
 if(TAVERNKEEP_ENABLE_LOGGING)
     target_compile_definitions(tavernkeep PRIVATE TAVERNKEEP_LOGGING_ENABLED=1)

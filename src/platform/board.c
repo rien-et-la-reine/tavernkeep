@@ -9,6 +9,11 @@ void board_init(void)
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
     (void)board_status_led_set(false);
 #endif
+#if defined(PICO_VBUS_PIN)
+    gpio_init(PICO_VBUS_PIN);
+    gpio_set_dir(PICO_VBUS_PIN, GPIO_IN);
+    gpio_disable_pulls(PICO_VBUS_PIN);
+#endif
 }
 
 bool board_status_led_available(void)
@@ -35,3 +40,21 @@ bool board_status_led_set(bool on)
 #endif
 }
 
+
+bool board_vbus_sense_available(void)
+{
+#if defined(PICO_VBUS_PIN)
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool board_vbus_present(void)
+{
+#if defined(PICO_VBUS_PIN)
+    return gpio_get(PICO_VBUS_PIN);
+#else
+    return true;
+#endif
+}
