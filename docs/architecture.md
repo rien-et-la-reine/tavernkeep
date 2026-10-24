@@ -12,7 +12,7 @@ The firmware is divided into platform-level hardware support and higher-level su
 
 Development is currently proceeding from the lowest-level hardware interfaces upward. Removable storage is the first substantial subsystem: the SPI SD driver, the filesystem layer and the storage coordinator are implemented and validated on hardware. USB mass storage over it is implemented and validated too, entered on request until automatic entry is added. EPUB, display, audio, input, and power-management functionality remains planned or only scaffolded unless otherwise documented.
 
-Tome's final hardware uses two e-ink displays and removable SD storage. The exact physical control scheme remains unresolved and must be settled before significant hardware development proceeds.
+Tome's final hardware uses three displays - two e-ink main panels inside and a memory LCD outside - and removable SD storage. The exact physical control scheme remains unresolved and must be settled before significant hardware development proceeds.
 
 ## Design Principles
 
@@ -80,7 +80,7 @@ EPUB and plain-text files are required book formats.
 
 The container and package layer - zip, DEFLATE, the OCF container, the OPF package and spine, navigation, and EPUB CFI parsing and resolution - is Bartap, a first-party library in `lib/bartap/` with draft interfaces and no implementation yet (see "Develop the EPUB container layer as a portable library, Bartap" under Important Design Decisions and Rationale). Whether it also turns XHTML into a styled text stream is open (Q17 in `lib/bartap/DESIGN-QUESTIONS.md`). The firmware supplies what Bartap needs from the platform, such as a byte source over a file on the card (`src/epub/bartap_adapter.c`).
 
-Text layout and rendering stay in the firmware and are not yet defined. Nothing derived from a book is written to the card; any caching is in RAM (see "Write only user state to the SD card" under Important Design Decisions and Rationale).
+Text layout and rendering stay in the firmware and are not yet defined. The only derived data written to the card is the library catalogue, a disposable index; pagination is kept in RAM, and books are cached in PSRAM on Rev F (see "Book state on the card, device state on the device" under Important Design Decisions and Rationale).
 
 M4B audiobook support is a stretch feature and therefore does not currently form part of the required architecture.
 
@@ -94,9 +94,9 @@ The detailed software architecture for decoding, buffering, scheduling, and audi
 
 **Display**
 
-The display subsystem will control Tome's two e-ink displays.
+The display subsystem will control Tome's three displays: the two inner e-ink panels, which are the main displays, and the external memory LCD, a secondary display for status such as the current song or book and progress bars.
 
-The dual-display configuration is fixed and defining hardware for Tome.
+The display configuration is fixed and defining hardware for Tome.
 
 The detailed display-driver, framebuffer, update scheduling, and rendering architecture has not yet been defined.
 
@@ -116,7 +116,7 @@ USB mass storage is an exclusive operating mode: while a USB host has the storag
 
 Tavernkeep will ultimately manage hardware initialization, shutdown, peripheral power state, and other system-level behavior.
 
-Peripheral power is to be switched as one rail under GPIO control, so that the device can sleep with everything but the microcontroller powered down and wake without a reboot (see "Power management" under Planned / Future Architecture). The power manager that drives it has not yet been implemented; the storage coordinator can already release the card for it.
+Peripheral power is to be switched as one rail under GPIO control, for the two sleep states, soft and deep (see "Power management" under Planned / Future Architecture). The power manager that drives it has not yet been implemented; the storage coordinator can already release the card for it.
 
 ## Major Interfaces and Abstractions
 
@@ -208,7 +208,7 @@ The coordinator is built for the consumers it does not have yet. A consumer that
 
 **Save points**
 
-`src/storage/save_point.h` is how persistent state - bookmarks, settings - is written and read back. It sits on top of the filesystem layer and runs where that layer runs. A record is small (at most `SAVE_POINT_DATA_MAX` bytes) and is always saved whole.
+`src/storage/save_point.h` is how persistent state - bookmarks and, for now, settings - is written and read back. Settings are to move off the card to the device's own non-volatile storage, and the save points split accordingly (see "Book state on the card, device state on the device"). It sits on top of the filesystem layer and runs where that layer runs. A record is small (at most `SAVE_POINT_DATA_MAX` bytes) and is always saved whole.
 
 - Each record lives in two slot files, the record's name with `.a` and `.b` appended. Each slot holds a magic number, a sequence number, the data length, the data and a CRC-16 over all of it, the same CRC-16 the SD driver uses for its data blocks (`sd_crc.h`). The exact format is in `save_point.h`. Its fields are little-endian, and the code writes and reads them by copying them as they are in memory: the firmware targets only the RP2350, whose Cortex-M33 cores are little-endian in every variant, so the byte order is assumed rather than checked or converted.
 - A save checks both slots, then rewrites the one that does not hold the newest valid record, with the next sequence number. Its result is OK once the slot file's close succeeds, which is when the record is confirmed on the card.
@@ -272,7 +272,7 @@ removable storage
 → filesystem
 → EPUB/book subsystem
 → rendering
-→ dual-display output
+→ display output
 
 The detailed buffering and rendering stages have not yet been designed.
 
@@ -359,7 +359,7 @@ From the filesystem layer's point of view, entering USB mode is indistinguishabl
 
 **USB mode is write-through.** The mass-storage class maps host reads and writes directly onto block-device operations with no caching layer in between, so a host "synchronize cache" has nothing to flush. Block-device failure results map to the corresponding medium-not-present and write-error conditions. Hot removal during USB mode is handled by the same latch as everywhere else: every block operation fails, the class reports the medium gone, and the host ejects.
 
-**Persistent-state writes happen at named save points behind one function.** Bookmarks and settings are written when the user explicitly bookmarks and automatically at chapter transitions; nowhere else, and never from within the mode transition above. In reader mode the chapter transition coincides with a full display refresh, so the write is issued once the frame has been sent to the panels and completes during the panels' own refresh time, which is much longer than a typical write. In audio mode the same rule bounds when a card write - with its programming-busy budget - can stall the storage coordinator, which sizes the audio buffering. Before entering USB mode the pending state is written and the write is confirmed complete before the handover.
+**Persistent-state writes happen at named save points behind one function.** Bookmarks and reading positions are written when the user explicitly bookmarks and automatically at chapter transitions, the recent-books list with them; the library catalogue is written when it is reconciled, after a mount or a USB return; nowhere else, and never from within the mode transition above. Settings belong on the device, not the card. In reader mode the chapter transition coincides with a full display refresh, so the write is issued once the frame has been sent to the panels and completes during the panels' own refresh time, which is much longer than a typical write. In audio mode the same rule bounds when a card write - with its programming-busy budget - can stall the storage coordinator, which sizes the audio buffering. Before entering USB mode the pending state is written and the write is confirmed complete before the handover.
 
 The one function is `save_point_write` (see "Save points" under Major Interfaces). Each save rewrites whichever of a record's two slot files does not hold the newest valid copy, so an interruption at any moment - a removal, a USB handover forced by a cable, a power loss - leaves the previous record readable, and a read never returns a partly written one.
 
@@ -543,7 +543,7 @@ enough to justify a separate decision-record system.
 
 ### Decision — Treat card absence and hardware write protection as the same unavailable-device state
 
-- Context: Tome's final full-size SD socket uses card-detect and write-protect switch information through the same GPIO in order to conserve GPIO resources. Tome requires writable storage for persistent device state.
+- Context: Tome's final full-size SD socket uses card-detect and write-protect switch information through the same GPIO in order to conserve GPIO resources. Tome requires writable storage for the reading state it keeps with the books.
 
 - Decision: Firmware does not distinguish between an absent card and a write-protected card. Either condition means that a usable storage device is unavailable.
 
@@ -553,11 +553,11 @@ enough to justify a separate decision-record system.
 
 - Consequences and tradeoffs: Tavernkeep cannot inform the user which of the two physical conditions caused the device to become unavailable.
 
-### Decision — Dual displays are fixed, the physical control scheme is not
+### Decision — The displays are fixed, the physical control scheme is not
 
-- Context: Tome's two-display format is a defining product characteristic. The originally explored dual-encoder input system may not necessarily provide the best user experience.
+- Context: Tome's two inner e-ink panels, with an external status display, are a defining product characteristic. The originally explored dual-encoder input system may not necessarily provide the best user experience.
 
-- Decision: Design Tavernkeep around two e-ink displays while leaving the physical control interface open until it is deliberately selected.
+- Decision: Design Tavernkeep around two inner e-ink main displays and an external memory LCD while leaving the physical control interface open until it is deliberately selected.
 
 - Rationale: Display count is fixed by the product concept, while changing the controls remains possible if another scheme materially improves interaction.
 
@@ -603,21 +603,26 @@ enough to justify a separate decision-record system.
 
 - Alternatives considered: Converting books on a computer into a form prepared for the device, such as pre-decompressed or pre-paginated.
 
-- Consequences and tradeoffs: Everything an EPUB needs - zip, DEFLATE with its 32 KiB window, XHTML and CSS parsing, layout - runs on the device, within its memory and time, on books as they are found, malformed ones included. Since nothing derived from a book is kept on the card, that work is redone whenever a cache in RAM does not already hold its result.
+- Consequences and tradeoffs: Everything an EPUB needs - zip, DEFLATE with its 32 KiB window, XHTML and CSS parsing, layout - runs on the device, within its memory and time, on books as they are found, malformed ones included. Apart from the library catalogue, nothing derived from a book is kept on the card, so that work is redone whenever a cache in RAM or PSRAM does not already hold its result.
 
-### Decision — Write only user state to the SD card
+### Decision — Book state on the card, device state on the device
 
 *Drafted for review.*
 
-- Context: The card is removable, and in USB mode a host can change anything on it. Tavernkeep already treats a medium it gets back as new and reuses no cached state ("Operating Modes and Storage Ownership").
+- Context: The card is removable, and in USB mode a host can change anything on it: books may be added, removed or renamed on a computer. Tavernkeep already treats a medium it gets back as new and reuses no cached state ("Operating Modes and Storage Ownership").
 
-- Decision: The only thing Tavernkeep writes to the card is user state - bookmarks and settings - through save points. No caches, derived data or layout are written to the card. Any caching lives in RAM: on-chip SRAM, or PSRAM if one is fitted.
+- Decision: What belongs to a book lives on the card with the books; what belongs to the device lives on the device.
+  - On the card: per-book reading positions and bookmarks, as CFIs, in files next to each `.epub`; and in one hidden folder, `/.tome/`, the card's recent-books list (each book's title, author and position) and a library catalogue.
+  - The catalogue is an index, rebuildable from the books and disposable: if it is missing or corrupt it is rebuilt, and a catalogue problem never affects a bookmark. It is reconciled against the files on every mount and after every USB return (each new storage-coordinator epoch).
+  - On the device: settings (font size, dark mode, numerals and so on), in a small non-volatile part on the board - the RTC's user EEPROM or a separate I2C EEPROM or FRAM - never in the MCU's flash. The MCU's internal flash is not written at run time.
+  - Pagination is derived from both the book and the device's font settings, so it is kept in RAM only.
+  - On Rev F, books are cached in PSRAM, though the reader must work without it: the current book is held inflated; other recent books are held as their compressed `.epub` files and inflated from PSRAM on switching. How many are held is set by the space available, up to a maximum, not a fixed count. The inflate window and decode tables stay in SRAM. Cached books are validated against the card before use and dropped when the card changes.
 
-- Rationale: A cache on the card can be made stale by a host or a swapped card at any time and would need validating before every use. Every card write adds programming-busy time that audio mode must buffer around, and the save-point rule already limits writes to named points. The card holds nothing the user did not put there besides the state files.
+- Rationale: Reading state belongs to the book, so it travels with the book's card; settings belong to the reader, so they stay with the device whichever card is in. The catalogue can live on the card because nothing depends on it surviving: whatever a host or a swapped card does to it, a rebuild restores it. The MCU's flash is in-package, so wearing it out kills the chip, and a write stalls code execution and PSRAM access.
 
-- Alternatives considered: A cache folder on the card, keyed to each book's size and timestamp.
+- Alternatives considered: Writing only bookmarks and settings to the card, with every cache in RAM (this record's earlier decision); settings on the card; settings or state in the MCU's flash.
 
-- Consequences and tradeoffs: Derived data is rebuilt after a restart, a card change or a USB session, so opening a book costs time; whether caches in RAM can survive sleep is open (see "Power management" under Planned / Future Architecture). PSRAM is not assumed (NFR-005), so caching must work, if smaller, in SRAM alone, and Bartap streams content rather than needing a whole chapter in memory. Reading positions and bookmarks must be stored in a form that does not depend on layout - a position in the book's content, not a page number.
+- Consequences and tradeoffs: A user can keep several cards and swap them; each card brings its own library, positions and recent books. The card holds files the user did not put there: the position files next to each book and `/.tome/`. A book renamed on a computer without its position file loses its position, unless the catalogue's reconciliation pairs them again, which is not yet designed. Inflated chapters and pagination are rebuilt after a restart, a card change or a USB session unless PSRAM still holds them; PSRAM is not assumed (NFR-005), so caching must work, if smaller, in SRAM alone, and Bartap streams content rather than needing a whole chapter in memory. Positions and bookmarks are a place in the book's content, not a page number, so a change of font settings does not move them. The save points today keep bookmarks and settings together on the card; splitting them is open work.
 
 ### Decision — Reading and audio are separate modes, with concurrency kept possible
 
@@ -645,7 +650,7 @@ enough to justify a separate decision-record system.
 
 - Alternatives considered: Built-in strikes only; strikes only from the card; card strikes taking precedence over built-in ones, so that a user could change how text looks.
 
-- Consequences and tradeoffs: Built-in strikes take flash. A book in a script with no strike on the card shows replacement glyphs. Because the built-in strikes come first, a card strike adds glyphs the built-in strikes lack and never replaces one of theirs. Fonts embedded in EPUBs are likely to be ignored. The strike format and how a strike is chosen are not yet defined. Strikes on the card are content the user put there, like books, so they do not conflict with writing only user state.
+- Consequences and tradeoffs: Built-in strikes take flash. A book in a script with no strike on the card shows replacement glyphs. Because the built-in strikes come first, a card strike adds glyphs the built-in strikes lack and never replaces one of theirs. Fonts embedded in EPUBs are likely to be ignored. The strike format and how a strike is chosen are not yet defined. Strikes on the card are content the user put there, like books, not state the device writes.
 
 ## Hardware Assumptions Relevant to Firmware
 
@@ -656,6 +661,13 @@ Tome is based on the RP2350.
 Firmware is developed using the Raspberry Pi Pico SDK.
 
 Current development uses a Raspberry Pi Pico 2.
+
+Rev F, the next board, assumes:
+
+- the RP2354B (QFN-80), for the extra GPIOs needed by native 4-bit SD, three displays, I2C (the RTC and settings storage), the lid sensor, audio and input
+- an RTC with user EEPROM, or a separate I2C EEPROM or FRAM, for settings
+- 8 MB of PSRAM on QSPI chip select 1, on an always-on rail
+- ADC inputs on the 80-pin package's ADC pins
 
 **Removable storage**
 
@@ -675,11 +687,11 @@ The SPI backend also selects the RP2350 pad's internal pull-up before enabling t
 
 **Displays**
 
-Tome uses two e-ink displays.
+Tome uses three displays: two e-ink main panels inside, and a memory LCD outside for status (the current song or book, progress bars and such).
 
-The currently selected displays are Good Display GDEH0576T81 panels using the SSD2677 controller.
+The currently selected e-ink panels are Good Display GDEH0576T81 using the SSD2677 controller.
 
-The dual-display configuration is a fixed architectural assumption.
+The display configuration is a fixed architectural assumption.
 
 Detailed firmware-side display timing, buffering, update strategy, and memory requirements have not yet been established.
 
@@ -765,7 +777,7 @@ A general input/event mechanism is expected to be required as Tavernkeep gains d
 
 **Displays**
 
-Tavernkeep will require a driver and higher-level rendering path for both e-ink displays.
+Tavernkeep will require drivers and higher-level rendering paths for the two e-ink panels and the external memory LCD.
 
 Framebuffer strategy, partial-update policy, rendering ownership, and display scheduling remain to be determined.
 
@@ -796,7 +808,11 @@ The ownership model between the USB host and Tavernkeep's own filesystem access 
 
 Power management will eventually coordinate processor activity, peripheral power state, display behavior, audio hardware, removable storage, and system shutdown.
 
-*The peripheral rail.* Every peripheral that can be powered down - the SD socket, and the other parts that need it - runs from one rail switched by a MOSFET under GPIO control. Cutting the rail removes power from everything but the microcontroller, which gives a sleep state deeper than leaving the peripherals at their idle draw, yet one the firmware wakes from with its RAM and state intact rather than through a reboot. The rail belongs to the power manager, not to any one driver: a driver cannot cut a rail other peripherals depend on, so the SD driver never touches it, and it copes with the card having lost power between a deinit and the next init because init always starts from CMD0, as for a card just inserted. One consequence is that a single peripheral cannot be power-cycled on its own to recover it; doing that means cycling the whole rail.
+*The peripheral rail.* Every peripheral that can be powered down - the SD socket, and the other parts that need it - runs from one rail switched by a MOSFET under GPIO control. Cutting the rail removes power from everything but the microcontroller and, on Rev F, the PSRAM on its always-on rail; both sleep states below do it. The rail belongs to the power manager, not to any one driver: a driver cannot cut a rail other peripherals depend on, so the SD driver never touches it, and it copes with the card having lost power between a deinit and the next init because init always starts from CMD0, as for a card just inserted. One consequence is that a single peripheral cannot be power-cycled on its own to recover it; doing that means cycling the whole rail.
+
+*Sleep states.* There are two. In soft sleep everything is off except the microcontroller's always-on domain and the PSRAM, which stays powered in a data-retaining mode on an always-on rail; waking resumes the page being read. Since only the always-on domain stays powered, the cores restart on waking and the page is restored from state kept in PSRAM, not from SRAM (to be confirmed against the RP2350 datasheet's power chapter, then on hardware). In deep sleep the PSRAM is off too.
+
+*Boot and waking.* A cold boot, or waking from deep sleep, opens the book selection menu rather than the last book, with recent books first. While the menu is shown, recent books are prefetched into PSRAM in background, bounded steps, most recent first. Selecting a book opens it at its last position.
 
 *Going to sleep:*
 
@@ -825,4 +841,4 @@ Waking therefore takes the settle wait plus the card's own initialization before
 
 *Built so far:* the storage coordinator's release and reclaim (the none owner, in `storage.h`), tested on the host. Not yet built: the power manager itself, the rail switch, the pin safe-state for each peripheral, a forced release for a card that never stops being busy (the "separate forced-shutdown path" under Resource Ownership), and the consumer safe-point hook in `storage_step`. Automatic USB-mode entry needs the same hook, since a cable can arrive at any moment.
 
-*Open: caches across sleep.* Book-derived caches live in RAM (see "Write only user state to the SD card" under Important Design Decisions and Rationale), and RAM is kept through sleep. But releasing the card for sleep is an owner change, which changes the storage coordinator's epoch, so every consumer discards what it cached and the first page after waking costs a reopen. The options: accept that, which is simplest but costs reopening time after every wake; keep the epoch when the same card comes back, which needs the coordinator to compare the card's identity (its CID) on reclaim, and still misses a card edited elsewhere and returned while the device slept; or validate caches by something other than the epoch, such as the card's CID with the book file's size and timestamp, checked after waking. To be decided with the power manager and the reader's caching.
+*Open: caches across sleep.* Books cached in PSRAM survive soft sleep, and are validated against the card before use rather than dropped on the epoch change that releasing the card causes (see "Book state on the card, device state on the device"), so waking from soft sleep need not reopen the book. Still open: what the validation compares - the card's identity (its CID) with the book file's size and timestamp is the candidate - given that a card edited elsewhere and returned while the device slept must fail it. To be decided with the power manager and the reader's caching.

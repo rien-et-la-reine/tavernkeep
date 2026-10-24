@@ -17,7 +17,7 @@ reported over RTT, and blinks the Pico 2 status LED when the selected board defi
 - **Filesystem layer:** FatFs behind `src/storage/filesystem.h`, private to
   the layer, with pooled file and directory handles that a removal or unmount
   invalidates without any I/O.
-- **Save points:** persistent state (bookmarks, settings) saved in two
+- **Save points:** persistent state (bookmarks and, for now, settings) saved in two
   alternating slot files with a sequence number and a CRC
   (`src/storage/save_point.h`), so an interruption at any moment leaves the
   previous record readable.

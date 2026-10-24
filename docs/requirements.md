@@ -9,7 +9,7 @@ after removing a requirement.
 
 ## Purpose / Scope
 
-Tavernkeep is the firmware for Tome, an embedded dual-display ereader and mp3 player. Tavernkeep is responsible for managing the device's storage, EPUB reading functionality, audio playback, display output, physical controls, USB functionality, and system-level device operation.
+Tavernkeep is the firmware for Tome, an embedded dual-screen ereader and mp3 player with an external status display. Tavernkeep is responsible for managing the device's storage, EPUB reading functionality, audio playback, display output, physical controls, USB functionality, and system-level device operation.
 
 ## Functional Requirements
 <!--
@@ -21,7 +21,7 @@ explicit inputs, conditions, and outcomes where those details are known.
 
 - **FR-002 — Plain-Text Reading:** Tavernkeep shall allow the user to discover, open, read, and navigate plain-text (`.txt`) files stored on the device.
 
-- **FR-003 — Reading State:** Tavernkeep shall persist sufficient reading state for supported books to allow the user to resume reading after closing a book or restarting the device.
+- **FR-003 — Reading State:** Tavernkeep shall persist sufficient reading state for supported books to allow the user to resume reading after closing a book or restarting the device. After a restart, the user selects the book from the book selection menu, recent books first, and it opens at its last position.
 
 - **FR-004 — Bookmarks:** Tavernkeep shall allow the user to create and remove bookmarks within supported electronic books and retain those bookmarks across restarts.
 
@@ -29,11 +29,11 @@ explicit inputs, conditions, and outcomes where those details are known.
 
 - **FR-006 — Audio Controls:** Tavernkeep shall provide controls for playback, pause, track navigation, seeking, and volume adjustment during music playback.
 
-- **FR-007 — Dual-Display Output:** Tavernkeep shall operate both of Tome's displays and use them as part of the device's reading and user-interface experience.
+- **FR-007 — Display Output:** Tavernkeep shall operate all three of Tome's displays and use them as part of the device's reading and user-interface experience.
 
 - **FR-008 — Physical User Input:** Tavernkeep shall accept physical user input sufficient to navigate books, music playback, menus, and other device functions.
 
-- **FR-009 — Removable Storage:** Tavernkeep shall read content from and write persistent device data to removable storage.
+- **FR-009 — Removable Storage:** Tavernkeep shall read content from removable storage and write to it the state that belongs to its books: reading positions, bookmarks, the recent-books list and the library catalogue. Device settings shall be stored on the device, not on removable storage.
 
 - **FR-010 — USB Mass Storage:** Tavernkeep shall allow a connected USB host to access the device's removable storage for transferring and managing books, audio, and other supported files. USB mass-storage access is an exclusive operating mode: while a host has the storage, reading and playback are unavailable, and the device may otherwise be used while charging from the same connection. Tavernkeep shall enter USB mass-storage mode automatically when a USB connection is made and a host configures the device; a connection on which no host appears within a bounded time (a charger, or a cable without data lines) shall leave reading and playback uninterrupted. Tavernkeep shall leave USB mass-storage mode and resume normal operation when the host ejects the storage or the connection is removed.
 
@@ -65,7 +65,7 @@ and operating conditions when they become known.
 
 - **NFR-004 — Error Isolation:** Errors involving an individual peripheral, file, or unsupported/malformed piece of content shall not unnecessarily prevent continued operation of unrelated device functionality.
 
-- **NFR-005 — Resource Constraints:** Tavernkeep shall operate within the processing, memory, and storage resources available on Tome's embedded hardware without requiring external application memory or network-hosted services.
+- **NFR-005 — Resource Constraints:** Tavernkeep shall operate within the processing, memory, and storage resources available on Tome's embedded hardware without requiring network-hosted services. External PSRAM, where fitted, may hold cached books and keep state through soft sleep, but reading shall not require it.
 
 - **NFR-006 — Power Efficiency:** Tavernkeep shall allow unused hardware and firmware subsystems to enter reduced-power or inactive states where practical, and shall avoid unnecessary activity that materially reduces battery life.
 
@@ -78,7 +78,7 @@ and operating conditions when they become known.
 Record externally imposed limits that restrict the solution space, such as
 hardware, interfaces, standards, dependencies, power budgets, or toolchains.
 -->
-- **CON-001 — Dual Displays:** Tome shall use two e-ink displays. Tavernkeep shall be designed around this dual-display hardware configuration.
+- **CON-001 — Displays:** Tome shall use three displays: two inner e-ink panels as its main displays, and an external memory LCD as a secondary status display. Tavernkeep shall be designed around this display configuration.
 
 ## Out of Scope
 <!--
