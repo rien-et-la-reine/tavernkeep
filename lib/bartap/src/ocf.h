@@ -85,9 +85,12 @@
  *   bartap_ocf_next, which D5 allows. It walks the directory until it finds
  *   the name, so its work grows with the number of entries (Q8). A caller that
  *   needs bounded steps lists with bartap_ocf_next itself.
- * - bartap_ocf_entry_read: bounded (D5). It stops once its budget is spent,
- *   with fewer than size bytes if need be, even none, and reports the end of
- *   the entry separately. What sets the budget is Q6. */
+ * - bartap_ocf_entry_read: bounded (D5, D12). Each call refills the stream's
+ *   input buffer at most once, with one byte-source read of up to
+ *   BARTAP_OCF_STREAM_INPUT_SIZE bytes, then decodes from what it has into
+ *   the caller's buffer, so its work is bounded by the input buffer's size
+ *   plus size, as bartap_inflate_run's is by its buffers. It may return fewer
+ *   than size bytes, even none, and reports the end of the entry separately. */
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -162,7 +165,7 @@ typedef struct {
 /* An entry being read. Private, as bartap_inflate_t is, and allocated by the
  * caller (Q2). */
 typedef struct {
-    const bartap_ocf_t *zip;
+    const bartap_ocf_t *ocf;
     bartap_ocf_entry_t entry;
     uint32_t data_offset;               //where the entry's data starts in the archive
     uint32_t compressed_read;           //of entry.compressed_size, taken from the source
@@ -175,17 +178,17 @@ typedef struct {
 } bartap_ocf_stream_t;
 
 /* Open the archive in *source: find and check its end record. The source must
- * outlive *zip. */
-bartap_ocf_result_t bartap_ocf_open(bartap_ocf_t *zip, const bartap_byte_source_t *source);
+ * outlive *ocf. */
+bartap_ocf_result_t bartap_ocf_open(bartap_ocf_t *ocf, const bartap_byte_source_t *source);
 
 /* --------------------------------------------------------- directory */
 
-void bartap_ocf_cursor_start(const bartap_ocf_t *zip, bartap_ocf_cursor_t *cursor);
+void bartap_ocf_cursor_start(const bartap_ocf_t *ocf, bartap_ocf_cursor_t *cursor);
 
 /* Read the entry at *cursor and advance it. After the last entry, returns OK
  * with *end set and entry left unspecified. */
 bartap_ocf_result_t bartap_ocf_next(
-    const bartap_ocf_t *zip,
+    const bartap_ocf_t *ocf,
     bartap_ocf_cursor_t *cursor,
     bartap_ocf_entry_t *entry,
     bool *end);
@@ -196,7 +199,7 @@ bartap_ocf_result_t bartap_ocf_next(
  * truncated copy of its name (Q10). name's length is found by Bartap's own
  * scan for the terminator, not strlen, and it is compared with each entry's
  * name bytewise with memcmp. */
-bartap_ocf_result_t bartap_ocf_find(const bartap_ocf_t *zip, const char *name, bartap_ocf_entry_t *entry);
+bartap_ocf_result_t bartap_ocf_find(const bartap_ocf_t *ocf, const char *name, bartap_ocf_entry_t *entry);
 
 /* ------------------------------------------------------------ entries */
 
@@ -211,21 +214,26 @@ bartap_ocf_result_t bartap_ocf_find(const bartap_ocf_t *zip, const char *name, b
  * abandoned. */
 bartap_ocf_result_t bartap_ocf_entry_open(
     bartap_ocf_stream_t *stream,
-    const bartap_ocf_t *zip,
+    const bartap_ocf_t *ocf,
     const bartap_ocf_entry_t *entry,
     uint32_t max_size,
     uint8_t *window,
     size_t window_size);
 
-/* Read up to size bytes of the entry's contents. Bounded (D5 in
- * DECISIONS.md): a call returns OK with fewer than size bytes, possibly none,
- * once its budget is spent (what sets the budget is Q6), so a short read does
- * not mean the end. *end is set by the read that reaches the end of the entry.
- * The CRC-32 and size are checked then, and that read returns
+/* Read up to size bytes of the entry's contents. Bounded (D12 in
+ * DECISIONS.md): a call refills the stream's input buffer at most once and
+ * decodes from what it has, so it may return OK with fewer than size bytes,
+ * possibly none (after a run of empty stored blocks, for instance), and a
+ * short read does not mean the end. *end is set by the read that reaches the
+ * end of the entry; keep calling until it is.
+ *
+ * Bytes delivered before *end are unverified. The CRC-32 and size are checked
+ * only by the read that reaches the end, and that read returns
  * BARTAP_OCF_RESULT_CORRUPT if either does not match; so does any read that
- * would take the entry past its uncompressed size. A caller that reads to the
- * end and gets OK has had every byte checked; bytes it was given before then
- * are not checked yet. Whether a whole-entry convenience call should be built
+ * would take the entry past its uncompressed size. If it does, the caller
+ * must discard, or re-read, anything it used from this entry: it was not the
+ * entry's content. Only a caller that reads to the end and gets OK has had
+ * every byte checked. Whether a whole-entry convenience call should be built
  * on this is Q5. */
 bartap_ocf_result_t bartap_ocf_entry_read(
     bartap_ocf_stream_t *stream,

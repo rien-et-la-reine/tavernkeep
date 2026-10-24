@@ -168,7 +168,7 @@ if(CMAKE_NM)
         COMMAND ${CMAKE_COMMAND}
             -DNM=${CMAKE_NM}
             -DLIBRARY=$<TARGET_FILE:bartap_symbol_check>
-            "-DOBJECTS=byte_source.c;ocf.c;inflate.c;${BARTAP_HEADER_UNIT_OBJECTS}"
+            "-DOBJECTS=byte_source.c;ocf.c;inflate.c;xml.c;${BARTAP_HEADER_UNIT_OBJECTS}"
             -DEXPECT_VIOLATIONS=0
             -P ${CMAKE_CURRENT_SOURCE_DIR}/check_symbols.cmake)
     add_test(NAME symbol_check_selftest

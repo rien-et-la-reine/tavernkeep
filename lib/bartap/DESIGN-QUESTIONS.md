@@ -100,7 +100,7 @@ enum is), since logs and bug reports quote them.
 ## Q5. A run-to-completion convenience call that inflates a whole entry
 
 **Proposed shape:** for example
-`bartap_ocf_entry_extract(zip, entry, window, window_size, out, out_capacity, max_size, &out_length)`
+`bartap_ocf_entry_extract(ocf, entry, window, window_size, out, out_capacity, max_size, &out_length)`
 (internal, D9 in DECISIONS.md, or a book-level counterpart in `epub.h`, Q18), built only on the
 streaming API, enforcing in one combined result:
 1. the declared uncompressed size, capped at `max_size` (the file is untrusted), fits `out_capacity`,
@@ -129,17 +129,8 @@ same call (presumably yes).
 
 ## Q6. Bounded work in `bartap_ocf_entry_read`
 
-**Draft:** D5 (DECISIONS.md) requires the call to be bounded. Without a budget, a deflated entry can
-consume input without producing output (runs of empty stored blocks, long dynamic headers) for as long
-as its compressed size allows, which a hostile file sets. So the call returns OK with fewer than `size`
-bytes, possibly none, once its budget is spent, and reports the end of the entry separately (`*end`, as
-`bartap_ocf_next` does) rather than by a short read. What sets the budget is open.
-
-**Options:**
-- **A. A budget passed per call** (a number of source reads or input bytes). The caller tunes it to its
-  deadline, at the cost of one more argument.
-- **B. A fixed internal budget** (a build-time constant; Q11). No extra argument, but one setting for
-  every caller.
+Settled: each call refills the stream's input buffer at most once and decodes from what it has, with no
+budget parameter. See D12 in [DECISIONS.md](DECISIONS.md).
 
 ---
 
@@ -329,7 +320,7 @@ EPUB 2 NCX), a content document's bytes, and EPUB CFI parsing and resolution.
   matching byte-exact entry names (Q15).
 - **Navigation:** one model over both the EPUB 3 navigation document and the NCX, or one per format;
   a tree or an iterator; a limit on nesting depth, since the file is untrusted (D6).
-- **Reading a content document:** a stream handle over the OCF layer's bounded reads (Q6), how many
+- **Reading a content document:** a stream handle over the OCF layer's bounded reads (D12), how many
   can be open at once, and whether they share one inflate window (D11); what Q17 decides sits on top.
 - **CFI:** parsing (a string to a structure) separate from resolution (a structure to a position in
   the book), and how resolution works over content read in pieces (D2).
@@ -368,3 +359,29 @@ archive breaks one of the packaging rules is undecided.
 time, Q11); and whether a missing mimetype is treated like the others, since with no mimetype nothing
 says the archive is meant to be an EPUB at all.
 
+---
+
+## Q20. The shape of the internal XML tokenizer
+
+**Draft:** none. `src/xml.h` is a placeholder: a streaming, non-validating tokenizer for
+`container.xml`, the OPF and navigation, and content documents if Q17 decides so, with bounded work per
+call (D5), limits on nesting depth, name length and token length (D6), and UTF-8 input.
+
+**Open points:**
+- **Event model:** pull (the caller asks for the next token: start tag, attribute, text, end tag) or
+  push (a caller's callback per event); how a token longer than the caller's buffer is delivered (in
+  pieces, or refused); attributes as separate events or with their start tag.
+- **Limits:** which are fixed and which the caller sets (nesting depth, name length, token or
+  attribute-value length), and how exceeding one is reported.
+- **Entities:** the draft position is the five predefined entities and numeric character references
+  only, with no DTDs, so no external or user-defined entity is ever expanded. Still to settle: what an
+  undefined entity is (an error, or passed through as text), and whether a DOCTYPE is refused or
+  skipped.
+- **Namespaces:** resolved by the tokenizer (prefixes mapped to URIs, which needs memory for the
+  declarations in scope) or left to the caller (raw qualified names). The OPF, `container.xml` and
+  navigation all use namespaces, and the navigation document needs `epub:type`.
+- **Encoding:** UTF-8 only, or UTF-16 too (EPUB allows UTF-16 content documents), and whether invalid
+  UTF-8 is an error.
+- **Relation to Q17:** whether the same tokenizer is exposed for content documents (Q17 B), which
+  makes its event model public API and its limits part of the contract, or stays internal to the
+  package and navigation layers.

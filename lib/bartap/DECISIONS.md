@@ -72,7 +72,7 @@ settled one moves here, naming its number.
   when to stop.
 - Consequences and trade-offs: Every loop in the library needs a resume point, which is hardest in the
   inflater, and the tests must cover resuming at every point (one-byte input and output buffers, for
-  example). This rules out a `bartap_ocf_entry_read` that runs until its buffer is full (Q6), and a
+  example). This rules out a `bartap_ocf_entry_read` that runs until its buffer is full (D12), and a
   `bartap_ocf_open` that scans to completion other than as a convenience call built on bounded steps
   (Q7). `bartap_ocf_find`, as drafted, is such a convenience call (Q8).
 
@@ -196,3 +196,21 @@ settled one moves here, naming its number.
   tables, stays an implementation matter (Q11 if it ever becomes a setting). Still to state when inflate
   is implemented: one window may serve successive streams that never overlap in time, and two live
   streams must never share one.
+
+## D12 — Bounded work in `bartap_ocf_entry_read`: one input refill per call
+
+- Context: D5 requires `bartap_ocf_entry_read` to be bounded. Without a bound, a deflated entry can
+  consume input without producing output (runs of empty stored blocks, long dynamic headers) for as
+  long as its compressed size allows, which a hostile file sets. Q6 asked what sets the bound.
+- Decision: This settles Q6. Each call refills the stream's input buffer at most once - one
+  byte-source read of up to `BARTAP_OCF_STREAM_INPUT_SIZE` bytes - then decodes from what it has into
+  the caller's buffer. Work per call is bounded by the input buffer's size plus the caller's output
+  size, the same model as `bartap_inflate_run`, with no budget parameter. A call may return OK with
+  zero bytes, after a run of empty stored blocks for instance; `*end` reports the end of the entry.
+- Rationale: Consistent with inflate; no extra parameter; the caller controls the bound through its
+  buffer sizes.
+- Alternatives considered: A budget passed per call (Q6 A); a fixed internal budget set at build time
+  (Q6 B).
+- Consequences and trade-offs: The input side of the bound is `BARTAP_OCF_STREAM_INPUT_SIZE`, fixed
+  unless Q9 lets the caller supply the input buffer, so today the caller tunes a call through its
+  output size. A caller that stops on a zero-byte read stops too early; it must loop until `*end`.

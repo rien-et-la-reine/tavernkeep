@@ -80,7 +80,7 @@ EPUB and plain-text files are required book formats.
 
 The container and package layer - zip, DEFLATE, the OCF container, the OPF package and spine, navigation, and EPUB CFI parsing and resolution - is Bartap, a first-party library in `lib/bartap/` with draft interfaces and no implementation yet (see "Develop the EPUB container layer as a portable library, Bartap" under Important Design Decisions and Rationale). Whether it also turns XHTML into a styled text stream is open (Q17 in `lib/bartap/DESIGN-QUESTIONS.md`). The firmware supplies what Bartap needs from the platform, such as a byte source over a file on the card (`src/epub/bartap_adapter.c`).
 
-Text layout and rendering stay in the firmware and are not yet defined. The only derived data written to the card is the library catalogue, a disposable index; pagination is kept in RAM, and books are cached in PSRAM on Rev F (see "Book state on the card, device state on the device" under Important Design Decisions and Rationale).
+Text layout and rendering stay in the firmware and are not yet defined. Layout must not treat a chapter as final until its entry has been read to the end with OK: bytes Bartap delivers before then have not had their CRC-32 checked. The only derived data written to the card is the library catalogue, a disposable index; pagination is kept in RAM, and books are cached in PSRAM on Rev F (see "Book state on the card, device state on the device" under Important Design Decisions and Rationale).
 
 M4B audiobook support is a stretch feature and therefore does not currently form part of the required architecture.
 

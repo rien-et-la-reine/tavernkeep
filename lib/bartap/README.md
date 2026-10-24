@@ -66,7 +66,7 @@ See [tests/README.md](tests/README.md) for the tests and their fixtures.
 | Path | What it is |
 |---|---|
 | `include/bartap/` | Public headers: `epub.h` (the book-level API) and `byte_source.h` (D9) |
-| `src/` | Implementation, and the internal headers: `ocf.h` (the OCF container) and `inflate.h` (DEFLATE) |
+| `src/` | Implementation, and the internal headers: `ocf.h` (the OCF container), `inflate.h` (DEFLATE) and `xml.h` (the XML tokenizer, a placeholder) |
 | `tests/` | Host tests, fixture generator, portability checks, the compiler-matrix runner |
 | `DECISIONS.md` | Decisions that shape Bartap, with their reasoning |
 | `DESIGN-QUESTIONS.md` | Open questions about the draft interfaces |

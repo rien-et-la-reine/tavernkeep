@@ -27,9 +27,10 @@ set(BARTAP_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/byte_source.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ocf.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/inflate.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/xml.c
 )
 # include/ holds the public headers (bartap/epub.h, bartap/byte_source.h); src/ holds the internal ones
-# (ocf.h, inflate.h), private to the library and its host tests (D9)
+# (ocf.h, inflate.h, xml.h), private to the library and its host tests (D9)
 set(BARTAP_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(BARTAP_PRIVATE_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 

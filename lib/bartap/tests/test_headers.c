@@ -8,6 +8,7 @@
 #include "bartap/epub.h"
 #include "inflate.h"
 #include "ocf.h"
+#include "xml.h"
 
 #include "harness.h"
 
