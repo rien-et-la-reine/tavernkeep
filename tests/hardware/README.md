@@ -39,7 +39,7 @@ python3 tests/hardware/run.py rates
 `--rate` builds and runs the other cases at another SPI rate, in a build directory of its own:
 
 ```bash
-python3 tests/hardware/run.py --rate 25000000
+python3 tests/hardware/run.py --rate 1000000
 ```
 
 The `usb` group needs the Pico 2's USB port connected to the computer running the tests, which acts as

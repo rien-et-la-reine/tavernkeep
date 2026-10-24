@@ -492,6 +492,44 @@ has no margin there; 5 MHz the conservative one.
   reset or unconfigure; host-tested only); other host operating systems;
   higher SPI rates in USB mode; the stack use of a USB transfer
 
+### VAL-H10 — The demo at 25 MHz, USB mode included, 2026-10-24
+
+- Test method: the VAL-H09 firmware with the demo's default rate
+  (`SD_BAUD_HZ`) raised from 1 to 25 MHz, init still at about 400 kHz. The
+  hardware tests' `core`, `removal`, `faults` and `usb` groups at 25 MHz
+  (`run.py core removal faults usb`), run remotely: no `manual` cases
+- Environment / hardware: as VAL-H09; Release build of 2590ecb with the rate
+  change uncommitted
+- Expected result: every case as in VAL-H09, each pass reporting the bus at
+  exactly 25 MHz; throughput as VAL-H05 measured at 25 MHz; in USB mode the
+  same behaviour, with the host's identification of the volume shorter than
+  at 1 MHz
+- Observed result: all 17 cases passed, every pass reporting the bus at
+  25000000 Hz:
+  - Storage: as VAL-H08, with the deepest stack use still 1628 of 4096
+    bytes, ten soak boots with the counter up by one each, every injected
+    removal surviving with the record before or after the save, and the
+    bring-up retries on their schedule
+  - Throughput over the 45 bulk passes: write 479-598 KiB/s (558-576 on the
+    clean boots; the low end in the fault cases), read 693-704 KiB/s, against
+    98 / 106 KiB/s at 1 MHz; in line with VAL-H05's 25 MHz row
+  - Round trip: the host found the medium (15523840 sectors) and the whole
+    sequence, lend to the card's return after the host's mount, 66-byte
+    write and eject, took 10.5 s, against about 30 s for udev's
+    identification alone at 1 MHz. The demo listed the host's file after the
+    return, and GNOME, its screen locked, did not automount the volume
+  - Leave by request: returned ("requested") with a clean pass
+  - Removal while lent: lost and ready again for the USB owner at epoch 2,
+    the host's read in flight failing with an I/O error as in VAL-H09, and
+    no CMD0 retry this time
+- Covered: the storage and USB automated cases at 25 MHz on this card and
+  breadboard, on Linux
+- Not covered, **pending**: physical removal and insertion at 25 MHz (the
+  `manual` group; VAL-H05 still pending); `fsck.fat` on the card after the
+  run; a bus capture at 25 MHz; the rest of VAL-H09's pending items (cable
+  removal, the host leaving while lent, other host operating systems, the
+  stack use of a USB transfer)
+
 ## Measurements / Performance Characterization
 
 <!--

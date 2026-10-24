@@ -31,10 +31,10 @@
 #define SPI      spi0
 //write protect/card detect pin
 #define PIN_WP   12
-//data rate for the first hardware runs; protocol first, speed later. the hardware tests' rate sweep
-//overrides it on the compiler command line (-DSD_BAUD_HZ=5000000U)
+//data rate after init: 25 MHz, the SD default-speed maximum in SPI mode and 150 MHz clk_peri / 6 (VAL-H05).
+//the hardware tests' rate sweep overrides it on the compiler command line (-DSD_BAUD_HZ=5000000U)
 #ifndef SD_BAUD_HZ
-#define SD_BAUD_HZ 1000000U
+#define SD_BAUD_HZ 25000000U
 #endif
 
 enum {

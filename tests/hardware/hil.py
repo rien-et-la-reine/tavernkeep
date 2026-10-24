@@ -43,7 +43,7 @@ RTT_PORT = 9090
 TARGET = "rp2350.cm0"
 
 # the demo's default rate (SD_BAUD_HZ in src/main.c)
-DEFAULT_RATE_HZ = 1000000
+DEFAULT_RATE_HZ = 25000000
 
 # the card-detect pin's input level, readable over the probe while the core is halted: IO_BANK0's
 # GPIO12_STATUS (PIN_WP in src/main.c), INFROMPAD

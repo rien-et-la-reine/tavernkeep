@@ -11,7 +11,7 @@ seen within a few seconds without anything else asking.
 Mounting and ejecting go through udisks, as the desktop's own mount and eject do, so the tests need no
 root and no membership of the disk group: udisksctl mounts and unmounts, and the drive's Eject method
 sends the SCSI eject (START STOP UNIT with LoEj) the firmware acts on. udev identifies the volume first by
-reading it over USB, which at the demo's 1 MHz SPI takes tens of seconds; the mount waits for that.
+reading it over USB, which at 1 MHz SPI takes tens of seconds; the mount waits for that.
 """
 
 import glob

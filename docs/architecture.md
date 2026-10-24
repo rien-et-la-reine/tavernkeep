@@ -663,7 +663,7 @@ The final Tome hardware uses a full-size SD card socket.
 
 Current development uses an Adafruit MicroSD card breakout board+ on a breadboard, accessed through SPI0: DO on GPIO 16, CS on GPIO 17, CLK on GPIO 18 and DI on GPIO 19, with the availability signal on GPIO 12 (`main.c` holds the authoritative assignment). The first hardware run, VAL-H01, used an earlier wiring on SPI1; the breadboard was later rewired onto SPI0 to wire up the availability signal. That breakout carries no pull-ups on any SD line, its 74AHC125 level shifter sits on DI, CLK and CS, and its socket's detect switch is active-high. Until the final board's discrete pull-ups exist, `main.c` enables the RP2350 internal pull-ups on DO and CS: the card leaves DO undriven until CMD0 moves it into SPI mode, and without a pull-up the driver's pre-command ready wait sees a floating line and reports BUSY_TIMEOUT before CMD0 is ever sent.
 
-The current SD implementation begins communication at approximately 400 kHz and increases SPI speed only after successful card initialization. Post-initialization rates of 1, 5, 12.5 and 25 MHz have been demonstrated on hardware (VAL-H05); the demo runs at 1 MHz unless the build overrides `SD_BAUD_HZ`.
+The current SD implementation begins communication at approximately 400 kHz and increases SPI speed only after successful card initialization. Post-initialization rates of 1, 5, 12.5 and 25 MHz have been demonstrated on hardware (VAL-H05); the demo runs at 25 MHz unless the build overrides `SD_BAUD_HZ`. USB mode has run at 1 MHz (VAL-H08, VAL-H09) and 25 MHz (VAL-H10).
 
 Tome operates SD cards from a 3.3 V interface.
 
