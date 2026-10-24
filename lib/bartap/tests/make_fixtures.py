@@ -22,7 +22,7 @@ Layout of DIR:
     zip/NAME.zip                      valid archives
     zip/contents/PATH                 the contents of every file entry those archives hold
     zip-damaged/NAME.zip              truncated, corrupted and unsupported archives
-    zip-packaging/NAME.zip            valid archives that break an OCF packaging rule for mimetype
+    zip-warnings/NAME.zip             archives that open with warnings (packaging rules, names)
     manifest.json                     every case: its files, what it covers, and what to expect
 
 Determinism: the output depends only on this script, the Python version's zipfile and the zlib it links
@@ -50,6 +50,7 @@ import random
 import shutil
 import struct
 import sys
+import warnings
 import zipfile
 import zlib
 
@@ -61,7 +62,7 @@ SEED = 20261023
 
 # the subdirectories this script makes and is therefore free to clear
 OWNED_DIRS = ("deflate", "deflate-truncated", "deflate-bitflip", "deflate-invalid", "zip", "zip-damaged",
-              "zip-packaging")
+              "zip-warnings")
 MANIFEST = "manifest.json"
 
 # every entry in every archive is dated this (zip's DOS timestamps start in 1980)
@@ -564,9 +565,11 @@ class _Unseekable:
         pass
 
 
-def build_zip(entries, method=default_method, comment=b"", seekable=True):
+def build_zip(entries, method=default_method, comment=b"", seekable=True, extra=None):
+    """extra: {name: bytes}, an extra field for those entries' headers, local and central."""
     fp = io.BytesIO() if seekable else _Unseekable()
-    with zipfile.ZipFile(fp, "w") as z:
+    with warnings.catch_warnings(), zipfile.ZipFile(fp, "w") as z:
+        warnings.simplefilter("ignore", UserWarning)     # zipfile warns on a duplicate name, which is wanted
         for name, data in entries:
             info = zipfile.ZipInfo(name, date_time=ZIP_TIMESTAMP)
             info.create_system = 3      # Unix, whatever platform runs this
@@ -574,6 +577,8 @@ def build_zip(entries, method=default_method, comment=b"", seekable=True):
                 info.external_attr = (0o40755 << 16) | 0x10
             else:
                 info.external_attr = 0o100644 << 16
+            if extra and name in extra:
+                info.extra = extra[name]
             m = method(name)
             info.compress_type = m
             z.writestr(info, data, compress_type=m, compresslevel=9 if m == zipfile.ZIP_DEFLATED else None)
@@ -659,19 +664,17 @@ def add_zip(fx, name, data, entries, method, description, comment=b""):
             entries=zip_entry_records(data, entries, method, comment))
 
 
-def add_packaging_zip(fx, name, data, entries, method, description, rule):
-    """A valid zip archive that breaks one OCF packaging rule for mimetype. Whether Bartap rejects it,
-    accepts it, or accepts it and reports the violation is open (Q19 in DESIGN-QUESTIONS.md), so the
-    expectation is only the label "packaging_violation", with the rule broken. entries says what reading
-    it must give if it is accepted; a "contents" path is under zip/contents/, except for mimetype's in
-    mimetype_wrong_content, which is that case's own."""
-    fx.case(kind="zip-packaging", name=name, description=description, expect="packaging_violation",
-            rule=rule, input=fx.file("zip-packaging/%s.zip" % name, data), input_size=len(data),
-            input_sha256=sha256(data), entries=zip_entry_records(data, entries, method))
+def add_warning_zip(fx, name, data, records, description, warnings_expected):
+    """An archive that opens, with the warnings it must set (D19, D20 in DECISIONS.md): "mimetype
+    missing", "mimetype not first", "mimetype compressed", "mimetype extra field", "name not utf-8".
+    records says what reading it must give, as for the zip kind."""
+    fx.case(kind="zip-warnings", name=name, description=description, expect="opens",
+            warnings=warnings_expected, input=fx.file("zip-warnings/%s.zip" % name, data),
+            input_size=len(data), input_sha256=sha256(data), entries=records)
 
 
 def add_damaged_zip(fx, name, data, description, reason, fails_at, entry=None):
-    """reason: "not a zip", "corrupt" or "unsupported". fails_at: where a reader may notice, as a list,
+    """reason: "not a zip", "corrupt", "unsupported" or "not an epub". fails_at: where a reader may notice, as a list,
     since a stricter reader may notice earlier: "open", "directory" (listing or finding entries), or
     "entry" (reading entry's contents)."""
     fx.case(kind="zip-damaged", name=name, description=description, expect="reject", reason=reason,
@@ -721,46 +724,86 @@ def zip_cases(fx):
             "normal with every entry stored, so a stored entry's contents (the 20 KB chapter) span many "
             "reads.")
 
-    damaged_zip_cases(fx, normal, build_zip(entries, method=lambda n: zipfile.ZIP_STORED))
-    packaging_zip_cases(fx, entries)
+    for chunk in (64, 512):
+        for k in range(4):
+            # the backward scan's first chunk is the last `chunk` bytes, and the next one ends 3 bytes into
+            # it (ocf.h); a signature that starts k bytes before the first chunk's start lies wholly in the
+            # second for k = 1..3, split across the boundary but for the overlap, and at k = 0 wholly in
+            # the first
+            from_end = chunk + k
+            comment = bytes(rng("boundary%d_%d" % (chunk, k)).choice(b"abcdefghijklmnopqrstuvwxyz ")
+                            for _ in range(from_end - END.size))
+            data = build_zip(entries, comment=comment)
+            assert data[-from_end:-from_end + 4] == b"PK\x05\x06"
+            add_zip(fx, "end_record_at_chunk_%d_minus_%d" % (chunk, k), data, entries, default_method,
+                    "normal with a %d-byte comment, so the end record's signature starts %d bytes from the "
+                    "end: with a %d-byte scratch buffer, %s." % (
+                        len(comment), from_end, chunk,
+                        "exactly at the start of the backward scan's first chunk" if k == 0 else
+                        "%d byte%s before the first chunk's start, inside the 3 bytes by which the second "
+                        "chunk overlaps it" % (k, "" if k == 1 else "s")),
+                    comment)
+            fx.cases[-1]["scan_chunk_size"] = chunk
+
+    zip64, zip64_marks = build_zip64(normal)
+    add_zip(fx, "zip64", zip64, entries, default_method,
+            "normal rewritten with ZIP64 records whose values all fit in 32 bits: a ZIP64 end of central "
+            "directory record and locator, 0xFFFF and 0xFFFFFFFF in the end record, and in every directory "
+            "entry sizes and local header offset of 0xFFFFFFFF with the real values in a ZIP64 extra field. "
+            "Read back with Python's zipfile.")
+    stored = build_zip(entries, method=lambda n: zipfile.ZIP_STORED)
+    add_zip(fx, "local_header_name_mismatch", flip_byte(normal, zip_layout(normal)["entries"][CHAPTER]["local"]
+                                                        + LOCAL_NAME), entries, default_method,
+            "normal with the first byte of the chapter's name changed in its local header only. The local "
+            "header's name length, signature and method still match the directory, and its name bytes are "
+            "not compared (D17), so it opens and reads normally.")
+
+    damaged_zip_cases(fx, normal, stored, zip64, zip64_marks, entries)
+    warning_zip_cases(fx, entries, normal)
 
 
-def packaging_zip_cases(fx, entries):
-    """normal, each breaking one of the OCF's packaging rules for mimetype (EPUB 3.3, OCF ZIP
-    container): it must be present, the first entry, stored, and hold exactly "application/epub+zip".
-    Each is otherwise a valid zip archive, unlike the zip-damaged cases."""
-    reordered = entries[1:] + entries[:1]
-    data = build_zip(reordered)
-    add_packaging_zip(fx, "mimetype_not_first", data, reordered, default_method,
-                      "normal with mimetype moved to the end.", "mimetype first")
+def build_zip64(normal):
+    """normal rewritten with ZIP64 records (APPNOTE.TXT 4.3.14-4.3.16, 4.5.3) whose values fit in 32
+    bits. zipfile writes ZIP64 only for values that need it, so this is built by hand from normal's own
+    local headers and data. Returns the archive and where the chapter's ZIP64 uncompressed size is."""
+    n = zip_layout(normal)
+    out = bytearray(normal[:n["directory"]])
+    directory = bytearray()
+    marks = {}
+    pos = n["directory"]
+    for _ in range(len(n["entries"])):
+        f = list(CENTRAL.unpack_from(normal, pos))
+        name_len, extra_len, comment_len = f[10], f[11], f[12]
+        name = normal[pos + CENTRAL.size:pos + CENTRAL.size + name_len]
+        extra = normal[pos + CENTRAL.size + name_len:pos + CENTRAL.size + name_len + extra_len]
+        comment = normal[pos + CENTRAL.size + name_len + extra_len:
+                         pos + CENTRAL.size + name_len + extra_len + comment_len]
+        crc, csize, usize, local = f[7], f[8], f[9], f[16]
+        zip64_extra = struct.pack("<HHQQQ", 0x0001, 24, usize, csize, local)
+        if name.decode() == CHAPTER:
+            marks["chapter_zip64_uncompressed"] = (len(out) + len(directory) + CENTRAL.size + name_len
+                                                   + extra_len + 4)
+        f[2] = max(f[2], 45)                                    # version needed: 4.5, ZIP64
+        f[8] = f[9] = f[16] = 0xFFFFFFFF
+        f[11] = extra_len + len(zip64_extra)
+        directory += CENTRAL.pack(*f) + name + extra + zip64_extra + comment
+        pos += CENTRAL.size + name_len + extra_len + comment_len
+    directory_offset = len(out)
+    out += directory
+    record_offset = len(out)
+    count = len(n["entries"])
+    out += struct.pack("<4sQHHIIQQQQ", b"PK\x06\x06", 44, 45, 45, 0, 0, count, count, len(directory),
+                       directory_offset)
+    out += struct.pack("<4sIQI", b"PK\x06\x07", 0, record_offset, 1)
+    out += END.pack(b"PK\x05\x06", 0, 0, 0xFFFF, 0xFFFF, 0xFFFFFFFF, 0xFFFFFFFF, 0)
+    data = bytes(out)
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        assert z.testzip() is None
+        assert [(i.filename, z.read(i)) for i in z.infolist()] == zip_entries()
+    return data, marks
 
-    def deflate_everything_but_directories(name):
-        return zipfile.ZIP_STORED if name.endswith("/") else zipfile.ZIP_DEFLATED
-    data = build_zip(entries, method=deflate_everything_but_directories)
-    assert zip_layout(data)["entries"]["mimetype"]["local"] == 0
-    add_packaging_zip(fx, "mimetype_deflated", data, entries, deflate_everything_but_directories,
-                      "normal with mimetype deflated instead of stored, still the first entry.",
-                      "mimetype stored")
 
-    wrong = b"application/epub+zip\n"
-    fx.file("zip-packaging/contents/mimetype_wrong_content/mimetype", wrong)
-    changed = [("mimetype", wrong)] + entries[1:]
-    data = build_zip(changed)
-    records = zip_entry_records(data, changed, default_method)
-    records[0]["contents"] = "zip-packaging/contents/mimetype_wrong_content/mimetype"
-    fx.case(kind="zip-packaging", name="mimetype_wrong_content",
-            description="normal with a newline after mimetype's content, \"application/epub+zip\\n\", "
-                        "as a text editor or a careless build script leaves it; still first and stored.",
-            expect="packaging_violation", rule="mimetype content",
-            input=fx.file("zip-packaging/mimetype_wrong_content.zip", data), input_size=len(data),
-            input_sha256=sha256(data), entries=records)
-
-    data = build_zip(entries[1:])
-    add_packaging_zip(fx, "mimetype_missing", data, entries[1:], default_method,
-                      "normal without the mimetype entry; META-INF/ is first.", "mimetype present")
-
-
-def damaged_zip_cases(fx, normal, stored):
+def damaged_zip_cases(fx, normal, stored, zip64, zip64_marks, entries):
     n = zip_layout(normal)
     s = zip_layout(stored)
     ch = n["entries"][CHAPTER]
@@ -808,10 +851,6 @@ def damaged_zip_cases(fx, normal, stored):
                     patch(normal, (ch["central"] + CENTRAL_LOCAL_OFFSET, "<I", 0xFFFFFFF0)),
                     "zip/normal.zip with the chapter's local header offset, in the central directory, far "
                     "past the end of the file.", "corrupt", ["directory", "entry"], CHAPTER)
-    add_damaged_zip(fx, "local_header_name_mismatch", flip_byte(normal, ch["local"] + LOCAL_NAME),
-                    "zip/normal.zip with the first byte of the chapter's name changed in its local header "
-                    "only, so the local header and the central directory disagree.", "corrupt", ["entry"],
-                    CHAPTER)
     add_damaged_zip(fx, "crc_mismatch", patch(normal, (ch["central"] + CENTRAL_CRC, "<I",
                                                        zlib.crc32(dict(zip_entries())[CHAPTER]) ^ 1)),
                     "zip/normal.zip with the chapter's CRC-32 in the central directory off by one bit. "
@@ -858,8 +897,106 @@ def damaged_zip_cases(fx, normal, stored):
                     patch(normal, (ch["central"] + CENTRAL_COMPRESSED, "<I", 0xFFFFFFFF),
                           (ch["central"] + CENTRAL_UNCOMPRESSED, "<I", 0xFFFFFFFF)),
                     "zip/normal.zip with the chapter's sizes in the central directory set to 0xFFFFFFFF, "
-                    "which means \"see the ZIP64 extra field\" (there is none).", "unsupported",
+                    "which means \"see the ZIP64 extra field\", and no ZIP64 extra field to resolve "
+                    "them.", "corrupt",
                     ["directory", "entry"], CHAPTER)
+
+
+    mark = zip64_marks["chapter_zip64_uncompressed"]
+    add_damaged_zip(fx, "zip64_value_over_4gib", patch(zip64, (mark + 4, "<I", 1)),
+                    "zip/zip64.zip with the upper half of the chapter's ZIP64 uncompressed size set to 1, "
+                    "so it claims more than 4 GiB: a value Bartap does not support (D13).", "unsupported",
+                    ["open", "directory", "entry"], CHAPTER)
+    sch = s["entries"][CHAPTER]
+    add_damaged_zip(fx, "stored_size_mismatch",
+                    patch(stored, (sch["central"] + CENTRAL_COMPRESSED, "<I", sch["compressed_size"] - 1)),
+                    "zip/stored.zip with the chapter's compressed size in the central directory one less "
+                    "than its uncompressed size: a stored entry's two sizes must agree (D22).", "corrupt",
+                    ["entry"], CHAPTER)
+    add_damaged_zip(fx, "container_duplicate",
+                    build_zip(entries + [("META-INF/container.xml", CONTAINER_XML)]),
+                    "normal with a second META-INF/container.xml entry at the end (D21).", "corrupt",
+                    ["open"])
+    add_damaged_zip(fx, "mimetype_duplicate", build_zip(entries + [entries[0]]),
+                    "normal with a second mimetype entry at the end (D21).", "corrupt", ["open"])
+    add_damaged_zip(fx, "container_missing",
+                    build_zip([e for e in entries if e[0] != "META-INF/container.xml"]),
+                    "normal without META-INF/container.xml: a zip archive, but not an EPUB (D21).",
+                    "not an epub", ["open"])
+    add_damaged_zip(fx, "mimetype_other_format",
+                    build_zip([("mimetype", b"application/vnd.oasis.opendocument.text")] + entries[1:]),
+                    "normal with a stored mimetype declaring an OpenDocument text document, which uses the "
+                    "same container format (D19).", "not an epub", ["open"])
+
+
+def warning_zip_cases(fx, entries, normal):
+    """Archives that open with warnings (D19, D20): normal, each breaking one of the OCF's packaging
+    rules for mimetype (EPUB 3.3, OCF ZIP container: present, the first entry, stored, no extra field,
+    content "application/epub+zip"), in a way Bartap accepts, or flagging a name as UTF-8 that is not.
+    Content variations Bartap accepts without a warning are here too, with no warnings."""
+    def own_mimetype(case, content):
+        path = fx.file("zip-warnings/contents/%s/mimetype" % case, content)
+        changed = [("mimetype", content)] + entries[1:]
+        data = build_zip(changed)
+        records = zip_entry_records(data, changed, default_method)
+        records[0]["contents"] = path
+        return data, records
+
+    reordered = entries[1:] + entries[:1]
+    data = build_zip(reordered)
+    add_warning_zip(fx, "mimetype_not_first", data, zip_entry_records(data, reordered, default_method),
+                    "normal with mimetype moved to the end.", ["mimetype not first"])
+
+    def deflate_everything_but_directories(name):
+        return zipfile.ZIP_STORED if name.endswith("/") else zipfile.ZIP_DEFLATED
+    data = build_zip(entries, method=deflate_everything_but_directories)
+    assert zip_layout(data)["entries"]["mimetype"]["local"] == 0
+    add_warning_zip(fx, "mimetype_deflated", data,
+                    zip_entry_records(data, entries, deflate_everything_but_directories),
+                    "normal with mimetype deflated instead of stored, still the first entry. Its content "
+                    "is not checked.", ["mimetype compressed"])
+
+    data = build_zip(entries[1:])
+    add_warning_zip(fx, "mimetype_missing", data, zip_entry_records(data, entries[1:], default_method),
+                    "normal without the mimetype entry; META-INF/ is first.", ["mimetype missing"])
+
+    data, records = own_mimetype("mimetype_empty", b"")
+    add_warning_zip(fx, "mimetype_empty", data, records,
+                    "normal with an empty mimetype, which counts as a missing one.", ["mimetype missing"])
+
+    data = build_zip(entries, extra={"mimetype": struct.pack("<HH", 0xCAFE, 0)})
+    assert struct.unpack_from("<H", data, LOCAL.size - 2)[0] == 4      # in the local header
+    add_warning_zip(fx, "mimetype_extra_field", data, zip_entry_records(data, entries, default_method),
+                    "normal with a 4-byte extra field (an unknown header ID, 0xCAFE, and no data) on "
+                    "mimetype, in its local and central headers.", ["mimetype extra field"])
+
+    data, records = own_mimetype("mimetype_trailing_whitespace", b"application/epub+zip \t\r\n")
+    add_warning_zip(fx, "mimetype_trailing_whitespace", data, records,
+                    "normal with a space, a tab, a CR and an LF after mimetype's content, as a text "
+                    "editor or a careless build script leaves it; accepted without a warning.", [])
+
+    data, records = own_mimetype("mimetype_bom", b"\xef\xbb\xbfapplication/epub+zip")
+    add_warning_zip(fx, "mimetype_bom", data, records,
+                    "normal with a UTF-8 byte order mark before mimetype's content; accepted without a "
+                    "warning.", [])
+
+    n = zip_layout(normal)
+    e = n["entries"]["OEBPS/empty.txt"]
+    index = len("OEBPS/")
+    flags = struct.unpack_from("<H", normal, e["central"] + CENTRAL_FLAGS)[0]
+    data = patch(normal, (e["central"] + CENTRAL_FLAGS, "<H", flags | 0x0800),
+                 (e["local"] + LOCAL_FLAGS, "<H", flags | 0x0800),
+                 (e["central"] + CENTRAL.size + index, "<B", 0xFF),
+                 (e["local"] + LOCAL.size + index, "<B", 0xFF))
+    records = zip_entry_records(normal, entries, default_method)
+    bad = next(r for r in records if r["name"] == "OEBPS/empty.txt")
+    name = bytearray(b"OEBPS/empty.txt")
+    name[index] = 0xFF
+    bad.update(name=None, name_hex=name.hex(), flags=flags | 0x0800)
+    add_warning_zip(fx, "name_not_utf8", data, records,
+                    "normal with OEBPS/empty.txt flagged as UTF-8 (general-purpose flag bit 11) in both "
+                    "headers, and the first byte of \"empty\" changed to 0xFF, which is not valid UTF-8. Its "
+                    "entry's \"name\" is null and \"name_hex\" holds the raw bytes.", ["name not utf-8"])
 
 
 # --------------------------------------------------------------------------- main

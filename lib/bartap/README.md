@@ -30,7 +30,8 @@ the header and memory rules mechanically.
 - **Memory:** no dynamic allocation and no global or static mutable state. The caller owns all state
   and provides all working memory and output buffers (D3).
 - **I/O:** only through callbacks the caller supplies (D4).
-- **Errors:** result codes. Nothing in the library aborts or asserts.
+- **Errors:** result codes, with fixed values that are only ever appended to (D18). Nothing in the
+  library aborts or asserts.
 - **Bytes:** bytes read from files are `uint8_t`, never plain `char`, and values in files are decoded
   byte by byte, with no assumptions about byte order or alignment. Strings a caller passes in only to
   be matched are `const char *`, compared with `memcmp` (D7).

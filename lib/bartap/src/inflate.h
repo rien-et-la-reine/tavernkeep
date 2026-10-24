@@ -78,6 +78,8 @@
  * caller may supply. */
 #define BARTAP_INFLATE_WINDOW_SIZE 32768U
 
+/* Values are fixed and the list is append-only: never renumbered or reused
+ * (D18). */
 typedef enum {
     /* Stopped because the input was used up (and more is still to come) or the
      * output was filled. Call again with more of whichever ran out. */
@@ -85,14 +87,17 @@ typedef enum {
     /* The end of the final block has been decoded and all of its output
      * delivered. Input after it is left unused (see bartap_inflate_run's
      * in_used). */
-    BARTAP_INFLATE_RESULT_DONE,
+    BARTAP_INFLATE_RESULT_DONE = 1,
     /* The input ended, as the caller said it would, before the final block
      * did. */
-    BARTAP_INFLATE_RESULT_TRUNCATED,
+    BARTAP_INFLATE_RESULT_TRUNCATED = 2,
     /* The stream breaks a rule of RFC 1951; see "Choices" above. Final: every
-     * later call returns it again. Which rule, and where, is Q4. */
-    BARTAP_INFLATE_RESULT_CORRUPT,
-    BARTAP_INFLATE_RESULT_INVALID_ARGUMENT,
+     * later call returns it again. Which rule, and where, is not reported:
+     * codes only (D18). */
+    BARTAP_INFLATE_RESULT_CORRUPT = 3,
+    /* A NULL pointer where one is required, or a run on a state whose
+     * bartap_inflate_init failed, which is final in the same way. */
+    BARTAP_INFLATE_RESULT_INVALID_ARGUMENT = 4,
 } bartap_inflate_result_t;
 
 /* Decoder state. Private: declared here only so that it can be allocated by
@@ -110,15 +115,24 @@ typedef struct {
     uint32_t bit_buffer;        //input bits taken but not yet used, least significant first
     uint8_t bit_count;
     bool final_block;           //the block being decoded has BFINAL set
-    bartap_inflate_result_t status; //sticky once DONE, TRUNCATED or CORRUPT
+    bartap_inflate_result_t status; //sticky once DONE, TRUNCATED, CORRUPT or INVALID_ARGUMENT
 } bartap_inflate_t;
 
 /* Start decoding a new stream. window is window_size bytes, kept by the
- * caller for as long as state is in use. Returns
- * BARTAP_INFLATE_RESULT_INVALID_ARGUMENT, and leaves state unusable, if window
- * is NULL or window_size is smaller than BARTAP_INFLATE_WINDOW_SIZE (D11).
- * The window's contents need not be cleared: a distance reaching before the
- * first byte of output is rejected, so stale bytes in it are never read. */
+ * caller for as long as state is in use.
+ *
+ * Always writes state's status, whatever the outcome (unless state itself is
+ * NULL, when nothing is written). If window is NULL or window_size is smaller
+ * than BARTAP_INFLATE_WINDOW_SIZE (D11), returns
+ * BARTAP_INFLATE_RESULT_INVALID_ARGUMENT and records it as the status, so
+ * every later bartap_inflate_run on that state returns it too, until the
+ * state is initialized again.
+ *
+ * A window serves one live stream at a time. It may be given to another
+ * stream once the stream using it has finished (DONE, or an error) or been
+ * abandoned; two streams in progress must never share one. The window's
+ * contents need not be cleared: a distance reaching before the first byte of
+ * output is rejected, so stale bytes in it are never read. */
 bartap_inflate_result_t bartap_inflate_init(bartap_inflate_t *state, uint8_t *window, size_t window_size);
 
 /* Decode from in into out.

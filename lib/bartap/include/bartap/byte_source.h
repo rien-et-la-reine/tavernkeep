@@ -27,9 +27,13 @@
  *   and an entry being streamed and a lookup in the central directory can be
  *   interleaved. With positional reads there is no shared cursor for those to
  *   disturb, and a source never needs a "position" in its state.
- * - 32-bit offsets and sizes. ZIP64 is not supported (src/ocf.h), so nothing
- *   larger can be addressed (and FAT, the filesystem this was first written
- *   for, has no file over 4 GiB - 1). See Q13.
+ * - Positions and sizes in the source are bartap_offset_t, 32 bits (D13 in
+ *   DECISIONS.md): ZIP64 records are read only where their values fit in 32
+ *   bits, so nothing larger is ever addressed (and FAT, the filesystem this
+ *   was first written for, has no file over 4 GiB - 1). Lengths of memory
+ *   buffers stay size_t. Where one meets the other - a buffer's length
+ *   against what is left of the source - Bartap checks that the value fits
+ *   before converting it, so a size_t wider than 32 bits never truncates.
  * - The size is fixed when the source is made and kept in it, rather than
  *   asked for on every use: the archive is opened read-only, so it cannot
  *   change, and the OCF layer needs it first of all, to find the end record.
@@ -40,13 +44,22 @@
  *   filesystem's sector buffer for instance; any further caching belongs in
  *   the callback too. Add one here only if profiling says so.
  * - No allocation: the caller owns every structure.
- * - The callback's signature, and how a failed read is reported, are open:
- *   see Q3.
+ * - Reads block, and deliver everything asked for or fail (D14): there are no
+ *   short reads from the callback and no "not ready" result. Every Bartap
+ *   call (every step, for the calls built on steps) makes at most one read,
+ *   and makes it before changing any state, so that a "not ready, call
+ *   again" result could be added later without redesigning the callers.
+ * - Platform error detail stays in the callback's context: a source that
+ *   wants to keep the platform's own error records it there, and Bartap
+ *   reports only BARTAP_BYTE_SOURCE_RESULT_IO_ERROR.
  *
  * Execution model: Bartap calls a source's read callback synchronously, from
  * inside whichever Bartap call needs the bytes, and from nowhere else. Where
  * and when that may happen (which core, foreground only) is the platform's
- * rule for its own source to keep; the memory-backed source has none.
+ * rule for its own source to keep; the memory-backed source has none. Bartap
+ * keeps no shared state (D14): if one source is used from several cores at
+ * once, through several Bartap objects, making that safe is the caller's
+ * responsibility.
  *
  * Bounded work:
  * - bartap_byte_source_read: bounded. One call of the read callback, for at
@@ -57,31 +70,37 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* A position or size in a byte source, in bytes (D13). */
+typedef uint32_t bartap_offset_t;
+
+/* Values are fixed and the list is append-only: never renumbered or reused
+ * (D18). */
 typedef enum {
     BARTAP_BYTE_SOURCE_RESULT_OK = 0,
-    BARTAP_BYTE_SOURCE_RESULT_INVALID_ARGUMENT,
+    BARTAP_BYTE_SOURCE_RESULT_INVALID_ARGUMENT = 1,
     /* The bytes could not be read: the medium failed or went away. This says
      * nothing about whether the archive is valid, which is what keeps "the
      * storage is gone" apart from "the book is damaged" in the layers above.
-     * It is not for the caller to recover from: abandon the work. Whether it
-     * should carry more detail is Q3 and Q4. */
-    BARTAP_BYTE_SOURCE_RESULT_IO_ERROR,
+     * It is not for the caller to recover from: abandon the work. Any detail
+     * stays in the source's context (D14). */
+    BARTAP_BYTE_SOURCE_RESULT_IO_ERROR = 2,
 } bartap_byte_source_result_t;
 
-/* Read up to size bytes starting at offset into buffer. Called only through
+/* Read size bytes starting at offset into buffer. Called only through
  * bartap_byte_source_read, which has already checked the arguments and
  * clipped the request to the source's size, so an implementation can assume
- * offset + size <= the source's size. Must then read all of it, or fail. */
+ * offset + size <= the source's size. Blocks until it has read all of it, or
+ * fails (D14). */
 typedef bartap_byte_source_result_t (*bartap_byte_source_read_fn)(
     void *context,
-    uint32_t offset,
+    bartap_offset_t offset,
     void *buffer,
     size_t size);
 
 typedef struct {
     bartap_byte_source_read_fn read;
     void *context;
-    uint32_t size;
+    bartap_offset_t size;
 } bartap_byte_source_t;
 
 /* Read up to size bytes from offset. Fewer than size bytes are read only at
@@ -90,7 +109,7 @@ typedef struct {
  * treats a short read as a truncated archive. */
 bartap_byte_source_result_t bartap_byte_source_read(
     const bartap_byte_source_t *source,
-    uint32_t offset,
+    bartap_offset_t offset,
     void *buffer,
     size_t size,
     size_t *bytes_read);
@@ -106,7 +125,7 @@ typedef struct {
 void bartap_byte_source_memory_init(
     bartap_byte_source_memory_t *memory,
     const void *data,
-    uint32_t size,
+    bartap_offset_t size,
     bartap_byte_source_t *source);
 
 #endif

@@ -41,66 +41,30 @@ book-level structs that will embed them (Q18) face the same question.
 
 **Also part of "working memory": stack.** Callers on small devices need each call's worst-case stack
 depth (tavernkeep's main stack is 4 KiB). The options are to publish a measured figure per call (from
-`-fstack-usage` in CI), to promise a ceiling and test against it, or to say nothing. Whatever Q7 decides
-about its scratch buffer feeds into this directly.
+`-fstack-usage` in CI), to promise a ceiling and test against it, or to say nothing. Opening's scratch
+buffer is the caller's (D15), and `bartap_ocf_find` compares names through a small fixed piece on its
+own stack (D17).
 
 ---
 
 ## Q3. Callback signatures for I/O, and how read errors propagate
 
-**Draft:** `bartap_byte_source_read_fn(void *context, uint32_t offset, void *buffer, size_t size)`
-returns `OK`, `INVALID_ARGUMENT` or `IO_ERROR`. Bartap clips each request to the source's size, which
-is fixed in the `bartap_byte_source_t`. The callback must deliver every byte asked for or fail. An
-`IO_ERROR` becomes `BARTAP_OCF_RESULT_IO_ERROR` at the OCF level and the platform's own error is lost.
-
-**Open points and options:**
-- **Short reads:** all-or-nothing (as drafted; simplest for Bartap) versus a `size_t *bytes_read` out
-  parameter, which is easier for platforms whose reads naturally come back short, at the cost of a
-  loop in every Bartap read site.
-- **Platform error detail:** drop it (as drafted), or let the callback hand back a platform code (an
-  `int32_t`) that Bartap carries out unchanged (ties to Q4).
-- **Non-blocking I/O:** a "not ready, call again" result would let a DMA- or interrupt-driven storage
-  driver be used without blocking the cooperative loop, which is the bounded-work rule taken all the
-  way down to I/O. The cost: every Bartap call that reads through a source must then be resumable at
-  any read. That is a large change to `bartap_ocf_open`, `bartap_ocf_find` and `bartap_ocf_entry_read`.
-- **Offset width:** `uint32_t` (as drafted) versus `uint64_t` (see Q13).
-- **Reentrancy:** what a callback may do. At least: it must not call back into the Bartap object that
-  called it. And when two streams on one `bartap_ocf_t` run on different cores or threads, the same
-  callback is called concurrently, so either the callback must be safe for that or the caller must
-  never do it. This needs stating.
-- **Operations table versus a single function pointer:** a single pointer, as drafted, until a second
-  operation appears (a size query, an async completion).
+Settled: reads block and deliver everything or fail; every call makes at most one read, before
+changing any state; concurrent use of one source is the caller's responsibility; platform error
+detail stays in the callback's context. See D14 in [DECISIONS.md](DECISIONS.md).
 
 ---
 
 ## Q4. How errors carry detail beyond a result code
 
-**Draft:** one result enum per module. Nothing records *which* check failed (bad CRC, local header
-mismatch, end record not found, invalid distance...), *where* (offset, entry index), or the platform's
-error (Q3).
-
-**Options:**
-- **A. Result codes only** (as drafted). The smallest and simplest, and enough to decide what to do, but
-  poor for diagnosing a book that won't open.
-- **B. Finer-grained result codes:** for example `CORRUPT_CRC` or `CORRUPT_LOCAL_HEADER`. Still no
-  offsets. Callers that only care about the category need a helper or ranges.
-- **C. An optional caller-supplied detail struct**, for example
-  `bartap_error_t { code, reason, offset, entry_index, platform_code }`, passed per call or registered
-  on the object. It costs nothing when `NULL`, and a few stores when present.
-- **D. "Last error" fields inside each state struct.** No signature changes, but every state grows.
-- **Not an option under the rules:** strings in the library (they cost read-only data, and a log
-  belongs to the platform). A separate optional `bartap_result_name()` could be offered if the space is
-  acceptable.
-
-Also to decide: whether numeric values are stable (append-only, as tavernkeep's filesystem result
-enum is), since logs and bug reports quote them.
+Settled: codes only, with explicit values, append-only. See D18 in [DECISIONS.md](DECISIONS.md).
 
 ---
 
 ## Q5. A run-to-completion convenience call that inflates a whole entry
 
 **Proposed shape:** for example
-`bartap_ocf_entry_extract(ocf, entry, window, window_size, out, out_capacity, max_size, &out_length)`
+`bartap_ocf_entry_extract(ocf, entry, window, window_size, input, input_size, out, out_capacity, max_size, &out_length)`
 (internal, D9 in DECISIONS.md, or a book-level counterpart in `epub.h`, Q18), built only on the
 streaming API, enforcing in one combined result:
 1. the declared uncompressed size, capped at `max_size` (the file is untrusted), fits `out_capacity`,
@@ -121,42 +85,32 @@ streaming API, enforcing in one combined result:
   no longer purely built on the streaming API, and it needs an init path other than
   `bartap_inflate_init`, which refuses a window smaller than `BARTAP_INFLATE_WINDOW_SIZE` (D11).
 
-**Smaller decisions within it:** which result says "declared size too large" (a new `TOO_LARGE`, or `UNSUPPORTED`); what the buffer holds after a
-failure (unspecified, or zeroed, which costs a pass over it); and whether stored entries go through the
-same call (presumably yes).
+**Smaller decisions within it:** what the buffer holds after a failure (unspecified, or zeroed, which
+costs a pass over it); and whether stored entries go through the same call (presumably yes). A
+declared size over `max_size` or `out_capacity` is `LIMIT_EXCEEDED` (D18).
 
 ---
 
 ## Q6. Bounded work in `bartap_ocf_entry_read`
 
-Settled: each call refills the stream's input buffer at most once and decodes from what it has, with no
-budget parameter. See D12 in [DECISIONS.md](DECISIONS.md).
+Settled: each call makes at most one read and decodes from what it has, with no budget parameter. See
+D12 in [DECISIONS.md](DECISIONS.md).
 
 ---
 
 ## Q7. `bartap_ocf_open`'s end-record scan: run to completion, and where its buffer lives
 
-**Draft:** scans backwards over up to 22 + 65535 bytes, a sector at a time, inside one call. D5
-(DECISIONS.md) allows that only for a convenience call built on bounded steps, and the steps are not
-drafted yet. No memory for the sector buffer is named.
-
-**Options for the buffer:** on the stack (512 B, an eighth of a 4 KiB stack); inside `bartap_ocf_t`
-(512 B kept for the life of the archive for a one-off use); a caller-supplied scratch argument (the
-most explicit); or borrowing a stream's input buffer (couples opening to having a stream).
-
-**Options for bounded work:** D5 rules out a call that only runs to completion, so the scan becomes
-begin/step calls, with `bartap_ocf_open` kept, if at all, as a convenience call built on them. A fast
-path that checks the last 22 bytes first makes the overwhelmingly common case (an archive with no
-comment) a single step, with the full scan still needed as the fallback.
+Settled: begin/step calls with a caller-supplied scratch buffer, and `bartap_ocf_open` as a
+convenience call that loops them. See D15 in [DECISIONS.md](DECISIONS.md).
 
 ---
 
 ## Q8. `bartap_ocf_find`: run to completion, or in steps
 
 **Draft:** a convenience call built on `bartap_ocf_next`, which D5 (DECISIONS.md) allows: it walks the
-directory until it finds the name, in one call, so its work grows with the number of entries. A name
-longer than `BARTAP_OCF_NAME_MAX` is never matched through a truncated copy; how such an entry is
-handled is Q10.
+directory until it finds the name, in one call, so its work grows with the number of entries. It
+compares name lengths first and reads only the names whose length matches (D17), and returns the first
+match (D21).
 
 **Options:** keep it as drafted; a cursor-based step version returning "in progress"; or drop it in
 favour of `bartap_ocf_next` plus a caller-side lookup or cache, which the package layer will want
@@ -167,36 +121,15 @@ addition.
 
 ## Q9. The entry stream's input buffer
 
-**Draft:** `bartap_ocf_stream_t` embeds a fixed 512-byte input buffer (`BARTAP_OCF_STREAM_INPUT_SIZE`),
-sized as one SD sector for the device this was first written for.
-
-**Options:**
-- keep it fixed;
-- make the size a build-time setting (Q11);
-- have the caller supply buffer and size at `bartap_ocf_entry_open`. The caller can then put it in
-  DMA-capable memory (useful if the byte source fills it by DMA), size it to its storage, or share it
-  between streams that never run at once.
-
-Larger buffers mean fewer callback calls but more memory per open stream.
+Settled: caller-supplied at `bartap_ocf_entry_open`, NULL allowed for stored entries. See D16 in
+[DECISIONS.md](DECISIONS.md).
 
 ---
 
 ## Q10. `BARTAP_OCF_NAME_MAX` and names stored in entries
 
-**Draft:** 255, the longest name FAT and most filesystems allow. Each `bartap_ocf_entry_t` embeds a
-256-byte name, so an entry is about 290 bytes. A package layer caching the spine's entries would
-spend about 29 KB on 100 of them.
-
-**Options:**
-- keep it fixed;
-- make it a build-time setting (Q11);
-- have the caller supply a name buffer (pointer and size) per call;
-- store only the name's offset and length in the entry, with a call to read the name when wanted,
-  which makes entries small enough to cache many.
-
-Whatever limit is chosen, an entry whose name is longer than it must be rejected or skipped, never
-truncated: a truncated name can match a different entry's name, and the caller would then read the
-wrong entry.
+Settled: entries hold their name's location and length, with no length limit, and
+`bartap_ocf_entry_name` copies a name on demand. See D17 in [DECISIONS.md](DECISIONS.md).
 
 ---
 
@@ -210,7 +143,7 @@ wrong entry.
 - CMake options that become compile definitions.
 
 **The trade-off is flexibility against mismatch.** Any setting that changes a struct's layout (the decode
-tables' size, D11; Q9, Q10) must be identical in the library and every file that includes its headers, or memory is silently
+tables' size, D11) must be identical in the library and every file that includes its headers, or memory is silently
 corrupted. Settings would then have to be `PUBLIC` compile definitions. A link-time guard (a symbol
 whose name encodes the configuration) could catch a mismatch.
 
@@ -235,33 +168,23 @@ whether `bartap_crc32_update` is public, which would be useful to callers and to
 
 ## Q13. 32-bit offsets and no ZIP64
 
-**Draft:** offsets and sizes are `uint32_t`; ZIP64 is refused as unsupported. This fit the first
-platform (FAT, files under 4 GiB) and keeps structs and arithmetic small on 32-bit cores.
-
-**Options:** keep it (EPUBs are far below 4 GiB, and EPUB does not need ZIP64); move to `uint64_t`
-offsets in the byte source and entries (costs 64-bit arithmetic and larger structs on 32-bit cores);
-or add ZIP64 later behind a build-time setting (Q11). Note that some archivers write ZIP64 records even
-for small files when streaming; how common that is in real EPUBs is worth checking before deciding.
+Settled: ZIP64 is read where its values fit in 32 bits, and `bartap_offset_t` (32 bits) is used for
+every position and size. See D13 in [DECISIONS.md](DECISIONS.md).
 
 ---
 
 ## Q14. Where the OCF rules are checked
 
 Settled: in the internal OCF layer, which is EPUB-specific rather than a general zip reader. See D10 in
-[DECISIONS.md](DECISIONS.md). Whether a packaging violation is rejected is Q19; where `container.xml`
-is read is an open point in Q18.
+[DECISIONS.md](DECISIONS.md). Packaging violations are accepted with warnings (D19); where
+`container.xml` is read is an open point in Q18.
 
 ---
 
 ## Q15. Entry-name encoding
 
-**Draft:** names are compared byte for byte and treated as UTF-8, as EPUB requires.
-
-**Open:** in zip, a name with general-purpose flag bit 11 clear is CP437, not UTF-8. EPUBs often leave
-the bit clear while using UTF-8 anyway. The options are to treat every name as UTF-8 (common practice),
-to validate UTF-8 and reject or flag invalid names, or to report the flag and let the caller decide.
-Related, for the package layer: OPF `href`s are URLs, so they must be percent-decoded (and possibly
-Unicode-normalised) before they can match a byte-exact zip name.
+Settled: names are compared as raw bytes, and UTF-8 is checked, as a warning, only where flag bit
+11 is set. See D20 in [DECISIONS.md](DECISIONS.md).
 
 ---
 
@@ -308,16 +231,18 @@ a byte source and give its metadata, its spine, its navigation (the EPUB 3 navig
 EPUB 2 NCX), a content document's bytes, and EPUB CFI parsing and resolution.
 
 **Open points:**
-- **Opening:** one call or begin/step calls. Opening reads the end record (Q7), `container.xml` and
+- **Opening:** one call or begin/step calls. Opening reads the end record (D15), `container.xml` and
   the OPF, so D5 asks for bounded steps, with a run-to-completion call at most as a convenience (Q5).
 - **`container.xml` and the rootfile:** whether the OCF layer or the book layer reads them, and which
-  rendition is used when `container.xml` lists more than one rootfile.
-- **Metadata:** copied into caller buffers (sizes fixed or caller-chosen; ties to Q10 and Q11), or
+  rendition is used when `container.xml` lists more than one rootfile. Whichever layer reads it must
+  require the OPF it names to appear exactly once in the archive (D21).
+- **Metadata:** copied into caller buffers (sizes fixed or caller-chosen; ties to Q11), or
   kept as offsets and lengths and read on demand.
 - **Spine:** access by index, by cursor, or both; whether the book object caches the spine's entries,
   and in whose memory (D3).
 - **Manifest lookup by href:** percent-decoding, relative paths against the OPF's directory, and
-  matching byte-exact entry names (Q15).
+  matching raw-byte entry names (D20). Known limitation: an href and a name in different Unicode
+  normalization forms do not match.
 - **Navigation:** one model over both the EPUB 3 navigation document and the NCX, or one per format;
   a tree or an iterator; a limit on nesting depth, since the file is untrusted (D6).
 - **Reading a content document:** a stream handle over the OCF layer's bounded reads (D12), how many
@@ -325,8 +250,8 @@ EPUB 2 NCX), a content document's bytes, and EPUB CFI parsing and resolution.
 - **CFI:** parsing (a string to a structure) separate from resolution (a structure to a position in
   the book), and how resolution works over content read in pieces (D2).
 - **Errors:** one result enum for the public API, or the internal layers' results passed through;
-  keeping "the storage failed" apart from "the book is damaged" (byte_source.h) and from packaging
-  violations (Q19); detail (Q4).
+  keeping "the storage failed" apart from "the book is damaged" (byte_source.h); passing on the OCF
+  layer's warnings (D19); codes only (D18).
 - **Memory:** how the sizes of public structs that embed internal state are communicated (Q2), and
   each call's worst-case stack.
 
@@ -334,30 +259,8 @@ EPUB 2 NCX), a content document's bytes, and EPUB CFI parsing and resolution.
 
 ## Q19. Strictness: safety rules versus packaging conformance
 
-**Draft:** the OCF layer checks the OCF rules itself (D10 in DECISIONS.md), but what it does when an
-archive breaks one of the packaging rules is undecided.
-
-**Two kinds of rule:**
-- **Safety rules**, always enforced, as D6 requires: offsets and sizes inside the archive, sizes and
-  CRC-32 that match, supported methods (stored and deflated) and no zip encryption. Breaking one is
-  rejected; nothing here is open.
-- **Packaging conformance**, the rules for mimetype: present, the first entry, stored, no extra field,
-  and holding exactly `application/epub+zip`. Breaking one does not make the archive unsafe to read.
-  Real-world EPUBs often break these rules, and most reading systems open them anyway. The fixtures
-  have one case per rule (`zip-packaging` in tests/README.md, labelled `packaging_violation`), except
-  the extra field.
-
-**Options:**
-- **A. Strict rejection.** Simple, and faithful to the specification, but books that other reading
-  systems open would fail to open in Bartap.
-- **B. Lenient acceptance.** Every book that is safe to read opens; a violation is silently ignored.
-- **C. Lenient acceptance with the violations reported to the caller**, which can then warn, log or
-  refuse as its own policy. How they are reported ties into Q4 (a detail struct, flags on the book
-  object, or a separate result).
-
-**Smaller decisions within it:** whether the choice is fixed or a caller option (per book, or at build
-time, Q11); and whether a missing mimetype is treated like the others, since with no mimetype nothing
-says the archive is meant to be an EPUB at all.
+Settled: lenient packaging, with violations reported as warning bits, and `NOT_AN_EPUB` for a
+mimetype declaring another format. See D19 in [DECISIONS.md](DECISIONS.md).
 
 ---
 
@@ -372,7 +275,7 @@ call (D5), limits on nesting depth, name length and token length (D6), and UTF-8
   push (a caller's callback per event); how a token longer than the caller's buffer is delivered (in
   pieces, or refused); attributes as separate events or with their start tag.
 - **Limits:** which are fixed and which the caller sets (nesting depth, name length, token or
-  attribute-value length), and how exceeding one is reported.
+  attribute-value length). Exceeding one the caller set is `LIMIT_EXCEEDED` (D18).
 - **Entities:** the draft position is the five predefined entities and numeric character references
   only, with no DTDs, so no external or user-defined entity is ever expanded. Still to settle: what an
   undefined entity is (an error, or passed through as text), and whether a DOCTYPE is refused or

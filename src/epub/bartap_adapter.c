@@ -11,13 +11,15 @@
  *   with FILESYSTEM_OPEN_READ (and not own it: the caller closes it after it has finished with the
  *   source), read the file's size once with filesystem_size when it is made, and report every
  *   filesystem failure (STORAGE_ERROR, STALE_HANDLE after a removal or USB mode) as
- *   BARTAP_BYTE_SOURCE_RESULT_IO_ERROR, keeping the last filesystem_result_t for the log. How detail
- *   travels may change with Q3 and Q4 in lib/bartap/DESIGN-QUESTIONS.md.
+ *   BARTAP_BYTE_SOURCE_RESULT_IO_ERROR, keeping the last filesystem_result_t for the log. That detail
+ *   stays here, in the source's context: Bartap reports codes only (D14, D18 in
+ *   lib/bartap/DECISIONS.md).
  *   Execution model: the filesystem layer's - the storage coordinator's core, foreground only - so
  *   every Bartap call reading through this source runs there too.
  * - Logging Bartap's results through platform/debug.h (RTT), since the library returns codes only.
- * - Choosing where Bartap's working memory lives (the inflate window and tables, stream buffers): Q1
- *   and Q2. */
+ * - Choosing where Bartap's working memory lives - the inflate window (D11), the scratch buffer for
+ *   opening an archive (D15), each stream's input buffer (D16) - and sizing the structs that embed
+ *   the rest (Q2). */
 
 #include "bartap/byte_source.h"
 #include "storage/filesystem.h"
