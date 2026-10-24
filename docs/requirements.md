@@ -33,7 +33,7 @@ explicit inputs, conditions, and outcomes where those details are known.
 
 - **FR-008 — Physical User Input:** Tavernkeep shall accept physical user input sufficient to navigate books, music playback, menus, and other device functions.
 
-- **FR-009 — Removable Storage:** Tavernkeep shall read content from removable storage and write to it the state that belongs to its books: reading positions, bookmarks, the recent-books list and the library catalogue. Device settings shall be stored on the device, not on removable storage.
+- **FR-009 — Removable Storage:** Tavernkeep shall read content from removable storage and write to it the state that belongs to its books: each book's reading position and bookmarks, in a file of its own next to the book, and the library catalogue with the recent-books list. Device settings shall be stored on the device, not on removable storage.
 
 - **FR-010 — USB Mass Storage:** Tavernkeep shall allow a connected USB host to access the device's removable storage for transferring and managing books, audio, and other supported files. USB mass-storage access is an exclusive operating mode: while a host has the storage, reading and playback are unavailable, and the device may otherwise be used while charging from the same connection. Tavernkeep shall enter USB mass-storage mode automatically when a USB connection is made and a host configures the device; a connection on which no host appears within a bounded time (a charger, or a cable without data lines) shall leave reading and playback uninterrupted. Tavernkeep shall leave USB mass-storage mode and resume normal operation when the host ejects the storage or the connection is removed.
 

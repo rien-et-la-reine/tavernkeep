@@ -163,7 +163,11 @@ settled one moves here, naming its number.
   The packaging rules for mimetype (present, the first entry, stored, no extra field, the exact content
   `application/epub+zip`) are checked in this layer too, but whether a violation is rejected, accepted,
   or accepted and reported is pending Q19.
-- Rationale: (to be added)
+- Rationale: Bartap reads EPUBs and nothing else, so a general zip reader would be generality no
+  caller uses, and an OCF layer over it would be a second set of headers, states and results to keep
+  in step for the same archive. Checking the rules where the archive is parsed checks each one once,
+  with the entry's method, flags and position already in hand, and enforces the safety rules among
+  them (methods, encryption) before any caller sees an entry, as D6 requires.
 - Alternatives considered: A general zip reader with the OCF rules checked in a layer over it (Q14's
   first option); leaving the rules to the caller.
 - Consequences and trade-offs: The container layer cannot be reused as-is for archives that are not
