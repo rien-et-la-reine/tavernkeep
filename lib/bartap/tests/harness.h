@@ -56,5 +56,7 @@ typedef struct {
 //case tables, one per test file; add each new one to the list in test_main.c too
 extern const test_case_t scaffold_tests[];
 extern const size_t scaffold_test_count;
+extern const test_case_t headers_tests[];
+extern const size_t headers_test_count;
 
 #endif

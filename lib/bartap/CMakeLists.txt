@@ -25,10 +25,13 @@ option(BARTAP_WARNINGS_AS_ERRORS "Treat warnings in Bartap's own sources as erro
 
 set(BARTAP_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/byte_source.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/zip.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ocf.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/inflate.c
 )
+# include/ holds the public headers (bartap/epub.h, bartap/byte_source.h); src/ holds the internal ones
+# (ocf.h, inflate.h), private to the library and its host tests (D9)
 set(BARTAP_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
+set(BARTAP_PRIVATE_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     set(BARTAP_WARNING_OPTIONS -Wall -Wextra -Wpedantic)
@@ -38,7 +41,7 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 add_library(bartap STATIC ${BARTAP_SOURCES})
-target_include_directories(bartap PUBLIC ${BARTAP_INCLUDE_DIR})
+target_include_directories(bartap PUBLIC ${BARTAP_INCLUDE_DIR} PRIVATE ${BARTAP_PRIVATE_INCLUDE_DIR})
 # Plain ISO C, whatever the including project uses: no compiler extensions to come to depend on
 set_target_properties(bartap PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 target_compile_options(bartap PRIVATE ${BARTAP_WARNING_OPTIONS})

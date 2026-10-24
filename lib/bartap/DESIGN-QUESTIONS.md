@@ -5,7 +5,7 @@ SPDX-License-Identifier: MIT
 
 # Design questions
 
-Open questions about Bartap's draft interfaces, numbered so that the headers in `include/bartap/` can
+Open questions about Bartap's draft interfaces, numbered so that the headers in `include/bartap/` and `src/` can
 refer to them (Q1, Q2, ...). Each gives the draft as it stands, then the options and their trade-offs.
 Settled questions move to [DECISIONS.md](DECISIONS.md), as a decision that names the question's number.
 
@@ -13,42 +13,17 @@ Settled questions move to [DECISIONS.md](DECISIONS.md), as a decision that names
 
 ## Q1. Who owns the inflate window and decode tables, and how they stay in fast memory
 
-**Draft:** the caller supplies the 32 KiB window as a pointer to `bartap_inflate_init`. The decode
-tables are to live inside `bartap_inflate_t`, which the caller allocates, so the caller already
-chooses their memory, but only as part of the whole state. Output goes to whatever buffer each
-`bartap_inflate_run` call is given.
-
-**Why it matters:** the window is read at random on every match copy, and the tables on every symbol.
-Both want the fastest memory there is (on-chip SRAM, a tightly coupled bank). Bulk output is written
-once and read later, so it can go to slower memory (PSRAM over QSPI). A device may have only a few tens
-of KiB of fast memory to spare.
-
-**Options:**
-- **A. As drafted:** window by pointer, tables embedded in the state. Simple, and the window and the
-  rest of the state can be placed separately. But the state struct becomes large (from about 1 KiB with
-  compact canonical-Huffman tables to several KiB with fast lookup tables), and all of it has to sit
-  wherever the caller put the struct.
-- **B. Tables in a separate caller-supplied workspace** (pointer and size), keeping the state struct
-  small. The window, the tables and the small state can each go in a different memory. Costs one more
-  pointer, a size to validate, and a size to communicate (Q2).
-- **C. One combined workspace** (window and tables) in a single caller buffer. The simplest signature,
-  but the window and tables can't be split between memories.
-- **D. Output as the window:** when the caller decodes a whole entry into one contiguous buffer (Q5),
-  the output already holds the history, so no separate window is needed, saving 32 KiB. This only works
-  for whole-entry output, and that buffer must then be fast enough to be read at random.
-- **Orthogonal:** how big the tables are (compact and slower versus lookup tables and faster) sets how
-  much fast memory is needed. It could be fixed, or chosen at build time (Q11).
-
-Also to state, whichever option is chosen: whether one window may be reused by successive streams
-(yes, if they never overlap in time), and that two live streams must never share one.
+Settled: a caller-supplied window whose size `bartap_inflate_init` checks, and decode tables inside the
+state struct. See D11 in [DECISIONS.md](DECISIONS.md).
 
 ---
 
 ## Q2. How working-memory requirements are sized and communicated
 
-**Draft:** every state struct (`bartap_inflate_t`, `bartap_zip_stream_t`, ...) is fully declared in the
-public headers, marked private, so `sizeof` gives its size and the caller can allocate it statically.
-The window's size is a macro.
+**Draft:** every state struct (`bartap_inflate_t`, `bartap_ocf_stream_t`, ...) is fully declared in its
+header, marked private, so `sizeof` gives its size and the caller can allocate it statically. The
+window's size is a macro. Those two headers are now internal (D9 in DECISIONS.md), but the public
+book-level structs that will embed them (Q18) face the same question.
 
 **Options:**
 - **A. Visible structs (as drafted).** Static allocation is trivial and checked by the compiler. But
@@ -76,7 +51,7 @@ about its scratch buffer feeds into this directly.
 **Draft:** `bartap_byte_source_read_fn(void *context, uint32_t offset, void *buffer, size_t size)`
 returns `OK`, `INVALID_ARGUMENT` or `IO_ERROR`. Bartap clips each request to the source's size, which
 is fixed in the `bartap_byte_source_t`. The callback must deliver every byte asked for or fail. An
-`IO_ERROR` becomes `BARTAP_ZIP_RESULT_IO_ERROR` at the zip level and the platform's own error is lost.
+`IO_ERROR` becomes `BARTAP_OCF_RESULT_IO_ERROR` at the OCF level and the platform's own error is lost.
 
 **Open points and options:**
 - **Short reads:** all-or-nothing (as drafted; simplest for Bartap) versus a `size_t *bytes_read` out
@@ -87,10 +62,10 @@ is fixed in the `bartap_byte_source_t`. The callback must deliver every byte ask
 - **Non-blocking I/O:** a "not ready, call again" result would let a DMA- or interrupt-driven storage
   driver be used without blocking the cooperative loop, which is the bounded-work rule taken all the
   way down to I/O. The cost: every Bartap call that reads through a source must then be resumable at
-  any read. That is a large change to `bartap_zip_open`, `bartap_zip_find` and `bartap_zip_entry_read`.
+  any read. That is a large change to `bartap_ocf_open`, `bartap_ocf_find` and `bartap_ocf_entry_read`.
 - **Offset width:** `uint32_t` (as drafted) versus `uint64_t` (see Q13).
 - **Reentrancy:** what a callback may do. At least: it must not call back into the Bartap object that
-  called it. And when two streams on one `bartap_zip_t` run on different cores or threads, the same
+  called it. And when two streams on one `bartap_ocf_t` run on different cores or threads, the same
   callback is called concurrently, so either the callback must be safe for that or the caller must
   never do it. This needs stating.
 - **Operations table versus a single function pointer:** a single pointer, as drafted, until a second
@@ -125,8 +100,9 @@ enum is), since logs and bug reports quote them.
 ## Q5. A run-to-completion convenience call that inflates a whole entry
 
 **Proposed shape:** for example
-`bartap_zip_entry_extract(zip, entry, window, out, out_capacity, max_size, &out_length)`, built only on
-the streaming API, enforcing in one combined result:
+`bartap_ocf_entry_extract(zip, entry, window, window_size, out, out_capacity, max_size, &out_length)`
+(internal, D9 in DECISIONS.md, or a book-level counterpart in `epub.h`, Q18), built only on the
+streaming API, enforcing in one combined result:
 1. the declared uncompressed size, capped at `max_size` (the file is untrusted), fits `out_capacity`,
    checked before any decoding;
 2. output never exceeds the buffer, whatever the stream does;
@@ -141,8 +117,9 @@ the streaming API, enforcing in one combined result:
   the time.
 - **C. Provide it as begin/step calls with a per-step budget**, returning "in progress" until done.
   This keeps the bounded-work rule, at the cost of a little more API.
-- **D. B or C with output as the window** (Q1 D), saving 32 KiB. But then it is no longer purely built
-  on the streaming API.
+- **D. B or C with output as the window** (an alternative D11 records), saving 32 KiB. But then it is
+  no longer purely built on the streaming API, and it needs an init path other than
+  `bartap_inflate_init`, which refuses a window smaller than `BARTAP_INFLATE_WINDOW_SIZE` (D11).
 
 **Smaller decisions within it:** which result says "declared size too large" (a new `TOO_LARGE`, or `UNSUPPORTED`); what the buffer holds after a
 failure (unspecified, or zeroed, which costs a pass over it); and whether stored entries go through the
@@ -150,13 +127,13 @@ same call (presumably yes).
 
 ---
 
-## Q6. Bounded work in `bartap_zip_entry_read`
+## Q6. Bounded work in `bartap_ocf_entry_read`
 
 **Draft:** D5 (DECISIONS.md) requires the call to be bounded. Without a budget, a deflated entry can
 consume input without producing output (runs of empty stored blocks, long dynamic headers) for as long
 as its compressed size allows, which a hostile file sets. So the call returns OK with fewer than `size`
 bytes, possibly none, once its budget is spent, and reports the end of the entry separately (`*end`, as
-`bartap_zip_next` does) rather than by a short read. What sets the budget is open.
+`bartap_ocf_next` does) rather than by a short read. What sets the budget is open.
 
 **Options:**
 - **A. A budget passed per call** (a number of source reads or input bytes). The caller tunes it to its
@@ -166,32 +143,32 @@ bytes, possibly none, once its budget is spent, and reports the end of the entry
 
 ---
 
-## Q7. `bartap_zip_open`'s end-record scan: run to completion, and where its buffer lives
+## Q7. `bartap_ocf_open`'s end-record scan: run to completion, and where its buffer lives
 
 **Draft:** scans backwards over up to 22 + 65535 bytes, a sector at a time, inside one call. D5
 (DECISIONS.md) allows that only for a convenience call built on bounded steps, and the steps are not
 drafted yet. No memory for the sector buffer is named.
 
-**Options for the buffer:** on the stack (512 B, an eighth of a 4 KiB stack); inside `bartap_zip_t`
+**Options for the buffer:** on the stack (512 B, an eighth of a 4 KiB stack); inside `bartap_ocf_t`
 (512 B kept for the life of the archive for a one-off use); a caller-supplied scratch argument (the
 most explicit); or borrowing a stream's input buffer (couples opening to having a stream).
 
 **Options for bounded work:** D5 rules out a call that only runs to completion, so the scan becomes
-begin/step calls, with `bartap_zip_open` kept, if at all, as a convenience call built on them. A fast
+begin/step calls, with `bartap_ocf_open` kept, if at all, as a convenience call built on them. A fast
 path that checks the last 22 bytes first makes the overwhelmingly common case (an archive with no
 comment) a single step, with the full scan still needed as the fallback.
 
 ---
 
-## Q8. `bartap_zip_find`: run to completion, or in steps
+## Q8. `bartap_ocf_find`: run to completion, or in steps
 
-**Draft:** a convenience call built on `bartap_zip_next`, which D5 (DECISIONS.md) allows: it walks the
+**Draft:** a convenience call built on `bartap_ocf_next`, which D5 (DECISIONS.md) allows: it walks the
 directory until it finds the name, in one call, so its work grows with the number of entries. A name
-longer than `BARTAP_ZIP_NAME_MAX` is never matched through a truncated copy; how such an entry is
+longer than `BARTAP_OCF_NAME_MAX` is never matched through a truncated copy; how such an entry is
 handled is Q10.
 
 **Options:** keep it as drafted; a cursor-based step version returning "in progress"; or drop it in
-favour of `bartap_zip_next` plus a caller-side lookup or cache, which the package layer will want
+favour of `bartap_ocf_next` plus a caller-side lookup or cache, which the package layer will want
 anyway for the spine. A caller-built index (hashes of names, in caller memory) is a possible later
 addition.
 
@@ -199,13 +176,13 @@ addition.
 
 ## Q9. The entry stream's input buffer
 
-**Draft:** `bartap_zip_stream_t` embeds a fixed 512-byte input buffer (`BARTAP_ZIP_STREAM_INPUT_SIZE`),
+**Draft:** `bartap_ocf_stream_t` embeds a fixed 512-byte input buffer (`BARTAP_OCF_STREAM_INPUT_SIZE`),
 sized as one SD sector for the device this was first written for.
 
 **Options:**
 - keep it fixed;
 - make the size a build-time setting (Q11);
-- have the caller supply buffer and size at `bartap_zip_entry_open`. The caller can then put it in
+- have the caller supply buffer and size at `bartap_ocf_entry_open`. The caller can then put it in
   DMA-capable memory (useful if the byte source fills it by DMA), size it to its storage, or share it
   between streams that never run at once.
 
@@ -213,9 +190,9 @@ Larger buffers mean fewer callback calls but more memory per open stream.
 
 ---
 
-## Q10. `BARTAP_ZIP_NAME_MAX` and names stored in entries
+## Q10. `BARTAP_OCF_NAME_MAX` and names stored in entries
 
-**Draft:** 255, the longest name FAT and most filesystems allow. Each `bartap_zip_entry_t` embeds a
+**Draft:** 255, the longest name FAT and most filesystems allow. Each `bartap_ocf_entry_t` embeds a
 256-byte name, so an entry is about 290 bytes. A package layer caching the spine's entries would
 spend about 29 KB on 100 of them.
 
@@ -241,8 +218,8 @@ wrong entry.
 - a user-supplied configuration header (`BARTAP_CONFIG_FILE`, included if defined);
 - CMake options that become compile definitions.
 
-**The trade-off is flexibility against mismatch.** Any setting that changes a struct's layout (Q1, Q9,
-Q10) must be identical in the library and every file that includes its headers, or memory is silently
+**The trade-off is flexibility against mismatch.** Any setting that changes a struct's layout (the decode
+tables' size, D11; Q9, Q10) must be identical in the library and every file that includes its headers, or memory is silently
 corrupted. Settings would then have to be `PUBLIC` compile definitions. A link-time guard (a symbol
 whose name encodes the configuration) could catch a mismatch.
 
@@ -250,7 +227,7 @@ whose name encodes the configuration) could catch a mismatch.
 
 ## Q12. CRC-32
 
-**Draft:** computed privately in `zip.c` with a 1 KiB read-only table.
+**Draft:** computed privately in `ocf.c` with a 1 KiB read-only table.
 
 **Options:**
 - 1 KiB table (fastest in software);
@@ -260,7 +237,7 @@ whose name encodes the configuration) could catch a mismatch.
   CRC-32, for one.
 
 Where a table lives also matters. In execute-in-place flash it may miss the cache; a caller-supplied
-table pointer would let the caller place it, but that is memory placement again (Q1). Separately:
+table pointer would let the caller place it, but that is memory placement again (D11). Separately:
 whether `bartap_crc32_update` is public, which would be useful to callers and to tests.
 
 ---
@@ -279,15 +256,9 @@ for small files when streaming; how common that is in real EPUBs is worth checki
 
 ## Q14. Where the OCF rules are checked
 
-**Draft:** `zip.h` knows nothing of EPUB. The OCF rules (mimetype first, stored, no extra field,
-`META-INF/container.xml`) are "checked a layer above", which, now that Bartap's scope includes the
-container and package, means somewhere in Bartap.
-
-**Options:** a new `bartap/ocf.h` (container: mimetype, `container.xml`, rootfile) over `zip.h`, with
-`bartap/package.h` (OPF) over that; or OCF checks folded into the zip reader (simpler, and less
-general); or left entirely to the caller. **Strictness is a separate decision:** real-world EPUBs break
-these rules (a deflated mimetype, an extra field, mimetype not first). Reject, accept and report a
-warning, or make it a caller policy? The fixtures already include `mimetype_not_first`.
+Settled: in the internal OCF layer, which is EPUB-specific rather than a general zip reader. See D10 in
+[DECISIONS.md](DECISIONS.md). Whether a packaging violation is rejected is Q19; where `container.xml`
+is read is an open point in Q18.
 
 ---
 
@@ -312,8 +283,8 @@ Settled: ISO C11 without extensions. See D7 in [DECISIONS.md](DECISIONS.md).
 ## Q17. Does Bartap turn XHTML content documents into a styled text stream?
 
 **Draft:** no. Bartap's scope ends at delivering a content document's bytes (D2 in DECISIONS.md),
-through `bartap_zip_entry_read`. Bartap will parse XML anyway, for `container.xml`, the OPF and the
-navigation document or NCX.
+through the book-level API (`epub.h`, Q18) over the internal `bartap_ocf_entry_read`. Bartap will
+parse XML anyway, for `container.xml`, the OPF and the navigation document or NCX.
 
 **Options:**
 - **A. Stop at document bytes.** The smallest scope, and it keeps Bartap to what specifications define
@@ -336,3 +307,64 @@ navigation document or NCX.
 **Smaller decisions within it:** a limit on element nesting depth, since the file is untrusted;
 encodings (EPUB allows UTF-8 and UTF-16 content documents); and how much of CSS, if any, counts as
 spec-defined rather than policy.
+
+---
+
+## Q18. The shape of the book-level API
+
+**Draft:** none. `bartap/epub.h` is a placeholder (D9 in DECISIONS.md). It is meant to open a book from
+a byte source and give its metadata, its spine, its navigation (the EPUB 3 navigation document or the
+EPUB 2 NCX), a content document's bytes, and EPUB CFI parsing and resolution.
+
+**Open points:**
+- **Opening:** one call or begin/step calls. Opening reads the end record (Q7), `container.xml` and
+  the OPF, so D5 asks for bounded steps, with a run-to-completion call at most as a convenience (Q5).
+- **`container.xml` and the rootfile:** whether the OCF layer or the book layer reads them, and which
+  rendition is used when `container.xml` lists more than one rootfile.
+- **Metadata:** copied into caller buffers (sizes fixed or caller-chosen; ties to Q10 and Q11), or
+  kept as offsets and lengths and read on demand.
+- **Spine:** access by index, by cursor, or both; whether the book object caches the spine's entries,
+  and in whose memory (D3).
+- **Manifest lookup by href:** percent-decoding, relative paths against the OPF's directory, and
+  matching byte-exact entry names (Q15).
+- **Navigation:** one model over both the EPUB 3 navigation document and the NCX, or one per format;
+  a tree or an iterator; a limit on nesting depth, since the file is untrusted (D6).
+- **Reading a content document:** a stream handle over the OCF layer's bounded reads (Q6), how many
+  can be open at once, and whether they share one inflate window (D11); what Q17 decides sits on top.
+- **CFI:** parsing (a string to a structure) separate from resolution (a structure to a position in
+  the book), and how resolution works over content read in pieces (D2).
+- **Errors:** one result enum for the public API, or the internal layers' results passed through;
+  keeping "the storage failed" apart from "the book is damaged" (byte_source.h) and from packaging
+  violations (Q19); detail (Q4).
+- **Memory:** how the sizes of public structs that embed internal state are communicated (Q2), and
+  each call's worst-case stack.
+
+---
+
+## Q19. Strictness: safety rules versus packaging conformance
+
+**Draft:** the OCF layer checks the OCF rules itself (D10 in DECISIONS.md), but what it does when an
+archive breaks one of the packaging rules is undecided.
+
+**Two kinds of rule:**
+- **Safety rules**, always enforced, as D6 requires: offsets and sizes inside the archive, sizes and
+  CRC-32 that match, supported methods (stored and deflated) and no zip encryption. Breaking one is
+  rejected; nothing here is open.
+- **Packaging conformance**, the rules for mimetype: present, the first entry, stored, no extra field,
+  and holding exactly `application/epub+zip`. Breaking one does not make the archive unsafe to read.
+  Real-world EPUBs often break these rules, and most reading systems open them anyway. The fixtures
+  have one case per rule (`zip-packaging` in tests/README.md, labelled `packaging_violation`), except
+  the extra field.
+
+**Options:**
+- **A. Strict rejection.** Simple, and faithful to the specification, but books that other reading
+  systems open would fail to open in Bartap.
+- **B. Lenient acceptance.** Every book that is safe to read opens; a violation is silently ignored.
+- **C. Lenient acceptance with the violations reported to the caller**, which can then warn, log or
+  refuse as its own policy. How they are reported ties into Q4 (a detail struct, flags on the book
+  object, or a separate result).
+
+**Smaller decisions within it:** whether the choice is fixed or a caller option (per book, or at build
+time, Q11); and whether a missing mimetype is treated like the others, since with no mimetype nothing
+says the archive is meant to be an EPUB at all.
+

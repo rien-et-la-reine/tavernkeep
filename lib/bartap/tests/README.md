@@ -5,10 +5,13 @@ SPDX-License-Identifier: MIT
 
 # Bartap host tests
 
-Tests for the library in `include/bartap/` and `src/`: the byte source, the zip reader and the DEFLATE
-decoder. These are scaffolding for now. The interfaces are drafts and nothing is implemented, so the
-only test case checks that the fixtures are where the build says they are. The portability checks are
-real, though, and run already.
+Tests for the library in `include/bartap/` and `src/`: the byte source, the OCF layer and the DEFLATE
+decoder, and later the book-level API. These are scaffolding for now. The interfaces are drafts and
+nothing is implemented, so the test cases check only that the fixtures are where the build says they
+are and that the headers compile together. The portability checks are real, though, and run already.
+
+The tests may include the library's internal headers from `src/` (`#include "ocf.h"`) as well as its
+public ones (`#include "bartap/epub.h"`).
 
 From Bartap's root:
 
@@ -31,10 +34,11 @@ python3 tests/run_matrix.py         # all of it under gcc and clang, 64- and 32-
 |---|---|
 | `bartap`, `bartap_shuffled` | The test cases, in order and in a shuffled order |
 | `harness_selftest` | The harness reports a failing check, a case with no checks, and a crash |
-| `include_check` | Every file in `include/` and `src/` includes only `<stdint.h>`, `<stddef.h>`, `<stdbool.h>`, `<string.h>` and `"bartap/..."` headers (`check_includes.cmake`) |
-| `include_check_selftest` | That check finds all five planted violations in `check_selftest/includes/` |
-| `symbol_check` | An uninstrumented build of the library has no writable data (no mutable global or static state) and calls nothing but `memcpy`, `memset`, `memcmp`, `memmove`, the stack protector's symbols and, on 32-bit x86, the linker's `_GLOBAL_OFFSET_TABLE_`: no `malloc`, `abort`, `assert` or stdio (`check_symbols.cmake`) |
+| `include_check` | Every file in `include/` and `src/` includes only `<stdint.h>`, `<stddef.h>`, `<stdbool.h>`, `<string.h>` and the public `"bartap/..."` headers; files in `src/` may also include the internal headers there by bare name (`"ocf.h"`), and public headers may not (`check_includes.cmake`) |
+| `include_check_selftest` | That check finds all seven planted violations in `check_selftest/includes/public/` and `private/` |
+| `symbol_check` | An uninstrumented build of the library has no writable data (no mutable global or static state) and calls nothing but `memcpy`, `memset`, `memcmp`, `memmove`, the stack protector's symbols and, on 32-bit x86, the linker's `_GLOBAL_OFFSET_TABLE_`: no `malloc`, `abort`, `assert` or stdio (`check_symbols.cmake`). The build includes one translation unit per header, public and internal, holding only its `#include`, so whatever a header defines is checked too; those units are compiled with `-Werror=unused-function -Werror=unused-variable`, so an unused static function or variable in a header fails the build rather than being optimised away unseen (an unused `static inline` function is allowed; the variable only under GCC, see below). Each unit also holds a typedef, which defines nothing but keeps a header that declares nothing yet (`epub.h`) from making an empty translation unit, which ISO C forbids |
 | `symbol_check_selftest` | That check finds both planted violations in `check_selftest/symbols/` |
+| `header_unit_selftest_unused_function`, `header_unit_selftest_unused_variable` | A header unit fails to compile on each planted header in `check_selftest/headers/`. The variable case runs under GCC only: clang never reports an unused static variable declared in a header, so under clang only the function is enforced, and the matrix's GCC builds catch the variable |
 
 `symbol_check` covers the host build. Tavernkeep's firmware build runs the same check over its Arm
 `libbartap.a`, where the Arm run-time ABI's `__aeabi_*` helpers are also allowed.
@@ -48,6 +52,7 @@ POSIX: the runner needs stdio and `fork()`.
 |---|---|
 | `harness.h`, `test_main.c` | `EXPECT`/`REQUIRE` macros and the runner. Each case runs in its own process, and a case that runs no checks fails |
 | `test_scaffold.c` | The placeholder case. Replace it once there are real ones |
+| `test_headers.c` | Includes every header, public and internal, together; checks the constants the specifications fix |
 | `make_fixtures.py` | Generates the test inputs into the build directory |
 | `check_includes.cmake`, `check_symbols.cmake`, `check_selftest/` | The portability checks and their planted violations |
 | `run_matrix.py` | Runs everything under each compiler and word size available |
@@ -85,12 +90,13 @@ description, and what reading it must give:
 | `deflate-truncated` | Each valid stream cut at three points, and no input at all. What a decoder produces before it notices must be a prefix of `output_prefix_of` | `truncated` |
 | `deflate-bitflip` | Each valid stream with one random bit flipped, three times. Many still decode; zlib's verdict is the expectation, with its output as `.out` when it decodes | `decodes`, `truncated` or `corrupt` |
 | `deflate-invalid` | One broken rule each: a reserved block type, a stored length mismatch, symbols 286 and 30, distances before the start of output (including 32768 after 32767 bytes), over-subscribed and incomplete code-length codes | `corrupt` |
-| `zip` | Valid archives: normal, a 65535-byte comment, a comment holding a fake end record, data descriptors (flag bit 3), every entry stored, and mimetype not first. Each entry's contents are in `zip/contents/` | `opens` |
+| `zip` | Valid archives: normal, a 65535-byte comment, a comment holding a fake end record, data descriptors (flag bit 3), and every entry stored. Each entry's contents are in `zip/contents/` | `opens` |
 | `zip-damaged` | Truncated, corrupted and unsupported versions of `zip/normal.zip` (and one of `zip/stored.zip`), each with a `reason` (`not a zip`, `corrupt`, `unsupported`), where a reader may notice (`fails_at`), and the `entry` concerned | `reject` |
+| `zip-packaging` | Valid archives that each break one OCF packaging rule for mimetype, named in `rule`: not first, deflated, wrong content (a trailing newline), missing. `entries` gives what reading them must give if they are accepted. Whether they are is open (Q19), so `packaging_violation` is a label, not a result | `packaging_violation` |
 
 zlib is the oracle. The script checks each valid stream against its expected output, each truncated
 one for being incomplete, and each invalid one for zlib's error, before writing anything.
-`bartap/inflate.h` accepts exactly what zlib accepts, which is what makes zlib's verdict on a random bit
+`src/inflate.h` accepts exactly what zlib accepts, which is what makes zlib's verdict on a random bit
 flip a fair expectation. zlib can't produce a match at distance 32768 or choose its own match lengths,
 so the script has a small fixed-Huffman encoder for those cases. The manifest records the zlib version:
 a different zlib may compress the zlib-made streams to different bytes, but the expected outputs don't

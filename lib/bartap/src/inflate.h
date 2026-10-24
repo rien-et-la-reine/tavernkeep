@@ -10,7 +10,12 @@
  * Inflate: a streaming decoder for raw DEFLATE (RFC 1951).
  *
  * Raw means no zlib (RFC 1950) or gzip (RFC 1952) wrapper: zip stores
- * compressed entries as bare DEFLATE, and zip.h checks the CRC-32 itself.
+ * compressed entries as bare DEFLATE, and the OCF layer (ocf.h) checks the
+ * CRC-32 itself.
+ *
+ * Internal to Bartap (D9 in DECISIONS.md): only the OCF layer uses it. Nothing
+ * in it is EPUB-specific, so it could be made public later if other users want
+ * raw DEFLATE.
  *
  * TODO: nothing here is implemented yet. What follows is a suggested
  * interface, not a settled one; the choices are explained beside each part so
@@ -25,20 +30,22 @@
  * - The decoder keeps its own 32 KiB history window. DEFLATE back-references
  *   reach up to 32768 bytes back, and the caller's output buffer may be much
  *   smaller, or already consumed, by then.
- * - The caller supplies the window's memory. It is the one large piece of
- *   state, and where it lives (a static buffer shared with something that is
- *   never active at the same time, or a memory bank chosen for speed or to
- *   stay out of another core's way) is a decision for whoever owns the memory
- *   map, not for the decoder. Whether the decode tables should be supplied
- *   the same way, and how a caller keeps both in fast memory while sending
- *   output elsewhere, is Q1.
- * - The state is a plain struct the caller allocates, so no allocation and no
- *   hidden static state: two entries can be decoded at once by keeping two.
- *   How its size is communicated, given that its contents are private, is Q2.
+ * - The caller supplies the window's memory, and its size, which
+ *   bartap_inflate_init checks (D11 in DECISIONS.md). It is the one large
+ *   piece of state, and where it lives (a static buffer shared with something
+ *   that is never active at the same time, or a memory bank chosen for speed
+ *   or to stay out of another core's way) is a decision for whoever owns the
+ *   memory map, not for the decoder.
+ * - The decode tables live inside the state struct (D11). Their size is not
+ *   part of the contract, so the table design can change.
+ * - The state is a plain struct, so no allocation and no hidden static state:
+ *   two entries can be decoded at once by keeping two. It is declared in full
+ *   so that the OCF layer's stream can embed it; how the size of a public
+ *   struct that embeds it is communicated is Q2.
  * - Total output is bounded by the caller: the decoder writes only into the
  *   output it is given, so a caller decoding a raw stream stops a
  *   decompression bomb by offering no more output than it will accept (D6 in
- *   DECISIONS.md; zip.h does this with max_size).
+ *   DECISIONS.md; ocf.h does this with max_size).
  * - The decoder is told when the input has ended, so that a stream which
  *   stops before its final block is reported as truncated rather than left
  *   waiting for input that will never come.
@@ -67,8 +74,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Bytes of history DEFLATE can refer back to, and so the size of the window
- * the caller supplies. */
+/* Bytes of history DEFLATE can refer back to, and so the smallest window the
+ * caller may supply. */
 #define BARTAP_INFLATE_WINDOW_SIZE 32768U
 
 typedef enum {
@@ -88,16 +95,16 @@ typedef enum {
     BARTAP_INFLATE_RESULT_INVALID_ARGUMENT,
 } bartap_inflate_result_t;
 
-/* Decoder state. Private: declared here only so that callers can allocate it
- * themselves (Q2). Everything in it is for inflate.c to define.
+/* Decoder state. Private: declared here only so that it can be allocated by
+ * whoever embeds it (Q2). Everything in it is for inflate.c to define.
  *
  * TODO: the rest of the resumable state goes here once the implementation
  * settles it - at least the current block's type and stage, a stored block's
  * remaining length, a match that has not been fully copied out, the code
  * lengths of a dynamic header that has not been fully read, and the decoding
- * tables for the current block (or a pointer to caller-supplied ones: Q1). */
+ * tables for the current block (D11). */
 typedef struct {
-    uint8_t *window;            //BARTAP_INFLATE_WINDOW_SIZE bytes, from the caller
+    uint8_t *window;            //at least BARTAP_INFLATE_WINDOW_SIZE bytes, from the caller
     uint32_t window_position;   //where the next output byte goes, mod BARTAP_INFLATE_WINDOW_SIZE
     uint32_t total_out;         //bytes produced so far; a distance must not exceed it
     uint32_t bit_buffer;        //input bits taken but not yet used, least significant first
@@ -106,11 +113,13 @@ typedef struct {
     bartap_inflate_result_t status; //sticky once DONE, TRUNCATED or CORRUPT
 } bartap_inflate_t;
 
-/* Start decoding a new stream. window is BARTAP_INFLATE_WINDOW_SIZE bytes,
- * kept by the caller for as long as state is in use. Its contents need not be
- * cleared: a distance reaching before the first byte of output is rejected,
- * so stale bytes in it are never read. */
-void bartap_inflate_init(bartap_inflate_t *state, uint8_t *window);
+/* Start decoding a new stream. window is window_size bytes, kept by the
+ * caller for as long as state is in use. Returns
+ * BARTAP_INFLATE_RESULT_INVALID_ARGUMENT, and leaves state unusable, if window
+ * is NULL or window_size is smaller than BARTAP_INFLATE_WINDOW_SIZE (D11).
+ * The window's contents need not be cleared: a distance reaching before the
+ * first byte of output is rejected, so stale bytes in it are never read. */
+bartap_inflate_result_t bartap_inflate_init(bartap_inflate_t *state, uint8_t *window, size_t window_size);
 
 /* Decode from in into out.
  *

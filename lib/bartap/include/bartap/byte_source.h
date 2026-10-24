@@ -9,7 +9,8 @@
  *
  * Byte sources: read-only, random-access bytes for Bartap.
  *
- * The zip reader (zip.h) reads an archive through this interface rather than
+ * A book is opened from a byte source (bartap/epub.h), and the OCF layer
+ * (src/ocf.h, internal) reads the archive through this interface rather than
  * through any filesystem, so that it runs unchanged over a file on whatever
  * storage the platform has and over a buffer in memory (the host tests, and
  * an archive already in RAM if that is ever useful). A source over a
@@ -21,20 +22,20 @@
  * that they are easy to revisit.
  *
  * Choices:
- * - Positional reads (read at an offset), not seek-then-read. A zip reader
+ * - Positional reads (read at an offset), not seek-then-read. The OCF layer
  *   jumps between the end record, the central directory and an entry's data,
  *   and an entry being streamed and a lookup in the central directory can be
  *   interleaved. With positional reads there is no shared cursor for those to
  *   disturb, and a source never needs a "position" in its state.
- * - 32-bit offsets and sizes. ZIP64 is not supported (zip.h), so nothing
+ * - 32-bit offsets and sizes. ZIP64 is not supported (src/ocf.h), so nothing
  *   larger can be addressed (and FAT, the filesystem this was first written
  *   for, has no file over 4 GiB - 1). See Q13.
  * - The size is fixed when the source is made and kept in it, rather than
  *   asked for on every use: the archive is opened read-only, so it cannot
- *   change, and the zip reader needs it first of all, to find the end record.
+ *   change, and the OCF layer needs it first of all, to find the end record.
  * - One function pointer and a context, rather than an operations table: a
  *   source has one operation. Add a table if it grows more.
- * - No cache of its own. The zip reader's small reads (headers of 22, 30 and
+ * - No cache of its own. The OCF layer's small reads (headers of 22, 30 and
  *   46 bytes) are expected to be absorbed below the callback, by a
  *   filesystem's sector buffer for instance; any further caching belongs in
  *   the callback too. Add one here only if profiling says so.

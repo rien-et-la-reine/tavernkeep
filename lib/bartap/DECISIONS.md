@@ -72,9 +72,9 @@ settled one moves here, naming its number.
   when to stop.
 - Consequences and trade-offs: Every loop in the library needs a resume point, which is hardest in the
   inflater, and the tests must cover resuming at every point (one-byte input and output buffers, for
-  example). This rules out a `bartap_zip_entry_read` that runs until its buffer is full (Q6), and a
-  `bartap_zip_open` that scans to completion other than as a convenience call built on bounded steps
-  (Q7). `bartap_zip_find`, as drafted, is such a convenience call (Q8).
+  example). This rules out a `bartap_ocf_entry_read` that runs until its buffer is full (Q6), and a
+  `bartap_ocf_open` that scans to completion other than as a convenience call built on bounded steps
+  (Q7). `bartap_ocf_find`, as drafted, is such a convenience call (Q8).
 
 ## D6 — Every input file is untrusted
 
@@ -131,3 +131,64 @@ settled one moves here, naming its number.
   crash.
 - Alternatives considered: Unit tests alone.
 - Consequences and trade-offs: More test infrastructure to maintain.
+
+## D9 — A book-shaped public API over internal container and DEFLATE layers
+
+- Context: Bartap has three layers: the zip container, DEFLATE, and the book (package, spine,
+  navigation, CFI). The first drafts made the zip reader and the inflater public headers. Bartap is
+  meant to move to its own repository, where whatever is public becomes a contract.
+- Decision: The public API is book-shaped. `include/bartap/` holds only public headers: `epub.h`, the
+  book-level API (its shape is Q18), and `byte_source.h`. The OCF container layer (`src/ocf.h`) and the
+  DEFLATE decoder (`src/inflate.h`) are internal: private to the library and its host tests. Internal
+  symbols keep the `bartap_` prefix, because a static library's internal symbols are still global.
+- Rationale: A small public surface is easier to keep stable when Bartap is split out, and internal
+  layers can change freely.
+- Alternatives considered: Publishing every layer, as the first drafts did.
+- Consequences and trade-offs: Callers cannot use the zip or DEFLATE layers directly; `inflate.h` has
+  nothing EPUB-specific in it and could be made public later if other users want raw DEFLATE. A public
+  struct that embeds internal state still has to make its size known (Q2). The include check enforces
+  that no public header includes an internal one.
+
+## D10 — The OCF layer is EPUB-specific and enforces the OCF rules
+
+- Context: An EPUB's container is a zip archive with rules of its own, the OCF's. Q14 asked where those
+  rules are checked: in a layer over a general zip reader, inside the zip reader, or by the caller.
+- Decision: This settles Q14. The internal container layer (`src/ocf.h`) is not a general zip reader:
+  it is EPUB-specific and enforces the OCF rules itself:
+  - only the stored and deflated methods;
+  - no zip encryption;
+  - entry names are treated as UTF-8 and compared case-sensitively (whether invalid UTF-8 is rejected
+    is Q15).
+
+  The packaging rules for mimetype (present, the first entry, stored, no extra field, the exact content
+  `application/epub+zip`) are checked in this layer too, but whether a violation is rejected, accepted,
+  or accepted and reported is pending Q19.
+- Rationale: (to be added)
+- Alternatives considered: A general zip reader with the OCF rules checked in a layer over it (Q14's
+  first option); leaving the rules to the caller.
+- Consequences and trade-offs: The container layer cannot be reused as-is for archives that are not
+  EPUBs. Where `META-INF/container.xml` and the rootfile are read, in this layer or the book layer, is
+  open in Q18.
+
+## D11 — Inflate memory: a caller-supplied window, decode tables inside the state
+
+- Context: Q1 asked who owns the inflate window and decode tables. The 32 KiB window is read at random
+  on every match copy and the tables on every symbol, so both want fast memory, of which a device may
+  have only a few tens of KiB to spare.
+- Decision: This settles Q1. The window is caller-supplied: `bartap_inflate_init` takes the window and
+  its size, and refuses a window smaller than `BARTAP_INFLATE_WINDOW_SIZE` with
+  `BARTAP_INFLATE_RESULT_INVALID_ARGUMENT`. The decode tables live inside the state struct, and their
+  size is not part of the contract.
+- Rationale: A state struct containing the 32 KiB window is easy to put on a small stack by mistake. A
+  caller-supplied window can live in a memory region the caller chooses: fast SRAM, or shared across
+  modes that never run together. Keeping the tables internal leaves the decoder's table design free to
+  change.
+- Alternatives considered: The window inside the state struct; the tables in a separate caller-supplied
+  workspace (Q1 B); the window and tables in one combined caller buffer (Q1 C); the caller's output
+  buffer as the window when a whole entry is decoded at once (Q1 D, which Q5 keeps open for a
+  whole-entry call).
+- Consequences and trade-offs: The tables sit wherever the caller puts the state, so a caller wanting
+  them in fast memory places the whole state there, and how large they are, compact or fast lookup
+  tables, stays an implementation matter (Q11 if it ever becomes a setting). Still to state when inflate
+  is implemented: one window may serve successive streams that never overlap in time, and two live
+  streams must never share one.

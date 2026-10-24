@@ -22,6 +22,7 @@ Layout of DIR:
     zip/NAME.zip                      valid archives
     zip/contents/PATH                 the contents of every file entry those archives hold
     zip-damaged/NAME.zip              truncated, corrupted and unsupported archives
+    zip-packaging/NAME.zip            valid archives that break an OCF packaging rule for mimetype
     manifest.json                     every case: its files, what it covers, and what to expect
 
 Determinism: the output depends only on this script, the Python version's zipfile and the zlib it links
@@ -32,7 +33,7 @@ hand-encoded stream, do not change.
 
 zlib is the oracle. Every valid stream is checked to decode to its expected output, every truncated one
 to be incomplete, and every invalid one to be rejected, before anything is written. For bit-flipped
-streams, whose damage is random, zlib's verdict is the expectation: bartap/inflate.h's acceptance rules
+streams, whose damage is random, zlib's verdict is the expectation: src/inflate.h's acceptance rules
 are chosen to be exactly zlib's.
 
 zlib cannot produce some cases (its matches never reach the full 32768-byte distance, and it chooses
@@ -59,7 +60,8 @@ DEFAULT_OUT = os.path.join(ROOT, "build", "tests", "generated")
 SEED = 20261023
 
 # the subdirectories this script makes and is therefore free to clear
-OWNED_DIRS = ("deflate", "deflate-truncated", "deflate-bitflip", "deflate-invalid", "zip", "zip-damaged")
+OWNED_DIRS = ("deflate", "deflate-truncated", "deflate-bitflip", "deflate-invalid", "zip", "zip-damaged",
+              "zip-packaging")
 MANIFEST = "manifest.json"
 
 # every entry in every archive is dated this (zip's DOS timestamps start in 1980)
@@ -640,17 +642,32 @@ def flip_byte(data, offset):
     return bytes(out)
 
 
-def add_zip(fx, name, data, entries, method, description, comment=b""):
+def zip_entry_records(data, entries, method, comment=b""):
     with zipfile.ZipFile(io.BytesIO(without_comment(data, comment))) as z:
         infos = z.infolist()
+    return [{"name": n,
+             "method": "stored" if method(n) == zipfile.ZIP_STORED else "deflated",
+             "size": len(contents), "crc32": zlib.crc32(contents),
+             "flags": info.flag_bits,
+             "contents": None if n.endswith("/") else "zip/contents/" + n}
+            for (n, contents), info in zip(entries, infos)]
+
+
+def add_zip(fx, name, data, entries, method, description, comment=b""):
     fx.case(kind="zip", name=name, description=description, expect="opens",
             input=fx.file("zip/%s.zip" % name, data), input_size=len(data), input_sha256=sha256(data),
-            entries=[{"name": n,
-                      "method": "stored" if method(n) == zipfile.ZIP_STORED else "deflated",
-                      "size": len(contents), "crc32": zlib.crc32(contents),
-                      "flags": info.flag_bits,
-                      "contents": None if n.endswith("/") else "zip/contents/" + n}
-                     for (n, contents), info in zip(entries, infos)])
+            entries=zip_entry_records(data, entries, method, comment))
+
+
+def add_packaging_zip(fx, name, data, entries, method, description, rule):
+    """A valid zip archive that breaks one OCF packaging rule for mimetype. Whether Bartap rejects it,
+    accepts it, or accepts it and reports the violation is open (Q19 in DESIGN-QUESTIONS.md), so the
+    expectation is only the label "packaging_violation", with the rule broken. entries says what reading
+    it must give if it is accepted; a "contents" path is under zip/contents/, except for mimetype's in
+    mimetype_wrong_content, which is that case's own."""
+    fx.case(kind="zip-packaging", name=name, description=description, expect="packaging_violation",
+            rule=rule, input=fx.file("zip-packaging/%s.zip" % name, data), input_size=len(data),
+            input_sha256=sha256(data), entries=zip_entry_records(data, entries, method))
 
 
 def add_damaged_zip(fx, name, data, description, reason, fails_at, entry=None):
@@ -704,13 +721,43 @@ def zip_cases(fx):
             "normal with every entry stored, so a stored entry's contents (the 20 KB chapter) span many "
             "reads.")
 
+    damaged_zip_cases(fx, normal, build_zip(entries, method=lambda n: zipfile.ZIP_STORED))
+    packaging_zip_cases(fx, entries)
+
+
+def packaging_zip_cases(fx, entries):
+    """normal, each breaking one of the OCF's packaging rules for mimetype (EPUB 3.3, OCF ZIP
+    container): it must be present, the first entry, stored, and hold exactly "application/epub+zip".
+    Each is otherwise a valid zip archive, unlike the zip-damaged cases."""
     reordered = entries[1:] + entries[:1]
     data = build_zip(reordered)
-    add_zip(fx, "mimetype_not_first", data, reordered, default_method,
-            "normal with mimetype moved to the end. A valid zip archive, which the zip reader must open; "
-            "it breaks the OCF rule that mimetype comes first, which is for the layer above to refuse.")
+    add_packaging_zip(fx, "mimetype_not_first", data, reordered, default_method,
+                      "normal with mimetype moved to the end.", "mimetype first")
 
-    damaged_zip_cases(fx, normal, build_zip(entries, method=lambda n: zipfile.ZIP_STORED))
+    def deflate_everything_but_directories(name):
+        return zipfile.ZIP_STORED if name.endswith("/") else zipfile.ZIP_DEFLATED
+    data = build_zip(entries, method=deflate_everything_but_directories)
+    assert zip_layout(data)["entries"]["mimetype"]["local"] == 0
+    add_packaging_zip(fx, "mimetype_deflated", data, entries, deflate_everything_but_directories,
+                      "normal with mimetype deflated instead of stored, still the first entry.",
+                      "mimetype stored")
+
+    wrong = b"application/epub+zip\n"
+    fx.file("zip-packaging/contents/mimetype_wrong_content/mimetype", wrong)
+    changed = [("mimetype", wrong)] + entries[1:]
+    data = build_zip(changed)
+    records = zip_entry_records(data, changed, default_method)
+    records[0]["contents"] = "zip-packaging/contents/mimetype_wrong_content/mimetype"
+    fx.case(kind="zip-packaging", name="mimetype_wrong_content",
+            description="normal with a newline after mimetype's content, \"application/epub+zip\\n\", "
+                        "as a text editor or a careless build script leaves it; still first and stored.",
+            expect="packaging_violation", rule="mimetype content",
+            input=fx.file("zip-packaging/mimetype_wrong_content.zip", data), input_size=len(data),
+            input_sha256=sha256(data), entries=records)
+
+    data = build_zip(entries[1:])
+    add_packaging_zip(fx, "mimetype_missing", data, entries[1:], default_method,
+                      "normal without the mimetype entry; META-INF/ is first.", "mimetype present")
 
 
 def damaged_zip_cases(fx, normal, stored):

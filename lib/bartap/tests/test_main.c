@@ -35,6 +35,7 @@ static const struct {
     const size_t *count;
 } suites[] = {
     { scaffold_tests, &scaffold_test_count },
+    { headers_tests, &headers_test_count },
 };
 
 static unsigned case_checks;

@@ -13,7 +13,8 @@ spine, navigation (the EPUB 3 navigation document or the EPUB 2 NCX), and EPUB C
 resolution. Layout and rendering are left to the caller. Whether Bartap also turns XHTML content
 documents into a styled text stream is open (Q17).
 
-**Status: scaffolding.** The interfaces in `include/bartap/` are drafts and nothing is implemented yet.
+**Status: scaffolding.** The interfaces in `include/bartap/` and `src/` are drafts and nothing is
+implemented yet; the book-level API (`bartap/epub.h`) is not designed yet (Q18).
 Decisions are in [DECISIONS.md](DECISIONS.md), open questions in
 [DESIGN-QUESTIONS.md](DESIGN-QUESTIONS.md).
 
@@ -24,7 +25,8 @@ the header and memory rules mechanically.
 
 - **Headers:** only `<stdint.h>`, `<stddef.h>`, `<stdbool.h>` and `<string.h>` (for `memcpy`, `memset`
   and `memcmp`).
-- **Names:** every public symbol and type starts with `bartap_`, and every macro with `BARTAP_`.
+- **Names:** every symbol and type starts with `bartap_`, and every macro with `BARTAP_`, internal ones
+  included: a static library's internal symbols are still global.
 - **Memory:** no dynamic allocation and no global or static mutable state. The caller owns all state
   and provides all working memory and output buffers (D3).
 - **I/O:** only through callbacks the caller supplies (D4).
@@ -63,8 +65,8 @@ See [tests/README.md](tests/README.md) for the tests and their fixtures.
 
 | Path | What it is |
 |---|---|
-| `include/bartap/` | Public headers: `byte_source.h`, `zip.h`, `inflate.h` |
-| `src/` | Implementation |
+| `include/bartap/` | Public headers: `epub.h` (the book-level API) and `byte_source.h` (D9) |
+| `src/` | Implementation, and the internal headers: `ocf.h` (the OCF container) and `inflate.h` (DEFLATE) |
 | `tests/` | Host tests, fixture generator, portability checks, the compiler-matrix runner |
 | `DECISIONS.md` | Decisions that shape Bartap, with their reasoning |
 | `DESIGN-QUESTIONS.md` | Open questions about the draft interfaces |

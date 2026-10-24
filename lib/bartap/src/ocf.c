@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Harsh Patel
 // SPDX-License-Identifier: MIT
 
-/* Zip reader (bartap/zip.h).
+/* OCF layer (ocf.h, internal).
  *
- * TODO: implement the interface in bartap/zip.h. Nothing here yet. */
+ * TODO: implement the interface in ocf.h. Nothing here yet. */
 
-#include "bartap/zip.h"
+#include "ocf.h"
