@@ -12,10 +12,11 @@
 //must execute at least one check: a case that executes none fails, so a test cannot pass vacuously
 //because an early return or an empty loop skipped everything it was meant to verify.
 //
-//the build supplies two directories as string literals:
+//the build supplies three directories as string literals:
 //  BARTAP_TESTS_FIXTURE_DIR    tests/fixtures, the committed fixtures
 //  BARTAP_TESTS_GENERATED_DIR  where make_fixtures.py wrote its inputs for this build (manifest.json
 //                              lists them)
+//  BARTAP_TESTS_BOOKS_DIR      where make_books.py wrote its books (books.json lists them)
 
 #include <stdbool.h>
 #include <stddef.h>
@@ -54,9 +55,13 @@ typedef struct {
 #define TEST_CASE(fn) { #fn, fn }
 
 //case tables, one per test file; add each new one to the list in test_main.c too
-extern const test_case_t scaffold_tests[];
-extern const size_t scaffold_test_count;
 extern const test_case_t headers_tests[];
 extern const size_t headers_test_count;
+extern const test_case_t xml_tests[];
+extern const size_t xml_test_count;
+extern const test_case_t text_tests[];
+extern const size_t text_test_count;
+extern const test_case_t epub_tests[];
+extern const size_t epub_test_count;
 
 #endif

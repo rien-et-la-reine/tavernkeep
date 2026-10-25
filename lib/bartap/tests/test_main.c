@@ -34,8 +34,10 @@ static const struct {
     const test_case_t *cases;
     const size_t *count;
 } suites[] = {
-    { scaffold_tests, &scaffold_test_count },
     { headers_tests, &headers_test_count },
+    { xml_tests, &xml_test_count },
+    { text_tests, &text_test_count },
+    { epub_tests, &epub_test_count },
 };
 
 static unsigned case_checks;

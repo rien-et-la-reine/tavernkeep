@@ -26,12 +26,27 @@ add_custom_command(
     COMMENT "Generating Bartap test inputs"
     VERBATIM
 )
-add_custom_target(bartap_fixtures DEPENDS "${BARTAP_TESTS_GENERATED_DIR}/manifest.json")
+# The books for the book-level cases, the CFI oracle and the fuzz seeds, beside (not inside) the generated
+# inputs, since make_fixtures.py refuses a directory holding anything it did not make
+set(BARTAP_TESTS_BOOKS_DIR "${CMAKE_CURRENT_BINARY_DIR}/books")
+add_custom_command(
+    OUTPUT "${BARTAP_TESTS_BOOKS_DIR}/books.json"
+    COMMAND "${Python3_EXECUTABLE}" -W ignore "${CMAKE_CURRENT_SOURCE_DIR}/make_books.py"
+        --out "${BARTAP_TESTS_BOOKS_DIR}"
+    DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/make_books.py"
+    COMMENT "Generating Bartap test books"
+    VERBATIM
+)
+add_custom_target(bartap_fixtures DEPENDS "${BARTAP_TESTS_GENERATED_DIR}/manifest.json"
+    "${BARTAP_TESTS_BOOKS_DIR}/books.json")
 
 set(BARTAP_TESTS_SOURCES
     test_main.c
-    test_scaffold.c
     test_headers.c
+    test_xml.c
+    test_text.c
+    test_epub.c
+    books.c
 )
 
 add_executable(bartap_tests ${BARTAP_TESTS_SOURCES})
@@ -43,29 +58,38 @@ set_target_properties(bartap_tests PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED 
 target_compile_definitions(bartap_tests PRIVATE
     BARTAP_TESTS_FIXTURE_DIR="${BARTAP_TESTS_FIXTURE_DIR}"
     BARTAP_TESTS_GENERATED_DIR="${BARTAP_TESTS_GENERATED_DIR}"
+    BARTAP_TESTS_BOOKS_DIR="${BARTAP_TESTS_BOOKS_DIR}"
 )
+
 # A test that compiles with a warning is one nobody has read closely
 target_compile_options(bartap_tests PRIVATE ${BARTAP_WARNING_OPTIONS})
 
 # Sanitizers and -m32 go on the library as well as the tests, so the library's own code is what they
 # check. The library's symbol check builds its own uninstrumented copy (below).
+set(BARTAP_TEST_TARGETS bartap bartap_tests)
+set(BARTAP_TEST_EXECUTABLES bartap_tests)
 if(BARTAP_TESTS_SANITIZE)
-    foreach(target bartap bartap_tests)
+    foreach(target IN LISTS BARTAP_TEST_TARGETS)
         target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-sanitize-recover=all
             -fno-omit-frame-pointer)
     endforeach()
-    target_link_options(bartap_tests PRIVATE -fsanitize=address,undefined)
+    foreach(target IN LISTS BARTAP_TEST_EXECUTABLES)
+        target_link_options(${target} PRIVATE -fsanitize=address,undefined)
+    endforeach()
 endif()
 if(BARTAP_TESTS_M32)
-    foreach(target bartap bartap_tests)
+    foreach(target IN LISTS BARTAP_TEST_TARGETS)
         target_compile_options(${target} PRIVATE -m32)
     endforeach()
-    target_link_options(bartap_tests PRIVATE -m32)
+    foreach(target IN LISTS BARTAP_TEST_EXECUTABLES)
+        target_link_options(${target} PRIVATE -m32)
+    endforeach()
 endif()
 
 add_test(NAME bartap COMMAND bartap_tests)
 add_test(NAME bartap_shuffled COMMAND bartap_tests --shuffle 20261023)
 add_test(NAME harness_selftest COMMAND bartap_tests --selftest)
+
 
 # ------------------------------------------------------------------ portability checks
 

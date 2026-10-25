@@ -1,13 +1,17 @@
 // SPDX-FileCopyrightText: 2026 Harsh Patel
 // SPDX-License-Identifier: MIT
 
-//the library's headers, public and internal, included together as the tests will use them. nothing is
-//implemented yet, so the only checks are on constants the specifications fix
+//the library's headers, public and internal, included together as the tests use them, and the constants
+//the specifications fix
 
 #include "bartap/byte_source.h"
 #include "bartap/epub.h"
+#include "bartap/text.h"
+#include "crc.h"
 #include "inflate.h"
+#include "names.h"
 #include "ocf.h"
+#include "snapshot.h"
 #include "xml.h"
 
 #include "harness.h"
