@@ -108,6 +108,7 @@ typedef enum {
 #define BARTAP_EPUB_STREAM_SIZE 2560U
 #define BARTAP_EPUB_TOC_SIZE 4864U
 #define BARTAP_EPUB_FINDER_SIZE 448U
+#define BARTAP_EPUB_RESOLVER_SIZE 1152U
 
 #define BARTAP_EPUB_OPAQUE(size) union { max_align_t align; unsigned char bytes[size]; }
 
@@ -135,6 +136,11 @@ typedef struct {
 typedef struct {
     BARTAP_EPUB_OPAQUE(BARTAP_EPUB_FINDER_SIZE) storage;
 } bartap_epub_finder_t;
+
+/* A CFI being resolved. Private. */
+typedef struct {
+    BARTAP_EPUB_OPAQUE(BARTAP_EPUB_RESOLVER_SIZE) storage;
+} bartap_epub_resolver_t;
 
 /* One spine item, in an array the caller supplies. Its fields are private. */
 typedef struct {
@@ -339,5 +345,51 @@ bartap_epub_result_t bartap_epub_toc_next(bartap_epub_toc_t *toc, bartap_epub_to
 /* What leniency recovered from in the navigation document or NCX:
  * BARTAP_TEXT_WARNING_* bits (text.h), the same values. */
 uint32_t bartap_epub_toc_warnings(const bartap_epub_toc_t *toc);
+
+/* ------------------------------------------------------------- CFI */
+
+typedef struct {
+    uint32_t spine_index;                       //from the step after /6
+    uint32_t step_count;                        //steps after the "!"
+    uint32_t steps[BARTAP_EPUB_CFI_STEPS_MAX];
+    bool has_offset;                            //a ":" character offset was given
+    uint32_t offset;
+} bartap_epub_cfi_t;
+
+/* Parse text (NUL-terminated, "epubcfi(...)" or the bare path). CORRUPT if
+ * malformed; UNSUPPORTED for what Bartap does not handle; LIMIT_EXCEEDED for
+ * more than BARTAP_EPUB_CFI_STEPS_MAX steps. */
+bartap_epub_result_t bartap_epub_cfi_parse(const char *text, bartap_epub_cfi_t *cfi);
+
+/* Write *cfi as "epubcfi(/6/N!/...)" with a NUL, the form bartap_epub_cfi_parse
+ * reads back. LIMIT_EXCEEDED, with buffer holding an empty string, if it does
+ * not fit (BARTAP_EPUB_CFI_TEXT_MAX always does). */
+#define BARTAP_EPUB_CFI_TEXT_MAX (20U + 11U * (BARTAP_EPUB_CFI_STEPS_MAX + 1U) + 11U + 2U)
+bartap_epub_result_t bartap_epub_cfi_format(const bartap_epub_cfi_t *cfi, char *buffer, size_t buffer_size);
+
+/* Document order: negative if a comes before b, 0 if the same place,
+ * positive if after. An element comes before everything inside it; a missing
+ * offset counts as 0. */
+int bartap_epub_cfi_compare(const bartap_epub_cfi_t *a, const bartap_epub_cfi_t *b);
+
+/* The resolver reads the markup as text.h does, and must be given the same
+ * flag for their CFIs to agree. */
+#define BARTAP_EPUB_RESOLVE_STRICT (1UL << 2)
+
+/* Start resolving *cfi, in the content document of spine item
+ * cfi->spine_index, which the caller then feeds. No read. */
+bartap_epub_result_t bartap_epub_cfi_resolver_init(bartap_epub_resolver_t *resolver, const bartap_epub_cfi_t *cfi,
+    uint32_t flags);
+
+/* Feed bytes from in, as bartap_text_next is fed: *in_used says how many were
+ * taken, and the rest must be offered again; input_ends says in holds the
+ * last of the document. Once *done is set, *position is the byte offset in
+ * the document where the target element's start tag, or the target
+ * character, begins (for a character in text that does not map byte for
+ * byte, an entity or a CR LF in it, where that run of text begins).
+ * NOT_FOUND if the document has no such element or character. Errors are
+ * final. No read; work linear in in_size. */
+bartap_epub_result_t bartap_epub_cfi_resolve_next(bartap_epub_resolver_t *resolver, const uint8_t *in,
+    size_t in_size, size_t *in_used, bool input_ends, bool *done, uint32_t *position);
 
 #endif

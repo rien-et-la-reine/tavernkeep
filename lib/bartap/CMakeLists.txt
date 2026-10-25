@@ -31,11 +31,13 @@ set(BARTAP_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/xml.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/entities.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/epub.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/cfi.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/text.c
 )
 # The object names the symbol checks look for, here and in an including project's own check
-set(BARTAP_OBJECTS byte_source.c crc.c ocf.c inflate.c xml.c entities.c epub.c
+set(BARTAP_OBJECTS byte_source.c crc.c ocf.c inflate.c xml.c entities.c epub.c cfi.c text.c
     CACHE INTERNAL "Bartap's source files, for the symbol checks")
-# include/ holds the public headers (bartap/epub.h, bartap/byte_source.h); src/ holds the
+# include/ holds the public headers (bartap/epub.h, bartap/text.h, bartap/byte_source.h); src/ holds the
 # internal ones (ocf.h, inflate.h, xml.h and their helpers), private to the library and its host tests (D9)
 set(BARTAP_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(BARTAP_PRIVATE_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
