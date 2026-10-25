@@ -129,7 +129,7 @@ typedef enum { TAKE, KEEP, EMIT, EMIT_TAKE } step_t;
 static step_t put_utf8(bartap_xml_t *x, uint8_t b, bartap_xml_result_t *result)
 {
     if (x->utf8_need > 0U) {
-        if (b >= x->utf8_low && b <= x->utf8_high) {
+        if (b >= x->utf8_low && b <= x->utf8_high && x->utf8_have < sizeof x->utf8) {
             x->utf8[x->utf8_have++] = b;
             x->utf8_low = 0x80;
             x->utf8_high = 0xBF;
@@ -689,6 +689,9 @@ static step_t bang(bartap_xml_t *x, uint8_t b, bartap_xml_result_t *result)
     static const char keywords[3][8] = { "--", "[CDATA[", "DOCTYPE" };
     static const uint8_t lengths[3] = { 2, 7, 7 };
     static const uint8_t next[3] = { STAGE_COMMENT, STAGE_CDATA, STAGE_DOCTYPE };
+    if (x->entity_length >= 7U) {
+        x->entity_length = 0;       //cannot happen from input; a guard for a restored snapshot
+    }
     x->entity[x->entity_length++] = b;
     for (size_t i = 0; i < 3U; i++) {
         if (x->entity_length <= lengths[i] && memcmp(x->entity, keywords[i], x->entity_length) == 0) {
@@ -928,4 +931,166 @@ bartap_xml_result_t bartap_xml_next(bartap_xml_t *xml, const uint8_t *in, size_t
     }
     xml->status = BARTAP_XML_RESULT_TRUNCATED;
     return xml->status;
+}
+
+/* ------------------------------------------------------------ snapshots */
+
+enum {
+    BIT_AFTER_CR = 1U << 0,
+    BIT_DECODED = 1U << 1,
+    BIT_TRUNCATED = 1U << 2,
+    BIT_ROOT_SEEN = 1U << 3,
+    BIT_ROOT_CLOSED = 1U << 4,
+};
+
+void bartap_xml_save(const bartap_xml_t *xml, bartap_writer_t *w, size_t keep, const uint32_t *rewind_position,
+    bool rewind_cdata)
+{
+    bartap_xml_t x = *xml;
+    if (rewind_position != NULL) {
+        //inside a run of text with nothing buffered: every partial construct is behind the offset
+        x.stage = rewind_cdata ? STAGE_CDATA : STAGE_CONTENT;
+        x.length = 0;
+        x.match = 0;
+        x.entity_length = 0;
+        x.entity_return = STAGE_CONTENT;
+        x.utf8_have = 0;
+        x.utf8_need = 0;
+        x.after_cr = false;
+        x.decoded = false;
+        x.truncated = false;
+        x.pending_ends = 0;
+        x.position = *rewind_position;
+        x.token_position = *rewind_position;
+        x.entity_position = *rewind_position;
+        x.utf8_position = *rewind_position;
+        keep = 0;
+    }
+    if (keep < x.length) {
+        keep = x.length;
+    }
+    bartap_put32(w, x.flags);
+    bartap_put32(w, x.warnings);
+    bartap_put32(w, x.depth);
+    bartap_put32(w, x.pending_ends);
+    bartap_put32(w, x.name_hash);
+    bartap_put32(w, x.position);
+    bartap_put32(w, x.token_position);
+    bartap_put32(w, x.entity_position);
+    bartap_put32(w, x.utf8_position);
+    bartap_put16(w, (uint32_t)x.length);
+    bartap_put16(w, (uint32_t)x.name_length);
+    bartap_put16(w, (uint32_t)x.value_start);
+    bartap_put16(w, (uint32_t)x.end_name_length);
+    bartap_put16(w, (uint32_t)keep);
+    bartap_put8(w, x.stage);
+    bartap_put8(w, x.quote);
+    bartap_put8(w, x.entity_return);
+    bartap_put8(w, x.match);
+    bartap_put8(w, x.brackets);
+    bartap_put8(w, x.bom);
+    bartap_put8(w, x.utf8_need);
+    bartap_put8(w, x.utf8_low);
+    bartap_put8(w, x.utf8_high);
+    bartap_put8(w, (x.after_cr ? BIT_AFTER_CR : 0U) | (x.decoded ? BIT_DECODED : 0U) | (x.truncated ? BIT_TRUNCATED : 0U)
+        | (x.root_seen ? BIT_ROOT_SEEN : 0U) | (x.root_closed ? BIT_ROOT_CLOSED : 0U));
+    bartap_put8(w, x.entity_length);
+    bartap_put_bytes(w, x.entity, x.entity_length);
+    bartap_put8(w, x.utf8_have);
+    bartap_put_bytes(w, x.utf8, x.utf8_have);
+    for (uint32_t i = 0; i < x.depth && i < x.max_depth; i++) {
+        bartap_put32(w, x.stack[i]);
+    }
+    bartap_put_bytes(w, x.buffer, keep);
+}
+
+static bool in_tag(uint8_t stage, uint8_t entity_return)
+{
+    const uint8_t s = stage == STAGE_ENTITY ? entity_return : stage;
+    return s >= STAGE_ATTRIBUTE_SPACE && s <= STAGE_EMPTY_CLOSE;     //name_length is set once the name is complete
+}
+
+static bool in_value(uint8_t stage, uint8_t entity_return)
+{
+    const uint8_t s = stage == STAGE_ENTITY ? entity_return : stage;
+    return s == STAGE_ATTRIBUTE_VALUE || s == STAGE_ATTRIBUTE_UNQUOTED || s == STAGE_UNQUOTED_SLASH;
+}
+
+bool bartap_xml_restore(bartap_xml_t *xml, bartap_reader_t *r, bool apply, uint32_t *position)
+{
+    bartap_xml_t x = *xml;
+    if (bartap_get32(r) != x.flags || x.status != BARTAP_XML_RESULT_OK) {
+        return false;
+    }
+    x.warnings = bartap_get32(r);
+    x.depth = bartap_get32(r);
+    x.pending_ends = bartap_get32(r);
+    x.name_hash = bartap_get32(r);
+    x.position = bartap_get32(r);
+    x.token_position = bartap_get32(r);
+    x.entity_position = bartap_get32(r);
+    x.utf8_position = bartap_get32(r);
+    x.length = bartap_get16(r);
+    x.name_length = bartap_get16(r);
+    x.value_start = bartap_get16(r);
+    x.end_name_length = bartap_get16(r);
+    const size_t keep = bartap_get16(r);
+    x.stage = (uint8_t)bartap_get8(r);
+    x.quote = (uint8_t)bartap_get8(r);
+    x.entity_return = (uint8_t)bartap_get8(r);
+    x.match = (uint8_t)bartap_get8(r);
+    x.brackets = (uint8_t)bartap_get8(r);
+    x.bom = (uint8_t)bartap_get8(r);
+    x.utf8_need = (uint8_t)bartap_get8(r);
+    x.utf8_low = (uint8_t)bartap_get8(r);
+    x.utf8_high = (uint8_t)bartap_get8(r);
+    const uint32_t bits = bartap_get8(r);
+    x.after_cr = (bits & BIT_AFTER_CR) != 0U;
+    x.decoded = (bits & BIT_DECODED) != 0U;
+    x.truncated = (bits & BIT_TRUNCATED) != 0U;
+    x.root_seen = (bits & BIT_ROOT_SEEN) != 0U;
+    x.root_closed = (bits & BIT_ROOT_CLOSED) != 0U;
+    x.entity_length = (uint8_t)bartap_get8(r);
+    if (x.entity_length > sizeof x.entity) {
+        return false;
+    }
+    const uint8_t *entity = bartap_get_bytes(r, x.entity_length);
+    x.utf8_have = (uint8_t)bartap_get8(r);
+    if (x.utf8_have > sizeof x.utf8 || x.utf8_need > 3U || x.utf8_have + x.utf8_need > sizeof x.utf8) {
+        return false;
+    }
+    const uint8_t *utf8 = bartap_get_bytes(r, x.utf8_have);
+    if (r->short_input || bits > 0x1FU || x.stage > STAGE_DONE || x.depth > x.max_depth || x.pending_ends > x.depth
+            || x.length > x.buffer_size || x.name_length > x.buffer_size || x.value_start > x.buffer_size
+            || x.end_name_length > x.buffer_size || keep > x.buffer_size || keep < x.length
+            || (x.pending_ends > 0U && x.end_name_length > keep)
+            || x.token_position > x.position || x.entity_position > x.position || x.utf8_position > x.position
+            || (x.entity_return != STAGE_CONTENT && x.entity_return != STAGE_ATTRIBUTE_VALUE
+                && x.entity_return != STAGE_ATTRIBUTE_UNQUOTED)
+            || (in_tag(x.stage, x.entity_return) && x.name_length > x.length)
+            || (in_value(x.stage, x.entity_return) && (x.name_length > x.value_start || x.value_start > x.length))
+            || (x.stage == STAGE_BANG && x.entity_length >= 7U)) {
+        return false;
+    }
+    //the stack, then the buffer: read in place, copied only when applying
+    const uint8_t *stack = bartap_get_bytes(r, (size_t)x.depth * 4U);
+    const uint8_t *buffer = bartap_get_bytes(r, keep);
+    if (r->short_input) {
+        return false;
+    }
+    *position = x.position;
+    if (!apply) {
+        return true;
+    }
+    memcpy(x.entity, entity, x.entity_length);
+    memcpy(x.utf8, utf8, x.utf8_have);
+    for (uint32_t i = 0; i < x.depth; i++) {
+        const uint8_t *p = stack + 4U * i;
+        x.stack[i] = p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    }
+    if (keep > 0U) {
+        memcpy(x.buffer, buffer, keep);
+    }
+    *xml = x;
+    return true;
 }

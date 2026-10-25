@@ -68,7 +68,13 @@
  * or repair it differently.
  *
  * Moving about. bartap_text_seek and bartap_text_seek_id suppress delivery
- * until a position or an element id. Keep a position as its CFI.
+ * until a position or an element id. bartap_text_save writes a compact copy
+ * of the state, and bartap_text_restore takes it back, with the document
+ * offset from which feeding must resume: from a copy in memory that is a
+ * jump; from a stream, it means reading the entry again from its start and
+ * discarding the bytes before that offset, which still saves the tokenizing.
+ * A snapshot is not a position to keep across firmware versions or for
+ * another build: store the CFI for that.
  *
  * Bounded work: every call does at most one tokenizer call, so work linear
  * in in_size plus the nesting depth. No call reads. */
@@ -83,6 +89,7 @@
 #define BARTAP_TEXT_DEPTH_MAX 64U               //element nesting accepted; deeper is LIMIT_EXCEEDED
 
 #define BARTAP_TEXT_SIZE 2560U
+#define BARTAP_TEXT_SNAPSHOT_MAX 2048U          //the largest snapshot bartap_text_save writes
 
 /* A content document being read as text. Private. */
 typedef struct {
@@ -202,5 +209,23 @@ bartap_epub_result_t bartap_text_seek(bartap_text_t *text, const bartap_epub_cfi
  * rule; bartap_text_position then gives a CFI to keep. Replaces any seek
  * waiting. */
 bartap_epub_result_t bartap_text_seek_id(bartap_text_t *text, const uint8_t *id, size_t id_length);
+
+/* Write a compact, versioned, CRC-32-checked copy of the state into buffer;
+ * *length gets its size. Allowed between any two calls; LIMIT_EXCEEDED if
+ * buffer_size is too small (BARTAP_TEXT_SNAPSHOT_MAX always suffices),
+ * INVALID_ARGUMENT after an error. A snapshot holds no pointers, so it may be
+ * restored into another bartap_text_t; a bartap_text_t may also be copied
+ * whole with memcpy, but only back into the same object, in the same build. */
+bartap_epub_result_t bartap_text_save(const bartap_text_t *text, uint8_t *buffer, size_t buffer_size,
+    size_t *length);
+
+/* Restore a snapshot into a text initialized with the same spine index and
+ * flags (INVALID_ARGUMENT otherwise). *resume_at is the document offset from
+ * which input must be fed next. A snapshot is untrusted input: every field is
+ * checked, and one from another format version, damaged or inconsistent is
+ * CORRUPT, leaving the text as it was. No item has been delivered after a
+ * restore, as far as bartap_text_position and bartap_text_override go. */
+bartap_epub_result_t bartap_text_restore(bartap_text_t *text, const uint8_t *buffer, size_t length,
+    bartap_offset_t *resume_at);
 
 #endif

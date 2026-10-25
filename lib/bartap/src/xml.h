@@ -59,6 +59,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "snapshot.h"
+
 /* Values are fixed and the list is append-only (D18). */
 typedef enum {
     BARTAP_XML_RESULT_OK = 0,
@@ -159,6 +161,18 @@ bartap_xml_result_t bartap_xml_init(bartap_xml_t *xml, uint8_t *buffer, size_t b
  * event completed. Errors are final. */
 bartap_xml_result_t bartap_xml_next(bartap_xml_t *xml, const uint8_t *in, size_t in_size, size_t *in_used,
     bool input_ends, bartap_xml_event_t *event);
+
+/* Snapshots, for text.h's save and restore. bartap_xml_save writes the state, with the token buffer's
+ * first keep bytes (at least what the buffer holds; more where an event the caller still holds points
+ * past that). With rewind_position not NULL, it writes the state as it would be had the tokenizer just
+ * reached that offset inside text that maps byte for byte onto the document (rewind_cdata: inside a CDATA
+ * section) with nothing buffered; the caller then feeds input from there. bartap_xml_restore reads a
+ * snapshot back into a tokenizer initialized with the same buffer, depth and flags: with apply false it
+ * only checks, and changes nothing. false if the snapshot is inconsistent; every value that could take a
+ * later call out of bounds is checked. *position gets the restored document offset. */
+void bartap_xml_save(const bartap_xml_t *xml, bartap_writer_t *w, size_t keep, const uint32_t *rewind_position,
+    bool rewind_cdata);
+bool bartap_xml_restore(bartap_xml_t *xml, bartap_reader_t *r, bool apply, uint32_t *position);
 
 /* 32-bit FNV-1a, as used for end-tag matching (and by the book layer). */
 #define BARTAP_XML_HASH_INIT 2166136261UL

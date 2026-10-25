@@ -13,7 +13,9 @@
 
 #include <string.h>
 
+#include "crc.h"
 #include "names.h"
+#include "snapshot.h"
 #include "xml.h"
 
 #define TOKEN_SIZE 512U
@@ -92,6 +94,7 @@ _Static_assert(BARTAP_TEXT_WARNING_ENTITY == BARTAP_XML_WARNING_ENTITY
     && BARTAP_TEXT_WARNING_MARKUP == BARTAP_XML_WARNING_MARKUP
     && BARTAP_TEXT_WARNING_END_TAG == BARTAP_XML_WARNING_END_TAG
     && BARTAP_TEXT_WARNING_ENCODING == BARTAP_XML_WARNING_ENCODING, "the tokenizer's warning bits are the text layer's");
+_Static_assert(TOKEN_SIZE <= UINT16_MAX, "snapshot offsets are 16-bit");
 
 static text_t *text_state(bartap_text_t *text)
 {
@@ -676,3 +679,321 @@ bartap_epub_result_t bartap_text_seek_id(bartap_text_t *text, const uint8_t *id,
     return BARTAP_EPUB_RESULT_OK;
 }
 
+/* ------------------------------------------------------------ snapshots */
+
+#define SNAPSHOT_MAGIC_0 'B'
+#define SNAPSHOT_MAGIC_1 'T'
+#define SNAPSHOT_VERSION 1U
+
+enum {
+    BIT_HOLDING = 1U << 0,
+    BIT_FINISHED = 1U << 1,
+    BIT_HAS_OVERRIDE = 1U << 2,
+    BIT_OVERRIDE_USER = 1U << 3,
+    BIT_ID_MATCHED = 1U << 4,
+    BIT_NAME_MATCHED = 1U << 5,
+    BIT_CFI_OFFSET = 1U << 6,
+};
+
+enum {
+    EVENT_EMPTY = 1U << 0,
+    EVENT_MORE = 1U << 1,
+    EVENT_DECODED = 1U << 2,
+    EVENT_CDATA = 1U << 3,
+    EVENT_TRUNCATED = 1U << 4,
+    EVENT_NAME = 1U << 5,           //name is not NULL
+    EVENT_VALUE = 1U << 6,
+};
+
+//where a pointer of a held event is in the token buffer
+static uint32_t token_offset(const text_t *t, const uint8_t *p)
+{
+    return p == NULL ? 0U : (uint32_t)(p - t->token);
+}
+
+/* The largest snapshot: the fixed fields, every level, every hash on the tokenizer's stack, a whole token
+ * buffer and the longest word and seek id. Checked against BARTAP_TEXT_SNAPSHOT_MAX below. */
+#define SNAPSHOT_FIXED 160U
+#define SNAPSHOT_LARGEST (SNAPSHOT_FIXED + (DEPTH_MAX + 1U) * 14U + DEPTH_MAX * 4U + TOKEN_SIZE \
+    + BARTAP_TEXT_WORD_MAX + BARTAP_EPUB_FRAGMENT_MAX + BARTAP_EPUB_CFI_STEPS_MAX * 4U)
+_Static_assert(SNAPSHOT_LARGEST <= BARTAP_TEXT_SNAPSHOT_MAX, "BARTAP_TEXT_SNAPSHOT_MAX is too small");
+
+bartap_epub_result_t bartap_text_save(const bartap_text_t *text, uint8_t *buffer, size_t buffer_size,
+    size_t *length)
+{
+    if (text == NULL || buffer == NULL || length == NULL) {
+        return BARTAP_EPUB_RESULT_INVALID_ARGUMENT;
+    }
+    *length = 0;
+    const text_t *t = text_state_const(text);
+    if (t->status != BARTAP_EPUB_RESULT_OK) {
+        return BARTAP_EPUB_RESULT_INVALID_ARGUMENT;
+    }
+    bartap_writer_t w = { buffer, buffer_size, 0, false };
+    /* A held TEXT event that maps byte for byte onto the document is not kept: the tokenizer is written as
+     * if it had just reached where the text layer stopped in it, so the caller feeds from there. */
+    const bool rewind = t->holding && t->held.kind == BARTAP_XML_EVENT_TEXT && !t->held.decoded;
+    const bool holding = t->holding && !rewind;
+    const uint32_t rewind_position = t->held.position + (uint32_t)t->held_used;
+    //a word already delivered is over
+    const uint8_t word_length = t->delivered ? 0U : t->word_length;
+    bartap_put8(&w, SNAPSHOT_MAGIC_0);
+    bartap_put8(&w, SNAPSHOT_MAGIC_1);
+    bartap_put8(&w, SNAPSHOT_VERSION);
+    bartap_put32(&w, t->spine_index);
+    bartap_put32(&w, t->flags);
+    bartap_put32(&w, t->depth);
+    bartap_put32(&w, t->skip_depth);
+    bartap_put32(&w, t->units);
+    bartap_put8(&w, t->pending);
+    bartap_put8(&w, t->seek);
+    bartap_put8(&w, (holding ? BIT_HOLDING : 0U) | (t->finished ? BIT_FINISHED : 0U)
+        | (t->has_override ? BIT_HAS_OVERRIDE : 0U) | (t->override.set_user ? BIT_OVERRIDE_USER : 0U)
+        | (t->id_matched ? BIT_ID_MATCHED : 0U) | (t->name_matched ? BIT_NAME_MATCHED : 0U)
+        | (t->seek_cfi.has_offset ? BIT_CFI_OFFSET : 0U));
+    for (uint32_t d = 0; d <= t->depth && d <= DEPTH_MAX; d++) {
+        const level_t *l = &t->levels[d];
+        bartap_put32(&w, l->index);
+        bartap_put32(&w, l->children);
+        bartap_put16(&w, l->user);
+        bartap_put8(&w, l->style);
+        bartap_put8(&w, l->heading);
+        bartap_put8(&w, l->indent);
+        bartap_put8(&w, l->flags);
+    }
+    bartap_put8(&w, word_length);
+    bartap_put_bytes(&w, t->word, word_length);
+    bartap_put8(&w, t->word_before);
+    bartap_put32(&w, t->word_depth);
+    bartap_put32(&w, t->word_step);
+    bartap_put32(&w, t->word_units);
+    const bartap_text_override_t *o = &t->override;
+    bartap_put8(&w, o->style_clear);
+    bartap_put8(&w, o->style_set);
+    bartap_put8(&w, o->display);
+    bartap_put8(&w, o->heading);
+    bartap_put8(&w, (uint8_t)o->indent);
+    bartap_put16(&w, o->user);
+    bartap_put8(&w, t->seek_id_length);
+    bartap_put_bytes(&w, t->seek_id, t->seek_id_length);
+    bartap_put32(&w, t->seek_cfi.spine_index);
+    bartap_put32(&w, t->seek_cfi.offset);
+    bartap_put8(&w, t->seek_cfi.step_count);
+    for (uint32_t i = 0; i < t->seek_cfi.step_count && i < BARTAP_EPUB_CFI_STEPS_MAX; i++) {
+        bartap_put32(&w, t->seek_cfi.steps[i]);
+    }
+    size_t keep = 0;
+    if (holding) {
+        const bartap_xml_event_t *e = &t->held;
+        const uint32_t name = token_offset(t, e->name);
+        const uint32_t value = token_offset(t, e->value);
+        bartap_put8(&w, e->kind);
+        bartap_put8(&w, (e->empty ? EVENT_EMPTY : 0U) | (e->more ? EVENT_MORE : 0U) | (e->decoded ? EVENT_DECODED : 0U)
+            | (e->cdata ? EVENT_CDATA : 0U) | (e->truncated ? EVENT_TRUNCATED : 0U)
+            | (e->name != NULL ? EVENT_NAME : 0U) | (e->value != NULL ? EVENT_VALUE : 0U));
+        bartap_put32(&w, e->depth);
+        bartap_put32(&w, e->position);
+        bartap_put16(&w, name);
+        bartap_put16(&w, (uint32_t)e->name_length);
+        bartap_put16(&w, value);
+        bartap_put16(&w, (uint32_t)e->value_length);
+        bartap_put16(&w, (uint32_t)t->held_used);
+        //the bytes it points at go with the tokenizer's buffer
+        if (e->name != NULL && name + e->name_length > keep) {
+            keep = name + e->name_length;
+        }
+        if (e->value != NULL && value + e->value_length > keep) {
+            keep = value + e->value_length;
+        }
+    }
+    bartap_xml_save(&t->xml, &w, keep, rewind ? &rewind_position : NULL, rewind && t->held.cdata);
+    if (w.overflow || w.size - w.length < 4U) {
+        return BARTAP_EPUB_RESULT_LIMIT_EXCEEDED;
+    }
+    bartap_put32(&w, bartap_crc32_final(bartap_crc32_update(BARTAP_CRC32_INIT, buffer, w.length)));
+    *length = w.length;
+    return BARTAP_EPUB_RESULT_OK;
+}
+
+//read a snapshot: with apply false only check it; true if it is consistent
+static bool restore(text_t *t, const uint8_t *buffer, size_t length, bool apply)
+{
+    bartap_reader_t r = { buffer, length - 4U, 0, false };
+    if (bartap_get8(&r) != SNAPSHOT_MAGIC_0 || bartap_get8(&r) != SNAPSHOT_MAGIC_1
+            || bartap_get8(&r) != SNAPSHOT_VERSION) {
+        return false;
+    }
+    if (bartap_get32(&r) != t->spine_index || bartap_get32(&r) != t->flags) {
+        return false;
+    }
+    const uint32_t depth = bartap_get32(&r);
+    const uint32_t skip_depth = bartap_get32(&r);
+    const uint32_t units = bartap_get32(&r);
+    const uint32_t pending = bartap_get8(&r);
+    const uint32_t seek = bartap_get8(&r);
+    const uint32_t bits = bartap_get8(&r);
+    if (r.short_input || depth > DEPTH_MAX || skip_depth > depth || pending > BARTAP_TEXT_BEFORE_PARAGRAPH
+            || seek > SEEK_ID || bits > 0x7FU) {
+        return false;
+    }
+    for (uint32_t d = 0; d <= depth; d++) {
+        level_t l;
+        l.index = bartap_get32(&r);
+        l.children = bartap_get32(&r);
+        l.user = (uint16_t)bartap_get16(&r);
+        l.style = (uint8_t)bartap_get8(&r);
+        l.heading = (uint8_t)bartap_get8(&r);
+        l.indent = (uint8_t)bartap_get8(&r);
+        l.flags = (uint8_t)bartap_get8(&r);
+        if (l.heading > 6U || (l.flags & ~(LEVEL_BLOCK | LEVEL_DROPPED)) != 0U) {
+            return false;
+        }
+        if (apply) {
+            t->levels[d] = l;
+        }
+    }
+    const uint32_t word_length = bartap_get8(&r);
+    if (word_length > BARTAP_TEXT_WORD_MAX) {
+        return false;
+    }
+    const uint8_t *word = bartap_get_bytes(&r, word_length);
+    const uint32_t word_before = bartap_get8(&r);
+    const uint32_t word_depth = bartap_get32(&r);
+    const uint32_t word_step = bartap_get32(&r);
+    const uint32_t word_units = bartap_get32(&r);
+    bartap_text_override_t o;
+    memset(&o, 0, sizeof o);
+    o.style_clear = (uint8_t)bartap_get8(&r);
+    o.style_set = (uint8_t)bartap_get8(&r);
+    o.display = (uint8_t)bartap_get8(&r);
+    o.heading = (uint8_t)bartap_get8(&r);
+    o.indent = (int8_t)(uint8_t)bartap_get8(&r);
+    o.user = (uint16_t)bartap_get16(&r);
+    o.set_user = (bits & BIT_OVERRIDE_USER) != 0U;
+    const uint32_t id_length = bartap_get8(&r);
+    if (id_length > BARTAP_EPUB_FRAGMENT_MAX) {
+        return false;
+    }
+    const uint8_t *id = bartap_get_bytes(&r, id_length);
+    bartap_epub_cfi_t cfi;
+    memset(&cfi, 0, sizeof cfi);
+    cfi.spine_index = bartap_get32(&r);
+    cfi.offset = bartap_get32(&r);
+    cfi.has_offset = (bits & BIT_CFI_OFFSET) != 0U;
+    cfi.step_count = bartap_get8(&r);
+    if (cfi.step_count > BARTAP_EPUB_CFI_STEPS_MAX) {
+        return false;
+    }
+    for (uint32_t i = 0; i < cfi.step_count; i++) {
+        cfi.steps[i] = bartap_get32(&r);
+    }
+    if (r.short_input || word_before > BARTAP_TEXT_BEFORE_PARAGRAPH || word_depth > DEPTH_MAX
+            || o.display > BARTAP_TEXT_DISPLAY_NONE || o.heading > 7U) {
+        return false;
+    }
+    bartap_xml_event_t held;
+    memset(&held, 0, sizeof held);
+    size_t held_used = 0;
+    const bool holding = (bits & BIT_HOLDING) != 0U;
+    if (holding) {
+        held.kind = (uint8_t)bartap_get8(&r);
+        const uint32_t flags = bartap_get8(&r);
+        held.depth = bartap_get32(&r);
+        held.position = bartap_get32(&r);
+        const uint32_t name = bartap_get16(&r);
+        held.name_length = bartap_get16(&r);
+        const uint32_t value = bartap_get16(&r);
+        held.value_length = bartap_get16(&r);
+        held_used = bartap_get16(&r);
+        const size_t used_max = held.kind == BARTAP_XML_EVENT_TEXT ? held.value_length
+            : held.kind == BARTAP_XML_EVENT_START_END ? HELD_APPLY : 0U;
+        if (r.short_input || held.kind < BARTAP_XML_EVENT_START || held.kind > BARTAP_XML_EVENT_DONE
+                || flags > 0x7FU || held.depth > DEPTH_MAX || name + held.name_length > TOKEN_SIZE
+                || value + held.value_length > TOKEN_SIZE || held_used > used_max
+                || ((held.kind == BARTAP_XML_EVENT_START || held.kind == BARTAP_XML_EVENT_START_END)
+                    && (flags & EVENT_NAME) == 0U)) {
+            return false;
+        }
+        held.empty = (flags & EVENT_EMPTY) != 0U;
+        held.more = (flags & EVENT_MORE) != 0U;
+        held.decoded = (flags & EVENT_DECODED) != 0U;
+        held.cdata = (flags & EVENT_CDATA) != 0U;
+        held.truncated = (flags & EVENT_TRUNCATED) != 0U;
+        held.name = (flags & EVENT_NAME) != 0U ? t->token + name : NULL;
+        held.value = (flags & EVENT_VALUE) != 0U ? t->token + value : NULL;
+        if ((held.name == NULL && held.name_length != 0U) || (held.value == NULL && held.value_length != 0U)) {
+            return false;
+        }
+    }
+    uint32_t position;
+    if (!bartap_xml_restore(&t->xml, &r, apply, &position) || r.at != r.length
+            || (holding && held.position > position)) {
+        return false;
+    }
+    if (!apply) {
+        return true;
+    }
+    t->depth = depth;
+    t->skip_depth = skip_depth;
+    t->units = units;
+    t->pending = (uint8_t)pending;
+    t->seek = (uint8_t)seek;
+    t->finished = (bits & BIT_FINISHED) != 0U;
+    t->has_override = (bits & BIT_HAS_OVERRIDE) != 0U;
+    t->override = o;
+    t->id_matched = (bits & BIT_ID_MATCHED) != 0U;
+    t->name_matched = (bits & BIT_NAME_MATCHED) != 0U;
+    t->word_length = (uint8_t)word_length;
+    if (word_length > 0U) {
+        memcpy(t->word, word, word_length);
+    }
+    t->word_before = (uint8_t)word_before;
+    t->word_depth = word_depth;
+    t->word_step = word_step;
+    t->word_units = word_units;
+    t->seek_id_length = (uint8_t)id_length;
+    if (id_length > 0U) {
+        memcpy(t->seek_id, id, id_length);
+    }
+    t->seek_cfi = cfi;
+    t->holding = holding;
+    t->held = held;
+    t->held_used = held_used;
+    t->delivered = false;
+    t->has_item = false;
+    t->override_allowed = false;
+    return true;
+}
+
+bartap_epub_result_t bartap_text_restore(bartap_text_t *text, const uint8_t *buffer, size_t length,
+    bartap_offset_t *resume_at)
+{
+    if (text == NULL || buffer == NULL || resume_at == NULL) {
+        return BARTAP_EPUB_RESULT_INVALID_ARGUMENT;
+    }
+    text_t *t = text_state(text);
+    if (t->status != BARTAP_EPUB_RESULT_OK) {
+        return BARTAP_EPUB_RESULT_INVALID_ARGUMENT;
+    }
+    if (length < 4U + 3U + 8U) {
+        return BARTAP_EPUB_RESULT_CORRUPT;
+    }
+    const uint8_t *c = buffer + length - 4U;
+    const uint32_t crc = c[0] | ((uint32_t)c[1] << 8) | ((uint32_t)c[2] << 16) | ((uint32_t)c[3] << 24);
+    if (crc != bartap_crc32_final(bartap_crc32_update(BARTAP_CRC32_INIT, buffer, length - 4U))) {
+        return BARTAP_EPUB_RESULT_CORRUPT;
+    }
+    if (buffer[0] == SNAPSHOT_MAGIC_0 && buffer[1] == SNAPSHOT_MAGIC_1 && buffer[2] == SNAPSHOT_VERSION) {
+        //the same spine index and flags, or the caller restored into the wrong text
+        bartap_reader_t r = { buffer + 3, length - 7U, 0, false };
+        if (bartap_get32(&r) != t->spine_index || bartap_get32(&r) != t->flags) {
+            return BARTAP_EPUB_RESULT_INVALID_ARGUMENT;
+        }
+    }
+    if (!restore(t, buffer, length, false)) {
+        return BARTAP_EPUB_RESULT_CORRUPT;
+    }
+    (void)restore(t, buffer, length, true);
+    *resume_at = t->xml.position;
+    return BARTAP_EPUB_RESULT_OK;
+}
