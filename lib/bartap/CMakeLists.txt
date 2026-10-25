@@ -22,6 +22,8 @@ endif()
 # cross-compiled firmware build has neither of
 option(BARTAP_BUILD_TESTS "Build Bartap's host tests" ${BARTAP_TOP_LEVEL})
 option(BARTAP_WARNINGS_AS_ERRORS "Treat warnings in Bartap's own sources as errors" ${BARTAP_TOP_LEVEL})
+# libFuzzer harnesses (tests/fuzz/README.md): clang only, and off unless asked for
+option(BARTAP_BUILD_FUZZERS "Build Bartap's libFuzzer harnesses (clang)" OFF)
 
 set(BARTAP_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/byte_source.c
@@ -55,7 +57,12 @@ target_include_directories(bartap PUBLIC ${BARTAP_INCLUDE_DIR} PRIVATE ${BARTAP_
 set_target_properties(bartap PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 target_compile_options(bartap PRIVATE ${BARTAP_WARNING_OPTIONS})
 
-if(BARTAP_BUILD_TESTS)
+if(BARTAP_BUILD_TESTS OR BARTAP_BUILD_FUZZERS)
     enable_testing()
+endif()
+if(BARTAP_BUILD_TESTS)
     add_subdirectory(tests)
+endif()
+if(BARTAP_BUILD_FUZZERS)
+    add_subdirectory(tests/fuzz)
 endif()
