@@ -61,13 +61,20 @@ target_compile_definitions(bartap_tests PRIVATE
     BARTAP_TESTS_BOOKS_DIR="${BARTAP_TESTS_BOOKS_DIR}"
 )
 
+# The container dumper, for make_fixtures.py's DEFLATE and zip cases
+add_executable(bartap_container_dump container/container_dump.c)
+target_link_libraries(bartap_container_dump PRIVATE bartap)
+target_include_directories(bartap_container_dump PRIVATE ${BARTAP_PRIVATE_INCLUDE_DIR})
+set_target_properties(bartap_container_dump PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+target_compile_options(bartap_container_dump PRIVATE ${BARTAP_WARNING_OPTIONS})
+add_dependencies(bartap_container_dump bartap_fixtures)
 # A test that compiles with a warning is one nobody has read closely
 target_compile_options(bartap_tests PRIVATE ${BARTAP_WARNING_OPTIONS})
 
 # Sanitizers and -m32 go on the library as well as the tests, so the library's own code is what they
 # check. The library's symbol check builds its own uninstrumented copy (below).
-set(BARTAP_TEST_TARGETS bartap bartap_tests)
-set(BARTAP_TEST_EXECUTABLES bartap_tests)
+set(BARTAP_TEST_TARGETS bartap bartap_tests bartap_container_dump)
+set(BARTAP_TEST_EXECUTABLES bartap_tests bartap_container_dump)
 if(BARTAP_TESTS_SANITIZE)
     foreach(target IN LISTS BARTAP_TEST_TARGETS)
         target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-sanitize-recover=all
@@ -90,6 +97,10 @@ add_test(NAME bartap COMMAND bartap_tests)
 add_test(NAME bartap_shuffled COMMAND bartap_tests --shuffle 20261023)
 add_test(NAME harness_selftest COMMAND bartap_tests --selftest)
 
+# make_fixtures.py's cases: the inflater and the OCF layer give what the manifest says
+add_test(NAME container_cases
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/container/check_container.py"
+        --dump $<TARGET_FILE:bartap_container_dump> --generated "${BARTAP_TESTS_GENERATED_DIR}")
 
 # ------------------------------------------------------------------ portability checks
 
