@@ -9,14 +9,23 @@ Bartap is an allocation-free, streaming, platform-agnostic EPUB container and pa
 devices.
 
 It covers the zip container and its DEFLATE-compressed entries, the OCF container, the OPF package and
-spine, navigation (the EPUB 3 navigation document or the EPUB 2 NCX), and EPUB CFI parsing and
-resolution. Layout and rendering are left to the caller. Whether Bartap also turns XHTML content
-documents into a styled text stream is open (Q17).
+spine, any entry by its path (stylesheets, images, the cover), navigation (the EPUB 3 navigation
+document or the EPUB 2 NCX), and EPUB CFI parsing and resolution. An optional layer, `bartap/text.h`,
+reads XHTML content documents as a stream of styled words with their positions. Layout and rendering
+are left to the caller.
 
-**Status: scaffolding.** The interfaces in `include/bartap/` and `src/` are drafts and nothing is
-implemented yet; the book-level API (`bartap/epub.h`) is not designed yet (Q18).
-Decisions are in [DECISIONS.md](DECISIONS.md), open questions in
-[DESIGN-QUESTIONS.md](DESIGN-QUESTIONS.md).
+**Status: draft implementation.** Everything in `include/bartap/` is implemented and tested, but the
+interfaces are still drafts: Q17, Q18 and Q20 are open, and the current shape follows the reader-facing
+API proposal (push-fed text and CFI resolution with snapshots, element items and overrides, lenient
+markup with warnings, a transient opener with open modes, entry lookup and the cover). Decisions are in
+[DECISIONS.md](DECISIONS.md), open questions in [DESIGN-QUESTIONS.md](DESIGN-QUESTIONS.md).
+
+The book is read through bounded calls, each making at most one read, so a reader with no more RAM
+than a few KiB of state and a 32 KiB inflate window can stream a chapter from its zip entry while it
+plays audio. The text layer and the CFI resolver take the document's bytes from the caller, so a
+reader with PSRAM can decompress a chapter, or the whole book, once and read from memory instead:
+seeks and snapshots then jump straight to any offset, which makes paging backwards cheap. The headers
+describe both ways.
 
 ## Rules the library keeps
 
@@ -45,9 +54,13 @@ From this directory:
 ```sh
 cmake -S . -B build -G Ninja
 cmake --build build
-(cd build && ctest)                 # host tests and the portability checks
+(cd build && ctest)                 # host tests, the CFI oracle and the portability checks
 python3 tests/run_matrix.py         # the same under gcc and clang, 64- and 32-bit, as available
 ```
+
+The libFuzzer harnesses build separately, under clang; see
+[tests/fuzz/README.md](tests/fuzz/README.md). A corpus runner reads a directory of books of your own
+(never committed) through the whole flow; see [tests/README.md](tests/README.md#the-corpus-runner).
 
 From another CMake project:
 
@@ -66,9 +79,9 @@ See [tests/README.md](tests/README.md) for the tests and their fixtures.
 
 | Path | What it is |
 |---|---|
-| `include/bartap/` | Public headers: `epub.h` (the book-level API) and `byte_source.h` (D9) |
-| `src/` | Implementation, and the internal headers: `ocf.h` (the OCF container), `inflate.h` (DEFLATE) and `xml.h` (the XML tokenizer, a placeholder) |
-| `tests/` | Host tests, fixture generator, portability checks, the compiler-matrix runner |
+| `include/bartap/` | Public headers: `epub.h` (the book-level API), `text.h` (content documents as styled text) and `byte_source.h` (D9) |
+| `src/` | Implementation, and the internal headers: `ocf.h` (the OCF container), `inflate.h` (DEFLATE), `xml.h` (the XML tokenizer), `crc.h`, and the helpers `names.h` and `snapshot.h` |
+| `tests/` | Host tests, fixture and book generators, the CFI oracle, the corpus runner, fuzz harnesses, portability checks, the compiler-matrix runner |
 | `DECISIONS.md` | Decisions that shape Bartap, with their reasoning |
 | `DESIGN-QUESTIONS.md` | Open questions about the draft interfaces |
 
