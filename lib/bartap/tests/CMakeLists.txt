@@ -61,6 +61,23 @@ target_compile_definitions(bartap_tests PRIVATE
     BARTAP_TESTS_BOOKS_DIR="${BARTAP_TESTS_BOOKS_DIR}"
 )
 
+# The whole-book flow (common/flow.c), shared by the corpus runner, the CFI dumper and the fuzzers
+add_library(bartap_flow STATIC common/flow.c)
+target_link_libraries(bartap_flow PUBLIC bartap)
+target_include_directories(bartap_flow PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/common)
+set_target_properties(bartap_flow PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+target_compile_options(bartap_flow PRIVATE ${BARTAP_WARNING_OPTIONS})
+# The corpus runner (corpus/README in tests/README.md): over books of your own, never committed
+add_executable(bartap_corpus corpus/corpus.c)
+target_link_libraries(bartap_corpus PRIVATE bartap_flow)
+set_target_properties(bartap_corpus PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+target_compile_options(bartap_corpus PRIVATE ${BARTAP_WARNING_OPTIONS})
+# The CFI dumper for the oracle
+add_executable(bartap_cfi_dump cfi/cfi_dump.c)
+target_link_libraries(bartap_cfi_dump PRIVATE bartap_flow)
+set_target_properties(bartap_cfi_dump PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
+target_compile_options(bartap_cfi_dump PRIVATE ${BARTAP_WARNING_OPTIONS})
+add_dependencies(bartap_cfi_dump bartap_fixtures)
 # The container dumper, for make_fixtures.py's DEFLATE and zip cases
 add_executable(bartap_container_dump container/container_dump.c)
 target_link_libraries(bartap_container_dump PRIVATE bartap)
@@ -73,8 +90,8 @@ target_compile_options(bartap_tests PRIVATE ${BARTAP_WARNING_OPTIONS})
 
 # Sanitizers and -m32 go on the library as well as the tests, so the library's own code is what they
 # check. The library's symbol check builds its own uninstrumented copy (below).
-set(BARTAP_TEST_TARGETS bartap bartap_tests bartap_container_dump)
-set(BARTAP_TEST_EXECUTABLES bartap_tests bartap_container_dump)
+set(BARTAP_TEST_TARGETS bartap bartap_tests bartap_flow bartap_corpus bartap_cfi_dump bartap_container_dump)
+set(BARTAP_TEST_EXECUTABLES bartap_tests bartap_corpus bartap_cfi_dump bartap_container_dump)
 if(BARTAP_TESTS_SANITIZE)
     foreach(target IN LISTS BARTAP_TEST_TARGETS)
         target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-sanitize-recover=all
@@ -97,10 +114,24 @@ add_test(NAME bartap COMMAND bartap_tests)
 add_test(NAME bartap_shuffled COMMAND bartap_tests --shuffle 20261023)
 add_test(NAME harness_selftest COMMAND bartap_tests --selftest)
 
+# The CFI oracle (cfi/cfi_oracle.py): Bartap's positions located in lxml's DOM; skipped without lxml
+add_test(NAME cfi_oracle
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/cfi/cfi_oracle.py"
+        --dump $<TARGET_FILE:bartap_cfi_dump>
+        "${BARTAP_TESTS_BOOKS_DIR}/epub3.epub" "${BARTAP_TESTS_BOOKS_DIR}/epub3-crlf.epub"
+        "${BARTAP_TESTS_BOOKS_DIR}/epub2.epub" "${BARTAP_TESTS_BOOKS_DIR}/plain.epub"
+        "${BARTAP_TESTS_BOOKS_DIR}/dangling.epub" "${BARTAP_TESTS_BOOKS_DIR}/duplicate.epub"
+        "${BARTAP_TESTS_BOOKS_DIR}/lenient.epub" "${BARTAP_TESTS_BOOKS_DIR}/long-attributes.epub"
+        "${BARTAP_TESTS_FIXTURE_DIR}/pride-and-prejudice.epub")
+set_tests_properties(cfi_oracle PROPERTIES SKIP_RETURN_CODE 77)
 # make_fixtures.py's cases: the inflater and the OCF layer give what the manifest says
 add_test(NAME container_cases
     COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/container/check_container.py"
         --dump $<TARGET_FILE:bartap_container_dump> --generated "${BARTAP_TESTS_GENERATED_DIR}")
+# The corpus runner over the committed fixture and the generated books, as a smoke test of the tool itself
+add_test(NAME corpus_runner
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/corpus/run_corpus.py"
+        --runner $<TARGET_FILE:bartap_corpus> "${BARTAP_TESTS_BOOKS_DIR}")
 
 # ------------------------------------------------------------------ portability checks
 
