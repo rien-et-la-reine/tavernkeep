@@ -17,9 +17,8 @@
  * platform's files is an adapter that belongs to the platform, outside
  * Bartap; this header provides only the interface and a memory-backed source.
  *
- * TODO: nothing here is implemented yet. What follows is a suggested
- * interface, not a settled one; the choices are explained beside each part so
- * that they are easy to revisit.
+ * Implemented in src/byte_source.c, but still a draft interface: the choices are
+ * explained beside each part so that they are easy to revisit.
  *
  * Choices:
  * - Positional reads (read at an offset), not seek-then-read. The OCF layer

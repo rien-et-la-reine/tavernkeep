@@ -17,9 +17,8 @@
  * in it is EPUB-specific, so it could be made public later if other users want
  * raw DEFLATE.
  *
- * TODO: nothing here is implemented yet. What follows is a suggested
- * interface, not a settled one; the choices are explained beside each part so
- * that they are easy to revisit.
+ * Implemented in inflate.c, but still a draft interface: the choices are
+ * explained beside each part so that they are easy to revisit.
  *
  * Choices:
  * - Streaming and resumable. The caller hands over input and output in pieces
@@ -100,22 +99,41 @@ typedef enum {
     BARTAP_INFLATE_RESULT_INVALID_ARGUMENT = 4,
 } bartap_inflate_result_t;
 
-/* Decoder state. Private: declared here only so that it can be allocated by
- * whoever embeds it (Q2). Everything in it is for inflate.c to define.
- *
- * TODO: the rest of the resumable state goes here once the implementation
- * settles it - at least the current block's type and stage, a stored block's
- * remaining length, a match that has not been fully copied out, the code
- * lengths of a dynamic header that has not been fully read, and the decoding
- * tables for the current block (D11). */
+/* A canonical Huffman code, as RFC 1951 3.2.2 builds it: how many codes have
+ * each length, and the symbols in code order. Private. */
 typedef struct {
-    uint8_t *window;            //at least BARTAP_INFLATE_WINDOW_SIZE bytes, from the caller
-    uint32_t window_position;   //where the next output byte goes, mod BARTAP_INFLATE_WINDOW_SIZE
-    uint32_t total_out;         //bytes produced so far; a distance must not exceed it
-    uint32_t bit_buffer;        //input bits taken but not yet used, least significant first
+    uint16_t count[16];                 //codes of each length; count[0] unused
+    uint16_t symbol[288];               //symbols ordered by code length, then value
+    uint8_t max_length;                 //longest code; 0 for a code with no symbols
+} bartap_inflate_code_t;
+
+/* Decoder state. Private: declared here only so that it can be allocated by
+ * whoever embeds it (Q2). Everything in it is for inflate.c to define, and the
+ * decode tables' size is not part of the contract (D11). */
+typedef struct {
+    uint8_t *window;                    //at least BARTAP_INFLATE_WINDOW_SIZE bytes, from the caller
+    uint32_t window_position;           //where the next output byte goes, mod BARTAP_INFLATE_WINDOW_SIZE
+    uint32_t history;                   //bytes of output so far, capped at BARTAP_INFLATE_WINDOW_SIZE
+    uint32_t bit_buffer;                //input bits taken but not yet used, least significant first
     uint8_t bit_count;
-    bool final_block;           //the block being decoded has BFINAL set
-    bartap_inflate_result_t status; //sticky once DONE, TRUNCATED, CORRUPT or INVALID_ARGUMENT
+    bool final_block;                   //the block being decoded has BFINAL set
+    uint8_t stage;                      //where decoding resumes; an enum in inflate.c
+    bartap_inflate_result_t status;     //sticky once DONE, TRUNCATED, CORRUPT or INVALID_ARGUMENT
+    uint32_t stored_left;               //bytes of the current stored block still to copy
+    uint8_t stored_header[4];           //LEN and NLEN, gathered a byte at a time
+    uint8_t stored_have;
+    uint16_t match_length;              //of the match being decoded or copied
+    uint16_t match_distance;
+    uint16_t match_left;                //bytes of it still to copy out
+    uint16_t pending_symbol;            //a decoded symbol waiting for its extra bits, or a literal for space
+    uint16_t literal_count;             //HLIT, HDIST and HCLEN of a dynamic header
+    uint16_t distance_count;
+    uint16_t length_code_count;
+    uint16_t lengths_have;              //code lengths read so far
+    uint8_t lengths[286 + 30];          //code lengths of the dynamic header being read
+    bartap_inflate_code_t length_code;  //the code-length code
+    bartap_inflate_code_t literal_code; //literal/length code of the current block
+    bartap_inflate_code_t distance_code;
 } bartap_inflate_t;
 
 /* Start decoding a new stream. window is window_size bytes, kept by the

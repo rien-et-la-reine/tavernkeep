@@ -25,12 +25,16 @@ option(BARTAP_WARNINGS_AS_ERRORS "Treat warnings in Bartap's own sources as erro
 
 set(BARTAP_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/byte_source.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/crc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ocf.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/inflate.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/xml.c
 )
-# include/ holds the public headers (bartap/epub.h, bartap/byte_source.h); src/ holds the internal ones
-# (ocf.h, inflate.h, xml.h), private to the library and its host tests (D9)
+# The object names the symbol checks look for, here and in an including project's own check
+set(BARTAP_OBJECTS byte_source.c crc.c ocf.c inflate.c xml.c
+    CACHE INTERNAL "Bartap's source files, for the symbol checks")
+# include/ holds the public headers (bartap/epub.h, bartap/byte_source.h); src/ holds the
+# internal ones (ocf.h, inflate.h, xml.h and their helpers), private to the library and its host tests (D9)
 set(BARTAP_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(BARTAP_PRIVATE_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 

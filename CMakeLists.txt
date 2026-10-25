@@ -109,7 +109,7 @@ add_custom_command(
     COMMAND ${CMAKE_COMMAND}
         -DNM=${CMAKE_NM}
         -DLIBRARY=$<TARGET_FILE:bartap>
-        "-DOBJECTS=byte_source.c;ocf.c;inflate.c;xml.c"
+        "-DOBJECTS=${BARTAP_OBJECTS}"
         -DEXPECT_VIOLATIONS=0
         -P ${CMAKE_CURRENT_SOURCE_DIR}/lib/bartap/tests/check_symbols.cmake
     COMMAND ${CMAKE_COMMAND} -E touch ${TAVERNKEEP_BARTAP_SYMBOL_STAMP}
