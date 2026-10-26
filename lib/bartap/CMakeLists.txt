@@ -1,8 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Harsh Patel
 # SPDX-License-Identifier: MIT
 #
-# Bartap: an allocation-free, streaming, platform-agnostic EPUB container and package library for small
-# devices. See README.md.
+# Bartap: an allocation-free, platform-agnostic EPUB reader library for small devices. See README.md.
 #
 # Standalone, from this directory:
 #   cmake -S . -B build && cmake --build build && (cd build && ctest)
@@ -24,6 +23,10 @@ option(BARTAP_BUILD_TESTS "Build Bartap's host tests" ${BARTAP_TOP_LEVEL})
 option(BARTAP_WARNINGS_AS_ERRORS "Treat warnings in Bartap's own sources as errors" ${BARTAP_TOP_LEVEL})
 # libFuzzer harnesses (tests/fuzz/README.md): clang only, and off unless asked for
 option(BARTAP_BUILD_FUZZERS "Build Bartap's libFuzzer harnesses (clang)" OFF)
+# The inflater's 8-bit literal/length lookup table: faster where branches are expensive (Cortex-M33), 512
+# bytes more in every inflating struct. It changes bartap.h's struct layouts, so it is a PUBLIC definition:
+# the library and everything linking it must agree
+option(BARTAP_INFLATE_FAST_LUT "Build the inflater's fast Huffman lookup table" OFF)
 
 set(BARTAP_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/byte_source.c
@@ -31,16 +34,14 @@ set(BARTAP_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ocf.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/inflate.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/xml.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/entities.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/epub.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/cfi.c
     ${CMAKE_CURRENT_SOURCE_DIR}/src/text.c
 )
 # The object names the symbol checks look for, here and in an including project's own check
-set(BARTAP_OBJECTS byte_source.c crc.c ocf.c inflate.c xml.c entities.c epub.c cfi.c text.c
+set(BARTAP_OBJECTS byte_source.c crc.c ocf.c inflate.c xml.c epub.c text.c
     CACHE INTERNAL "Bartap's source files, for the symbol checks")
-# include/ holds the public headers (bartap/epub.h, bartap/text.h, bartap/byte_source.h); src/ holds the
-# internal ones (ocf.h, inflate.h, xml.h and their helpers), private to the library and its host tests (D9)
+# include/ holds the one public header, bartap.h, with every state struct's layout; src/ holds
+# bartap_internal.h, the interfaces between the modules, private to the library and its host tests
 set(BARTAP_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/include)
 set(BARTAP_PRIVATE_INCLUDE_DIR ${CMAKE_CURRENT_SOURCE_DIR}/src)
 
@@ -56,6 +57,12 @@ target_include_directories(bartap PUBLIC ${BARTAP_INCLUDE_DIR} PRIVATE ${BARTAP_
 # Plain ISO C, whatever the including project uses: no compiler extensions to come to depend on
 set_target_properties(bartap PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 target_compile_options(bartap PRIVATE ${BARTAP_WARNING_OPTIONS})
+# Also given to the tests' and fuzzers' own builds of the sources
+set(BARTAP_PUBLIC_DEFINITIONS)
+if(BARTAP_INFLATE_FAST_LUT)
+    list(APPEND BARTAP_PUBLIC_DEFINITIONS BARTAP_INFLATE_FAST_LUT=1)
+endif()
+target_compile_definitions(bartap PUBLIC ${BARTAP_PUBLIC_DEFINITIONS})
 
 if(BARTAP_BUILD_TESTS OR BARTAP_BUILD_FUZZERS)
     enable_testing()

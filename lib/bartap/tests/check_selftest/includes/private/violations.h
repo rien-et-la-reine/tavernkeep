@@ -6,7 +6,7 @@
  * disallowed include among allowed ones that must not be counted. Never compiled. */
 
 #include <stddef.h>
-#include "bartap/byte_source.h"
+#include "bartap.h"
 #include "internal.h"               // an internal header that exists here: allowed
 
 #include "missing.h"                // a bare header that is not one of the library's internal ones

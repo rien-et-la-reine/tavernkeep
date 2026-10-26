@@ -1,50 +1,51 @@
 // SPDX-FileCopyrightText: 2026 Harsh Patel
 // SPDX-License-Identifier: MIT
 
-/* The book: the whole-book flow (../common/flow.h) over the input as an EPUB. Open; every metadata field;
- * the table of contents to its end; every spine item through the text layer to its end, fed in mixed piece
- * sizes. For every item: bartap_text_position, format, parse (must round-trip equal), then resolve (must
- * succeed). Each spine item is also saved, restored into a fresh text layer and run on, which must deliver
- * the same items. The input's hash chooses strict or lenient markup, and whether element items are on, so
- * that a corpus entry always takes the same path. */
+//libFuzzer harness for the whole book: open, metadata, the TOC, and every spine item's text.
+//TODO(rewrite): seek to every token's location and check the iterator resumes at the same token
 
+#include <stddef.h>
 #include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
 
-#include "flow.h"
+#include "bartap.h"
+
+#define SPINE_MAX 256U
 
 int LLVMFuzzerTestOneInput(const uint8_t *data, size_t size)
 {
+    static bartap_work_t work;
+    static bartap_spine_item_t spine[SPINE_MAX];
     if (size > UINT32_MAX) {
         return 0;
     }
-    uint32_t hash = 2166136261U;
-    for (size_t i = 0; i < size; i++) {
-        hash = (hash ^ data[i]) * 16777619U;
+    bartap_source_t source;
+    bartap_source_memory(&source, data, (uint32_t)size);
+    bartap_book_t book;
+    if (bartap_open(&book, &source, spine, SPINE_MAX, &work) != BARTAP_OK) {
+        return 0;
     }
-    flow_options_t options;
-    flow_options_default(&options);
-    options.feed = 0;
-    options.seed = hash | 1U;
-    options.input_size = (hash & 0x10U) ? 1U : 512U;
-    options.scratch_size = (hash & 0x20U) ? BARTAP_EPUB_SCRATCH_MIN : 512U;
-    options.max_document_size = 256U << 10;
-    options.max_content_size = 1U << 20;
-    options.resolve_every = 1;
-    options.resolve_max = 64;
-    if (hash & 0x1U) {
-        options.text_flags |= BARTAP_TEXT_STRICT;
-        options.open_flags |= BARTAP_EPUB_OPEN_STRICT_MARKUP;
+
+    char meta[BARTAP_META_MAX + 1];
+    for (int field = BARTAP_META_TITLE; field <= BARTAP_META_IDENTIFIER; field++) {
+        (void)bartap_metadata(&book, (bartap_meta_t)field, meta, sizeof meta);
     }
-    if (hash & 0x2U) {
-        options.text_flags |= BARTAP_TEXT_DELIVER_ELEMENTS | BARTAP_TEXT_DELIVER_ATTRIBUTES;
+
+    bartap_toc_t toc;
+    bartap_toc_entry_t entry;
+    if (bartap_toc_open(&toc, &book, work.window) == BARTAP_OK) {
+        for (size_t steps = 0; steps < size + 64 && bartap_toc_next(&toc, &entry) == BARTAP_OK; steps++) {
+        }
     }
-    flow_report_t report;
-    flow_run(data, size, &options, &report);
-    if (report.failure[0] != '\0') {
-        fprintf(stderr, "%s\n", report.failure);
-        abort();
+
+    bartap_text_t text;
+    bartap_token_t token;
+    for (uint16_t i = 0; i < bartap_spine_count(&book); i++) {
+        if (bartap_text_open(&text, &book, i, work.window) != BARTAP_OK) {
+            continue;
+        }
+        for (size_t steps = 0; steps < 64 * size + 64 && bartap_text_next(&text, &token) == BARTAP_OK;
+            steps++) {
+        }
     }
     return 0;
 }

@@ -26,7 +26,7 @@ add_custom_command(
     COMMENT "Generating Bartap test inputs"
     VERBATIM
 )
-# The books for the book-level cases, the CFI oracle and the fuzz seeds, beside (not inside) the generated
+# The books for the book-level cases and the fuzz seeds, beside (not inside) the generated
 # inputs, since make_fixtures.py refuses a directory holding anything it did not make
 set(BARTAP_TESTS_BOOKS_DIR "${CMAKE_CURRENT_BINARY_DIR}/books")
 add_custom_command(
@@ -43,16 +43,12 @@ add_custom_target(bartap_fixtures DEPENDS "${BARTAP_TESTS_GENERATED_DIR}/manifes
 set(BARTAP_TESTS_SOURCES
     test_main.c
     test_headers.c
-    test_xml.c
-    test_text.c
-    test_epub.c
-    books.c
 )
 
 add_executable(bartap_tests ${BARTAP_TESTS_SOURCES})
 add_dependencies(bartap_tests bartap_fixtures)
 target_link_libraries(bartap_tests PRIVATE bartap)
-# The tests may include the library's internal headers (ocf.h, inflate.h) as well as its public ones
+# The tests may include the library's internal header as well as its public one
 target_include_directories(bartap_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${BARTAP_PRIVATE_INCLUDE_DIR})
 set_target_properties(bartap_tests PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 target_compile_definitions(bartap_tests PRIVATE
@@ -61,37 +57,13 @@ target_compile_definitions(bartap_tests PRIVATE
     BARTAP_TESTS_BOOKS_DIR="${BARTAP_TESTS_BOOKS_DIR}"
 )
 
-# The whole-book flow (common/flow.c), shared by the corpus runner, the CFI dumper and the fuzzers
-add_library(bartap_flow STATIC common/flow.c)
-target_link_libraries(bartap_flow PUBLIC bartap)
-target_include_directories(bartap_flow PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/common)
-set_target_properties(bartap_flow PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
-target_compile_options(bartap_flow PRIVATE ${BARTAP_WARNING_OPTIONS})
-# The corpus runner (corpus/README in tests/README.md): over books of your own, never committed
-add_executable(bartap_corpus corpus/corpus.c)
-target_link_libraries(bartap_corpus PRIVATE bartap_flow)
-set_target_properties(bartap_corpus PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
-target_compile_options(bartap_corpus PRIVATE ${BARTAP_WARNING_OPTIONS})
-# The CFI dumper for the oracle
-add_executable(bartap_cfi_dump cfi/cfi_dump.c)
-target_link_libraries(bartap_cfi_dump PRIVATE bartap_flow)
-set_target_properties(bartap_cfi_dump PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
-target_compile_options(bartap_cfi_dump PRIVATE ${BARTAP_WARNING_OPTIONS})
-add_dependencies(bartap_cfi_dump bartap_fixtures)
-# The container dumper, for make_fixtures.py's DEFLATE and zip cases
-add_executable(bartap_container_dump container/container_dump.c)
-target_link_libraries(bartap_container_dump PRIVATE bartap)
-target_include_directories(bartap_container_dump PRIVATE ${BARTAP_PRIVATE_INCLUDE_DIR})
-set_target_properties(bartap_container_dump PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
-target_compile_options(bartap_container_dump PRIVATE ${BARTAP_WARNING_OPTIONS})
-add_dependencies(bartap_container_dump bartap_fixtures)
 # A test that compiles with a warning is one nobody has read closely
 target_compile_options(bartap_tests PRIVATE ${BARTAP_WARNING_OPTIONS})
 
 # Sanitizers and -m32 go on the library as well as the tests, so the library's own code is what they
 # check. The library's symbol check builds its own uninstrumented copy (below).
-set(BARTAP_TEST_TARGETS bartap bartap_tests bartap_flow bartap_corpus bartap_cfi_dump bartap_container_dump)
-set(BARTAP_TEST_EXECUTABLES bartap_tests bartap_corpus bartap_cfi_dump bartap_container_dump)
+set(BARTAP_TEST_TARGETS bartap bartap_tests)
+set(BARTAP_TEST_EXECUTABLES bartap_tests)
 if(BARTAP_TESTS_SANITIZE)
     foreach(target IN LISTS BARTAP_TEST_TARGETS)
         target_compile_options(${target} PRIVATE -fsanitize=address,undefined -fno-sanitize-recover=all
@@ -114,29 +86,11 @@ add_test(NAME bartap COMMAND bartap_tests)
 add_test(NAME bartap_shuffled COMMAND bartap_tests --shuffle 20261023)
 add_test(NAME harness_selftest COMMAND bartap_tests --selftest)
 
-# The CFI oracle (cfi/cfi_oracle.py): Bartap's positions located in lxml's DOM; skipped without lxml
-add_test(NAME cfi_oracle
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/cfi/cfi_oracle.py"
-        --dump $<TARGET_FILE:bartap_cfi_dump>
-        "${BARTAP_TESTS_BOOKS_DIR}/epub3.epub" "${BARTAP_TESTS_BOOKS_DIR}/epub3-crlf.epub"
-        "${BARTAP_TESTS_BOOKS_DIR}/epub2.epub" "${BARTAP_TESTS_BOOKS_DIR}/plain.epub"
-        "${BARTAP_TESTS_BOOKS_DIR}/dangling.epub" "${BARTAP_TESTS_BOOKS_DIR}/duplicate.epub"
-        "${BARTAP_TESTS_BOOKS_DIR}/lenient.epub" "${BARTAP_TESTS_BOOKS_DIR}/long-attributes.epub"
-        "${BARTAP_TESTS_FIXTURE_DIR}/pride-and-prejudice.epub")
-set_tests_properties(cfi_oracle PROPERTIES SKIP_RETURN_CODE 77)
-# make_fixtures.py's cases: the inflater and the OCF layer give what the manifest says
-add_test(NAME container_cases
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/container/check_container.py"
-        --dump $<TARGET_FILE:bartap_container_dump> --generated "${BARTAP_TESTS_GENERATED_DIR}")
-# The corpus runner over the committed fixture and the generated books, as a smoke test of the tool itself
-add_test(NAME corpus_runner
-    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/corpus/run_corpus.py"
-        --runner $<TARGET_FILE:bartap_corpus> "${BARTAP_TESTS_BOOKS_DIR}")
 
 # ------------------------------------------------------------------ portability checks
 
 # Every header the library's own files include must be one of the four it may use, or one of its own:
-# a public bartap/ header anywhere, an internal header only from src/
+# bartap.h anywhere, bartap_internal.h only from src/
 add_test(NAME include_check
     COMMAND ${CMAKE_COMMAND}
         -DPUBLIC_DIRS=${BARTAP_INCLUDE_DIR}
@@ -161,15 +115,11 @@ add_test(NAME include_check_selftest
 set(BARTAP_HEADER_UNIT_DIR "${CMAKE_CURRENT_BINARY_DIR}/header_units")
 set(BARTAP_HEADER_UNITS)
 set(BARTAP_HEADER_UNIT_OBJECTS)
-file(GLOB bartap_public_headers CONFIGURE_DEPENDS "${BARTAP_INCLUDE_DIR}/bartap/*.h")
+file(GLOB bartap_public_headers CONFIGURE_DEPENDS "${BARTAP_INCLUDE_DIR}/*.h")
 file(GLOB bartap_private_headers CONFIGURE_DEPENDS "${BARTAP_PRIVATE_INCLUDE_DIR}/*.h")
 foreach(header IN LISTS bartap_public_headers bartap_private_headers)
     get_filename_component(stem "${header}" NAME_WE)
-    if(header IN_LIST bartap_public_headers)
-        set(include "bartap/${stem}.h")
-    else()
-        set(include "${stem}.h")
-    endif()
+    set(include "${stem}.h")
     set(unit "${BARTAP_HEADER_UNIT_DIR}/header_${stem}.c")
     # written through configure_file so an unchanged unit keeps its timestamp
     file(WRITE "${unit}.in" "#include \"${include}\"\ntypedef int bartap_header_unit_${stem};\n")
@@ -190,6 +140,7 @@ add_library(bartap_symbol_check STATIC EXCLUDE_FROM_ALL ${BARTAP_SOURCES} ${BART
 target_include_directories(bartap_symbol_check PRIVATE ${BARTAP_INCLUDE_DIR} ${BARTAP_PRIVATE_INCLUDE_DIR})
 set_target_properties(bartap_symbol_check PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 target_compile_options(bartap_symbol_check PRIVATE ${BARTAP_WARNING_OPTIONS})
+target_compile_definitions(bartap_symbol_check PRIVATE ${BARTAP_PUBLIC_DEFINITIONS})
 # A library that breaks both rules, to prove the check notices: one writable static and one call to
 # malloc
 add_library(bartap_symbol_check_selftest STATIC EXCLUDE_FROM_ALL check_selftest/symbols/violations.c)

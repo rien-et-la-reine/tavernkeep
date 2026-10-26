@@ -78,9 +78,9 @@ The book subsystem will be responsible for opening and navigating supported book
 
 EPUB and plain-text files are required book formats.
 
-The container and package layer - zip, DEFLATE, the OCF container, the OPF package and spine, navigation, and EPUB CFI parsing and resolution - is Bartap, a first-party library in `lib/bartap/` with draft interfaces and no implementation yet (see "Develop the EPUB container layer as a portable library, Bartap" under Important Design Decisions and Rationale). Whether it also turns XHTML into a styled text stream is open (Q17 in `lib/bartap/DESIGN-QUESTIONS.md`). The firmware supplies what Bartap needs from the platform, such as a byte source over a file on the card (`src/epub/bartap_adapter.c`).
+The EPUB layer - zip, DEFLATE, the OCF container, the OPF package and spine, navigation, and chapters read as a stream of words, blocks and images with their inline styles - is Bartap, a first-party library in `lib/bartap/`, being rewritten: its interface is drafted and its implementation is stubs (see "Develop the EPUB container layer as a portable library, Bartap" under Important Design Decisions and Rationale). A reading position is a spine index and a byte offset in that chapter's uncompressed XHTML. The firmware supplies what Bartap needs from the platform, such as a byte source over a file on the card (`src/epub/bartap_adapter.c`).
 
-Text layout and rendering stay in the firmware and are not yet defined. Layout must not treat a chapter as final until its entry has been read to the end with OK: bytes Bartap delivers before then have not had their CRC-32 checked. The only derived data written to the card is the library catalogue, a disposable index; pagination is kept in RAM, and books are cached in PSRAM on Rev F (see "Book state on the card, device state on the device" under Important Design Decisions and Rationale).
+Text layout and rendering stay in the firmware and are not yet defined. Bartap checks every entry's CRC-32 as it is read, and reports a chapter good only at its end (D22 in `lib/bartap/DECISIONS.md`): layout must not treat a chapter as final before then. The only derived data written to the card is the library catalogue, a disposable index; pagination is kept in RAM, and books are cached in PSRAM on Rev F (see "Book state on the card, device state on the device" under Important Design Decisions and Rationale).
 
 M4B audiobook support is a stretch feature and therefore does not currently form part of the required architecture.
 
@@ -480,6 +480,8 @@ Two test suites live in `tests/`. The host tests (`tests/filesystem/`) are unit 
 
 Bartap's host tests live with the library, in `lib/bartap/tests/`, so that they move with it, and build only when Bartap is built standalone. The firmware build runs Bartap's symbol check over its own Arm build of the library.
 
+Bartap's calls are the exception to bounded-work steps: opening a book and finding things in it run to completion, and only resource bytes and text tokens are streamed a piece per call (D5 in `lib/bartap/DECISIONS.md`). Audio therefore cannot rely on yields from a core that is opening a book; it runs on the other core or behind DMA, or, on a core it shares with Bartap, is serviced from inside the byte source's read callback.
+
 DMA is planned for bulk storage transfers after the polling implementation has been validated.
 
 Interrupt-driven or asynchronous operation will be introduced where required by later subsystems, but a complete system-wide execution and scheduling model has not yet been defined beyond the following rule: each core runs one cooperative loop of bounded-work steps, and no operating mode places more than one hard-deadline domain on a core (see "Operating Modes and Storage Ownership"). Audio is the only current domain with a hard deadline; its decoder is written as a bounded step reading compressed data from a ring the storage coordinator fills, so whether it runs in the core 0 loop or on the second core is a launch-time placement decision sized by measurement (chiefly the display driver's blocking time), not a structural one. The no-RTOS decision is to be re-evaluated if a mode ever needs two hard-deadline domains on one core, or if long operations start acquiring hand-written yield points.
@@ -583,13 +585,13 @@ enough to justify a separate decision-record system.
 
 - Context: Opening an EPUB means reading its zip container, inflating DEFLATE-compressed entries, parsing the OCF container and the OPF package for the spine, and reading its navigation (the EPUB 3 navigation document or the EPUB 2 NCX). None of this depends on Tome's hardware.
 
-- Decision: This layer is Bartap, a first-party library in `lib/bartap/`, built as its own CMake project and intended to move to its own repository. Its scope is zip, inflate, OCF, OPF and spine, navigation, and EPUB CFI parsing and resolution. Layout and rendering are out of scope, and whether it also produces a styled text stream from XHTML is open (Q17). Bartap's own decisions are recorded in `lib/bartap/DECISIONS.md` and its open questions in `lib/bartap/DESIGN-QUESTIONS.md`, not here. Tavernkeep supplies its platform side (`src/epub/bartap_adapter.c`) and keeps layout, rendering and caching policy. `lib/` holds first-party libraries intended to become separate repositories, distinct from the vendored code in `third_party/`, which keeps its upstream licences.
+- Decision: This layer is Bartap, a first-party library in `lib/bartap/`, built as its own CMake project and intended to move to its own repository. Its scope is zip, inflate, OCF, OPF and spine, navigation, and chapters read as a stream of words, blocks and images. Layout, CSS and rendering are out of scope. Bartap's own decisions and open questions are recorded in `lib/bartap/DECISIONS.md`, not here. Tavernkeep supplies its platform side (`src/epub/bartap_adapter.c`) and keeps layout, rendering and caching policy. `lib/` holds first-party libraries intended to become separate repositories, distinct from the vendored code in `third_party/`, which keeps its upstream licences.
 
 - Rationale: With no Pico SDK, FatFs or TinyUSB includes, the boundary is enforced by the build rather than by convention; every malformed-input path can be tested on a host under sanitizers and several compilers and word sizes; and the layer stays usable outside Tome.
 
 - Alternatives considered: Keeping the layer in `src/epub/` as part of the firmware, where it began. Bartap's own alternatives are in `lib/bartap/DECISIONS.md` (D1).
 
-- Consequences and tradeoffs: Bartap keeps rules the firmware itself does not need - no allocation, no mutable global state, caller-supplied memory and I/O, bounded work per call - and checks that enforce them, in its own tests and, for the Arm build, in the firmware build. EPUB code lives in two places, and Bartap's interfaces stay drafts until Bartap settles them.
+- Consequences and tradeoffs: Bartap keeps rules the firmware itself does not need - no allocation, no mutable global state, caller-supplied memory and I/O - and checks that enforce them, in its own tests and, for the Arm build, in the firmware build. EPUB code lives in two places, and Bartap's interfaces stay drafts until Bartap settles them.
 
 ### Decision — Open EPUB files directly on the device
 
@@ -612,7 +614,7 @@ enough to justify a separate decision-record system.
 - Context: The card is removable, and in USB mode a host can change anything on it: books may be added, removed or renamed on a computer. Tavernkeep already treats a medium it gets back as new and reuses no cached state ("Operating Modes and Storage Ownership").
 
 - Decision: What belongs to a book lives on the card with the books; what belongs to the device lives on the device.
-  - On the card: each book's bookmarks and reading position, as CFIs, in an independent file of its own right next to the book's `.epub`; and in one hidden folder, `/.tome/`, the library catalogue and, in a file of its own, the card's recent-books list (each book's title and author; its position is in the book's own bookmark file), kept apart from the catalogue because it is written much more often. The list holds the five most recently opened books, newest first: opening a book not in it puts it at the top and pushes the oldest out; opening one already in it moves it to the top.
+  - On the card: each book's bookmarks and reading position, as Bartap positions (spine index and byte offset) each with a short anchor of the text there, in an independent file of its own right next to the book's `.epub`; and in one hidden folder, `/.tome/`, the library catalogue and, in a file of its own, the card's recent-books list (each book's title and author; its position is in the book's own bookmark file), kept apart from the catalogue because it is written much more often. The list holds the five most recently opened books, newest first: opening a book not in it puts it at the top and pushes the oldest out; opening one already in it moves it to the top.
   - The catalogue is an index, rebuildable from the books and disposable: if it is missing or corrupt it is rebuilt, and a catalogue problem never affects a bookmark. It is reconciled against the files on every mount and after every USB return (each new storage-coordinator epoch).
   - On the device: settings (font size, dark mode, numerals and so on), in a small non-volatile part on the board - the RTC's user EEPROM or a separate I2C EEPROM or FRAM - never in the MCU's flash. The MCU's internal flash is not written at run time.
   - Pagination is derived from both the book and the device's font settings, so it is kept in RAM only.
@@ -622,7 +624,7 @@ enough to justify a separate decision-record system.
 
 - Alternatives considered: Writing only bookmarks and settings to the card, with every cache in RAM (this record's earlier decision); settings on the card; settings or state in the MCU's flash.
 
-- Consequences and tradeoffs: A user can keep several cards and swap them; each card brings its own library, positions and recent books. The card holds files the user did not put there: the bookmark file next to each book and `/.tome/`. A book renamed on a computer without its bookmark file loses its bookmarks and position, unless the catalogue's reconciliation pairs them again, which is not yet designed. Inflated chapters and pagination are rebuilt after a restart, a card change or a USB session unless PSRAM still holds them; PSRAM is not assumed (NFR-005), so caching must work, if smaller, in SRAM alone, and Bartap streams content rather than needing a whole chapter in memory. Positions and bookmarks are a place in the book's content, not a page number, so a change of font settings does not move them. The save points today keep bookmarks and settings together on the card; splitting them is open work.
+- Consequences and tradeoffs: A user can keep several cards and swap them; each card brings its own library, positions and recent books. The card holds files the user did not put there: the bookmark file next to each book and `/.tome/`. A book renamed on a computer without its bookmark file loses its bookmarks and position, unless the catalogue's reconciliation pairs them again, which is not yet designed. Inflated chapters and pagination are rebuilt after a restart, a card change or a USB session unless PSRAM still holds them; PSRAM is not assumed (NFR-005), so caching must work, if smaller, in SRAM alone, and Bartap streams content rather than needing a whole chapter in memory. Positions and bookmarks are a place in the book's content, not a page number, so a change of font settings does not move them; but they are byte offsets into this file's chapters, so if the `.epub` is replaced by another edition under the same name they may land elsewhere. Each Bartap position therefore carries an anchor, the 32 raw XHTML bytes at it, so a saved position is 40 bytes; restoring a position checks the anchor and searches up to two anchor lengths either side for it, falling back to the bare offset (D16 in `lib/bartap/DECISIONS.md`). The save points today keep bookmarks and settings together on the card; splitting them is open work.
 
 ### Decision — Reading and audio are separate modes, with concurrency kept possible
 
@@ -743,7 +745,7 @@ At the current stage:
 
 - the final physical input hardware has not been selected
 
-- the EPUB container and package layer (Bartap, `lib/bartap/`) is scaffolded with draft interfaces and no implementation; text layout and rendering have not yet been defined
+- the EPUB layer (Bartap, `lib/bartap/`) is being rewritten: drafted interface, stub implementation; text layout and rendering have not yet been defined
 
 - the reader's memory budget, and the room it leaves for audio's buffers, have not yet been set
 
@@ -785,7 +787,7 @@ Framebuffer strategy, partial-update policy, rendering ownership, and display sc
 
 Tavernkeep will require EPUB file access, parsing, layout, navigation, persistent reading position, and bookmark support.
 
-The container and package layer (zip, DEFLATE, OCF, the OPF package and spine, navigation, and EPUB CFI parsing and resolution) is Bartap's, in `lib/bartap/`, with draft interfaces and no implementation yet; whether it also produces a styled text stream from XHTML is open (Q17). The internal architecture of the rest - file access through the Bartap adapter, layout, reading position and bookmarks - has not yet been designed.
+The EPUB layer (zip, DEFLATE, OCF, the OPF package and spine, navigation, and chapters as a token stream) is Bartap's, in `lib/bartap/`, being rewritten with a drafted interface and a stub implementation. Positions are Bartap's spine index and byte offset. The internal architecture of the rest - file access through the Bartap adapter, layout, and the bookmark file - has not yet been designed.
 
 **Audio**
 

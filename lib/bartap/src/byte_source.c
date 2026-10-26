@@ -1,57 +1,53 @@
 // SPDX-FileCopyrightText: 2026 Harsh Patel
 // SPDX-License-Identifier: MIT
 
-/* Byte sources (bartap/byte_source.h). */
+/* Reads through a bartap_source_t, the memory source, and the helpers every module shares. */
 
-#include "bartap/byte_source.h"
-
+#include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 
-bartap_byte_source_result_t bartap_byte_source_read(
-    const bartap_byte_source_t *source,
-    bartap_offset_t offset,
-    void *buffer,
-    size_t size,
-    size_t *bytes_read)
+#include "bartap_internal.h"
+
+const char *bartap_strerror(bartap_err_t err)
 {
-    if (bytes_read == NULL) {
-        return BARTAP_BYTE_SOURCE_RESULT_INVALID_ARGUMENT;
-    }
-    *bytes_read = 0;
-    if (source == NULL || source->read == NULL || (buffer == NULL && size != 0U)) {
-        return BARTAP_BYTE_SOURCE_RESULT_INVALID_ARGUMENT;
-    }
-    if (offset >= source->size || size == 0U) {
-        return BARTAP_BYTE_SOURCE_RESULT_OK;    //nothing to read: not an error, and no callback
-    }
-    //clip to the source: the remaining length fits in size_t's range only after the comparison
-    const bartap_offset_t remaining = source->size - offset;
-    const size_t length = size > (size_t)remaining ? (size_t)remaining : size;
-    if (source->read(source->context, offset, buffer, length) != BARTAP_BYTE_SOURCE_RESULT_OK) {
-        return BARTAP_BYTE_SOURCE_RESULT_IO_ERROR;  //all or nothing (D14): any failure is IO_ERROR
-    }
-    *bytes_read = length;
-    return BARTAP_BYTE_SOURCE_RESULT_OK;
+    // TODO(rewrite): one string per bartap_err_t
+    (void)err;
+    return "unknown";
 }
 
-static bartap_byte_source_result_t memory_read(void *context, bartap_offset_t offset, void *buffer, size_t size)
+void bartap_source_memory(bartap_source_t *source, const void *data, uint32_t size)
 {
-    const bartap_byte_source_memory_t *memory = context;
-    memcpy(buffer, memory->data + offset, size);
-    return BARTAP_BYTE_SOURCE_RESULT_OK;
+    // TODO(rewrite)
+    (void)source;
+    (void)data;
+    (void)size;
 }
 
-void bartap_byte_source_memory_init(
-    bartap_byte_source_memory_t *memory,
-    const void *data,
-    bartap_offset_t size,
-    bartap_byte_source_t *source)
+bartap_err_t bartap_source_read(const bartap_source_t *source, uint32_t offset, void *buf, size_t len)
 {
-    if (memory == NULL || source == NULL || (data == NULL && size != 0U)) {
-        return;
-    }
-    memory->data = data;
-    source->read = memory_read;
-    source->context = memory;
-    source->size = size;
+    // TODO(rewrite): bounds-check offset + len against source->size before calling read
+    (void)source;
+    (void)offset;
+    (void)buf;
+    (void)len;
+    return BARTAP_ERR_UNSUPPORTED;
+}
+
+uint32_t bartap_hash(const void *data, size_t len)
+{
+    // TODO(rewrite): FNV-1a, offset basis 2166136261, prime 16777619
+    (void)data;
+    (void)len;
+    return 0;
+}
+
+bool bartap_copy_utf8(char *dst, size_t size, const char *src, size_t len)
+{
+    // TODO(rewrite): walk the cut back over continuation bytes (10xxxxxx)
+    (void)dst;
+    (void)size;
+    (void)src;
+    (void)len;
+    return false;
 }

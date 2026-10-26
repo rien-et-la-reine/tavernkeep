@@ -8,11 +8,11 @@
  * either. private/ holds the rest. */
 
 #include <stdint.h>
-#include "bartap/byte_source.h"
+#include "bartap.h"
 
 #include <stdio.h>                  // another standard header
   #  include <stdlib.h>            // the same, spaced out
-#include "platform/debug.h"         // a quoted header outside bartap/
+#include "platform/debug.h"         // a quoted header other than bartap.h
 #include BARTAP_PLATFORM_HEADER     // through a macro, so it cannot be checked
 #include_next <assert.h>            // include_next is an include too
 #include "internal.h"               // an internal header, from a public one: allowed only in private/

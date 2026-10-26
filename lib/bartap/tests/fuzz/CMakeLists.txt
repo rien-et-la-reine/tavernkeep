@@ -14,9 +14,9 @@ set(BARTAP_FUZZ_OPTIONS -fsanitize=fuzzer-no-link,address,undefined -fno-sanitiz
     -fno-omit-frame-pointer -g -O1)
 set(BARTAP_FUZZ_LINK_OPTIONS -fsanitize=fuzzer,address,undefined)
 
-add_library(bartap_fuzz_lib STATIC ${BARTAP_SOURCES} ${CMAKE_CURRENT_SOURCE_DIR}/../common/flow.c)
-target_include_directories(bartap_fuzz_lib PUBLIC ${BARTAP_INCLUDE_DIR} ${BARTAP_PRIVATE_INCLUDE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/../common)
+add_library(bartap_fuzz_lib STATIC ${BARTAP_SOURCES})
+target_include_directories(bartap_fuzz_lib PUBLIC ${BARTAP_INCLUDE_DIR} ${BARTAP_PRIVATE_INCLUDE_DIR})
+target_compile_definitions(bartap_fuzz_lib PUBLIC ${BARTAP_PUBLIC_DEFINITIONS})
 set_target_properties(bartap_fuzz_lib PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 target_compile_options(bartap_fuzz_lib PRIVATE ${BARTAP_FUZZ_OPTIONS} ${BARTAP_WARNING_OPTIONS})
 

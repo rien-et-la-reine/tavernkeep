@@ -5,7 +5,7 @@ SPDX-License-Identifier: MIT
 
 # Fuzzing Bartap
 
-libFuzzer harnesses, one per entry point, under AddressSanitizer and UndefinedBehaviorSanitizer (D8).
+libFuzzer harnesses, one per entry point, under AddressSanitizer and UndefinedBehaviorSanitizer.
 They need clang and zlib's headers, and build only when asked:
 
 ```sh
@@ -24,14 +24,17 @@ mkdir -p /tmp/fuzz/epub && cp tests/fuzz/corpus/epub/* /tmp/fuzz/epub/
 
 | Harness | Input | Checks |
 |---|---|---|
-| `fuzz_inflate` | A byte for the input piece size, one for the output piece size (1 to 256), then raw DEFLATE | Differential against zlib's raw inflate (windowBits -15): the same verdict (decodes, truncated, corrupt), since `inflate.h` accepts exactly what zlib does, and the same output when both decode; what both produce agrees as far as both go |
-| `fuzz_xml` | A byte each for the flags, the depth limit, the token buffer's size and the piece sizes, then a document | Depth within the limit; every name and value inside the token buffer; positions never decrease or pass the bytes taken; at DONE every byte taken exactly once; nothing CORRUPT in lenient mode |
-| `fuzz_ocf` | A zip archive | Open (with a 64-byte or a 4 KiB scratch buffer); every entry read to its end with 1-byte buffers and with large ones, which must end the same way and agree on the bytes; the scratch pointer cleared once open finishes |
-| `fuzz_epub` | An EPUB | The whole-book flow (`../common/flow.h`): open, every metadata field, the table of contents, every spine item through the text layer in mixed piece sizes; every item's position formatted, parsed back (it must round-trip) and resolved (it must succeed); a snapshot of each spine item restored into a fresh text layer must deliver the same items. The input's hash picks strict or lenient markup and whether element items are on |
+| `fuzz_inflate` | A byte for the input piece size, one for the output piece size (1 to 256), then raw DEFLATE | TODO(rewrite): differential against zlib's raw inflate (windowBits -15) |
+| `fuzz_xml` | A byte for the piece size, then a document | TODO(rewrite): offsets never decrease; every byte consumed once |
+| `fuzz_ocf` | A zip archive | TODO(rewrite): every entry read to its end with small and large buffers, agreeing |
+| `fuzz_epub` | An EPUB | Open, metadata, the TOC and every spine item's text. TODO(rewrite): seek to every token's location and resume at the same token |
 
-Every step loop has an iteration cap derived from the input's size, and fails if a call returns OK without
-making progress (nothing taken, nothing delivered, and its state unchanged byte for byte) more than a few
-times in a row: D5 forbids livelocks, and a call that changes nothing would do the same for ever.
+The harnesses are skeletons for the rewrite. The seed corpora predate it: the `xml` seeds were written
+for the old harness, whose first bytes were flags, a depth limit and buffer sizes, so their leading bytes
+now act as noise until `make_seeds.py` is updated.
+
+Every loop has an iteration cap derived from the input's size, so a call that makes no progress ends the
+run rather than hanging it.
 
 ## Corpora
 

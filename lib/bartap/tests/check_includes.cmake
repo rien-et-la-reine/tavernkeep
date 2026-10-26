@@ -7,10 +7,10 @@
 #
 # PUBLIC_DIRS hold the public headers (include/), PRIVATE_DIRS the sources and internal headers (src/).
 # Every .c and .h file under either may include <stdint.h>, <stddef.h>, <stdbool.h> and <string.h>,
-# and the public "bartap/NAME.h" headers. A file under PRIVATE_DIRS may also include an internal header
+# and the public "bartap.h". A file under PRIVATE_DIRS may also include an internal header
 # as a bare "NAME.h", but only one that exists directly in one of PRIVATE_DIRS; a public header may not,
 # since it would not compile for a user of the library. Anything else - another standard header, a
-# platform header, a quoted header outside bartap/, an internal header from a public one, or an include
+# platform header, any other quoted header, an internal header from a public one, or an include
 # through a macro - is a violation. Passes only if exactly EXPECT_VIOLATIONS were found: 0 for the
 # library, and the planted count for the selftest, which proves each kind is caught. Finding no files
 # at all fails, so a wrong path cannot pass.
@@ -56,7 +56,7 @@ foreach(path IN LISTS files)
             endif()
         elseif(line MATCHES "^[ \t]*#[ \t]*include[_a-z]*[ \t]*\"([^\"]+)\"")
             set(quoted "${CMAKE_MATCH_1}")
-            if(quoted MATCHES "^bartap/[A-Za-z0-9_]+\\.h$")
+            if(quoted STREQUAL "bartap.h")
                 set(ok TRUE)
             elseif(NOT private_index EQUAL -1 AND quoted MATCHES "^[A-Za-z0-9_]+\\.h$")
                 list(FIND internal_headers "${quoted}" internal_index)
