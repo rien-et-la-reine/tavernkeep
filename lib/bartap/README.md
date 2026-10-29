@@ -10,9 +10,10 @@ container and its DEFLATE entries, the OCF container, the OPF package and spine,
 (EPUB 3 navigation document or EPUB 2 NCX), any entry by its path, and chapters as a stream of words and
 blocks. Layout and rendering are left to the caller.
 
-**Status: skeleton.** A rewrite toward roughly 2,800 lines. `include/bartap.h` and
-`src/bartap_internal.h` are drafted, and the decisions behind them are in [DECISIONS.md](DECISIONS.md); every function in `src/` is a stub marked `TODO(rewrite)`. The
-previous implementation is in this branch's history.
+**Status: implemented, API still draft.** Host fixtures, token/position regressions, zlib differential
+cases and portability checks run through CTest. The reference book is walked in stream and memory
+modes. See [DECISIONS.md](DECISIONS.md) for the design and [VALIDATION.md](VALIDATION.md) for the checked
+configurations and memory costs. Device latency and full firmware stack use still need measurement.
 
 ## Shape
 
@@ -21,9 +22,11 @@ previous implementation is in this branch's history.
   the same core (audio) is the caller's to do, inside its byte source's read callback if need be.
 - **Lenient only.** Damaged packaging and markup are recovered from and reported as `BARTAP_WARN_*`
   bits; invalid UTF-8 is read as Windows-1252.
-- **Positions are `bartap_loc_t`:** a spine index and a byte offset in that chapter's uncompressed
-  XHTML. Paging backwards re-reads the chapter from its start, or seeks in memory when the chapter has
-  been inflated into PSRAM once (`bartap_text_open_memory`).
+- **Positions are `bartap_loc_t`:** a spine index, raw XHTML chunk offset, token index and raw anchor.
+  Seeking replays formatting from the chapter start. With PSRAM (`bartap_text_open_memory`), replay
+  reads memory without inflating again. A tail buffer for stream mode is decided but not yet
+  implemented (D16). `bartap_text_context` supplies open blocks after a seek;
+  `bartap_text_seek_fragment` resolves a TOC's decoded fragment on demand.
 - **State the caller declares by type.** `bartap.h` defines every state struct, so the caller declares
   a `bartap_book_t` (and so on) and Bartap never casts a byte array to a struct. The fields are
   Bartap's.
@@ -42,6 +45,26 @@ mechanically.
 - **I/O:** only through the caller's `bartap_source_t` read callback.
 - **Errors:** `bartap_err_t`. Nothing in the library aborts or asserts.
 - **Untrusted input:** every offset and length from a file is bounds-checked.
+
+## Small contracts worth knowing
+
+- Adjacent WORD tokens join without an inserted space. Bartap emits SPACE and LINE_BREAK explicitly.
+- Formatting uses at most 32 recognized nested elements. Deeper ones are ignored with
+  `BARTAP_WARN_MARKUP`; their text stays in the enclosing block and style.
+- Table cells and structural containers separate words without being blocks themselves; images and
+  text outside any block open an implicit paragraph.
+- Read `bartap_text_warnings` / `bartap_toc_warnings` as well as `bartap_warnings`.
+- Memory-mode opening takes `book` before `spine_index` to resolve relative images: it reads the
+  chapter's name from its local header once. Iteration and seeking read no archive; only the supplied
+  XHTML must remain alive afterward.
+- The TOC is the nav document's `epub:type="toc"` nav, else the NCX; a nav document with no toc nav
+  falls back to its first untyped nav.
+- The identifier is the one `unique-identifier` names, else the first non-empty `dc:identifier` (with
+  `BARTAP_WARN_MARKUP`).
+- Source callbacks and live iterators must not share an active inflate window. After opening, reuse
+  the work buffer's window, but do not place the work buffer itself on a small embedded stack.
+- The new position format is draft and tied to tokenizer behavior. Version saved bookmarks in the
+  application; positions from the earlier implementation are not compatible.
 
 ## Building
 
@@ -74,7 +97,7 @@ ISO C11 without compiler extensions, whatever the including project uses.
 | `include/bartap.h` | The public API, and every state struct's layout |
 | `src/bartap_internal.h` | The interfaces between the modules |
 | `src/byte_source.c` | Reads through the caller's source; the memory source; shared helpers |
-| `src/ocf.c` | ZIP end record and central directory; entries by name or hash |
+| `src/ocf.c` | ZIP end record and central directory; exact entry names |
 | `src/inflate.c` | Streaming DEFLATE, with an optional fast Huffman table |
 | `src/xml.c` | Lenient pull tokenizer, entities, Windows-1252 fallback |
 | `src/epub.c` | Opening the book, metadata, spine, streams, the TOC |

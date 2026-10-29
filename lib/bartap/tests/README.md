@@ -5,10 +5,10 @@ SPDX-License-Identifier: MIT
 
 # Bartap host tests
 
-Tests for the library in `include/` and `src/`. During the rewrite only the harness, the generators, the
-fixture, the fuzz harnesses' skeletons and the portability checks are here; unit cases come back with
-the code they test. The previous suite (unit cases, the CFI oracle, the whole-book flow, the corpus
-runner, the container checks) is in this branch's history.
+Tests for the library in `include/` and `src/`: generated inflate/ZIP fixtures, generated books,
+text and XML regressions, a full reference-book walk, and portability checks. Expected outputs come
+from zlib/Python zipfile and explicit token contracts. `fixture_tables.py` turns the JSON manifests
+into C tables at build time, so no JSON dependency enters the C tests or library.
 
 The tests may include the library's internal header (`#include "bartap_internal.h"`) as well as its
 public one (`#include "bartap.h"`).
@@ -36,7 +36,7 @@ python3 tests/run_matrix.py         # all of it under gcc and clang, 64- and 32-
 | `harness_selftest` | The harness reports a failing check, a case with no checks, and a crash |
 | `include_check` | Every file in `include/` and `src/` includes only `<stdint.h>`, `<stddef.h>`, `<stdbool.h>`, `<string.h>` and `"bartap.h"`; files in `src/` may also include the internal header there by bare name, and the public header may not (`check_includes.cmake`) |
 | `include_check_selftest` | That check finds all seven planted violations in `check_selftest/includes/public/` and `private/` |
-| `symbol_check` | An uninstrumented build of the library has no writable data and calls nothing but `memcpy`, `memset`, `memcmp`, `memmove`, the stack protector's symbols and, on 32-bit x86, `_GLOBAL_OFFSET_TABLE_` (`check_symbols.cmake`). The build includes one translation unit per header, compiled with `-Werror=unused-function -Werror=unused-variable`, so whatever a header defines is checked too |
+| `symbol_check` | An uninstrumented build of the library has no writable data and calls nothing but `memcpy`, `memset`, `memcmp`, `memmove`, `strlen`, `strcmp`, `strchr`, the stack protector's symbols and, on 32-bit x86, `_GLOBAL_OFFSET_TABLE_` (`check_symbols.cmake`). The build includes one translation unit per header, compiled with `-Werror=unused-function -Werror=unused-variable`, so whatever a header defines is checked too |
 | `symbol_check_selftest` | That check finds both planted violations in `check_selftest/symbols/` |
 | `header_unit_selftest_unused_function`, `header_unit_selftest_unused_variable` | A header unit fails to compile on each planted header in `check_selftest/headers/` (the variable case under GCC only: clang never reports one) |
 
@@ -51,6 +51,8 @@ POSIX: the runner needs stdio and `fork()`.
 | File | What it is |
 |---|---|
 | `harness.h`, `test_main.c` | `EXPECT`/`REQUIRE` macros and the runner. Each case runs in its own process, and a case that runs no checks fails |
+| `test_text.c`, `test_xml.c` | Token semantics, every-boundary bookmark round trips, recovery, limits, attributes, UTF-8 and URI handling |
+| `test_fixtures.c`, `fixture_tables.py` | Manifest-driven differential/ZIP/book tests and stream/memory equivalence across all 65 fixture chapters |
 | `test_headers.c` | Includes both headers together; checks the constants the specifications fix |
 | `make_fixtures.py` | Generates the DEFLATE and zip inputs into the build directory |
 | `make_books.py` | Generates the small EPUBs (`books.json` lists them, with what opening each gives) |
@@ -78,7 +80,9 @@ and `make_fixtures.py` into `build/tests/generated/` whenever they change. The b
 every word in them written in the script: EPUB 3 with a nav whose fragments point into one file holding
 two chapters, a cover-image item, entities, CDATA, comments and astral characters; the same with CR LF
 line ends; EPUB 2 with an NCX, a cover meta and an XHTML 1.1 DOCTYPE; books with no cover or table of
-contents, dangling references, a duplicated entry, malformed markup, and long attribute values.
+contents, dangling references, a duplicated entry, malformed markup, long attribute values, display
+truncation at UTF-8 boundaries, an untyped nav ahead of the toc nav and one standing in for it, and a
+`unique-identifier` that names no identifier or follows a long unnamed one.
 
 To regenerate `make_fixtures.py`'s inputs by hand:
 

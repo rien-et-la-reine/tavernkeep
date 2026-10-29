@@ -14,10 +14,10 @@ this branch's history.
 - Context: A microcontroller reader that opens EPUB files directly needs zip, DEFLATE, XML and EPUB
   package handling in tight memory, with no operating system, no heap and no large dependencies.
 - Decision: Bartap is a standalone, freestanding C library for reading EPUB files on microcontrollers,
-  of about 2,500-3,000 lines.
+  kept small enough for one maintainer to understand.
 - Rationale: Most small readers are written in C or C++, so a C library can be used by nearly all of
   them. Building Tavernkeep's EPUB handling as a library also forces cleaner boundaries than building it
-  into the firmware. A size target keeps the library small enough to read in one sitting.
+  into the firmware. Readability and bounded state matter more than a strict line-count target.
 - Alternatives considered: Using or adapting an existing EPUB implementation; building EPUB handling
   into Tavernkeep.
 - Consequences and trade-offs: More design and test effort up front than firmware-only code.
@@ -86,8 +86,11 @@ this branch's history.
 - Decision: An attacker controls every byte of the file. Bartap guarantees:
   - no out-of-bounds reads or writes;
   - no unbounded loops: every loop is bounded by the input's size or a fixed limit;
-  - fixed limits (`BARTAP_*_MAX`, the spine array's capacity) on everything kept, with longer values
-    truncated and warned about rather than overflowed;
+  - fixed limits (`BARTAP_*_MAX`, the spine array's capacity) on everything kept;
+  - display strings are shortened at UTF-8 boundaries with warnings; incomplete paths/IDs are never
+    used as identities. Excess spine items are dropped with a warning. Recognized elements nested
+    past the formatting stack are ignored with `BARTAP_WARN_MARKUP`, with a count per tag so their
+    closing tags are ignored too;
   - errors as result codes, never undefined behaviour or aborts.
 
   Sizes and offsets in the file are checked, never trusted.
@@ -106,8 +109,10 @@ this branch's history.
   - Big-endian support should need only an extra test configuration, not code changes.
   - Language: ISO C11 without extensions. Only `<stdint.h>`, `<stddef.h>`, `<stdbool.h>` and
     `<string.h>`.
-  - Bytes read from files are `uint8_t`, never plain `char`. Strings a caller passes in only to be
-    matched are `const char *`, compared with `memcmp`.
+  - Raw input bytes are `uint8_t`; decoded, NUL-terminated strings are `char` arrays.
+  - Allowed runtime calls are `memcpy`, `memset`, `memcmp`, `memmove`, `strlen`, `strcmp`, and `strchr`.
+    String functions operate on terminated buffers, never an unbounded view of input. This uses the
+    target's small C runtime rather than maintaining duplicate string routines in Bartap.
   - Values in files are decoded byte by byte, with no assumptions about byte order or alignment.
   - No object is accessed through an lvalue of another type (C11 6.5p7): state is declared by the
     caller as its real struct type (D9), never as a byte array cast to one.
@@ -147,19 +152,20 @@ this branch's history.
   caller that touches a field is on its own. `BARTAP_INFLATE_FAST_LUT` changes layouts, so it is a CMake
   option that defines it for the library and its users alike.
 
-## D10 — The OCF layer is EPUB-specific
+## D10 — ZIP directory scans and exact names
 
-- Context: An EPUB's container is a zip archive with rules of its own, the OCF's.
-- Decision: The container layer (`src/ocf.c`) is not a general zip reader. It reads only the stored and
-  deflated methods, refuses zip encryption, compares entry names as raw bytes, and finds entries by name
-  or by the FNV-1a hash and length of their name. The end record is found by scanning back over the last
-  min(size, 65535 + 22) bytes, so bytes after it are tolerated (`BARTAP_WARN_TRAILING_BYTES`).
-- Rationale: Bartap reads EPUBs and nothing else. Hash matching lets the OPF pass find every spine
-  item's entry without keeping path strings. Archives with transfer padding after the end record are
-  common and otherwise valid.
-- Alternatives considered: A general zip reader with the OCF rules in a layer over it.
-- Consequences and trade-offs: A hash collision between two of one book's paths would misplace an item;
-  the length check makes that rarer still.
+- Decision: Scan backward for the end record and tolerate trailing bytes with a warning. ZIP64 values
+  must fit the existing limits. Match names byte for byte; the first central-directory match wins.
+- Opening walks the directory once for all spine items, comparing each name's length and FNV-1a hash
+  with the spine's in RAM. TOC and cover discovery use at most four additional lookups, independent of
+  spine length.
+- Rationale: Source reads matter more than comparisons in RAM on an SD-backed reader. This avoids an
+  index allocator and a sort. CPU matching is still O(entries × spine).
+- Trade-off: Each spine item keeps a 32-bit hash and a length instead of the path: 28 bytes per item on
+  the checked Arm ABI, rather than 276 with a `BARTAP_PATH_MAX + 1` buffer. While opening they hold the
+  idref's, then the resolved path's. Two different names of the same length and hash would be taken for
+  the same entry; that risk is accepted. Text needs the chapter's directory to resolve images, so
+  opening a chapter, in either mode, reads its name once from the local header.
 
 ## D11 — Inflate memory: one caller window, decode tables inside the state
 
@@ -167,7 +173,9 @@ this branch's history.
   both want fast memory.
 - Decision: Every inflating call takes a caller-supplied `BARTAP_WINDOW_SIZE` window. The decode tables
   live inside `bartap_inflate_t`, with an optional 256-entry literal/length lookup table
-  (`BARTAP_INFLATE_FAST_LUT`, 512 bytes).
+  (`BARTAP_INFLATE_FAST_LUT`, 512 bytes). A separate 320-byte code-length array and named counters
+  replace packed in-place scratch. Fixed distance tables include all 32 codes; decoding rejects the
+  reserved distance symbols 30 and 31.
 - Rationale: A struct containing the 32 KiB window is easy to put on a small stack by mistake; a
   separate window can live where the caller chooses and be shared by objects that never run at once.
   The lookup table resolves most codes in one load, which matters on a Cortex-M33 and little on x86.
@@ -177,11 +185,14 @@ this branch's history.
 ## D12 — One work buffer for opening
 
 - Context: Opening reads container.xml and the OPF, which may be deflated, so it needs an inflate
-  window, a stream, a tokenizer and path buffers, about 35 KiB. A 4 KiB stack cannot hold the
-  non-window part safely.
+  window, a stream, a tokenizer and path buffers. See VALIDATION.md for measured struct sizes.
+  These objects do not belong on the call stack.
 - Decision: `bartap_open` takes one `bartap_work_t`, holding its parsing state and a window, used only
   during the call. Its `window` member can then serve any stream, TOC or text iterator.
-- Rationale: One buffer to place, no stack use worth mentioning, and the window is not allocated twice.
+- Rationale: One buffer to place, and the window is not allocated twice. Local call frames still use
+  stack: the checked Arm build has about 1.8 KiB on an opening call chain before adapter/interrupt
+  overhead. Start integration with at least 4 KiB reserved and measure the complete firmware's stack;
+  this is not a guarantee that 4 KiB suffices for every adapter.
 - Alternatives considered: A window and a separate scratch buffer; a byte buffer of a published size,
   which would bring back D9's aliasing problem.
 - Consequences and trade-offs: The work buffer cannot be reused while a book is opening.
@@ -200,8 +211,8 @@ this branch's history.
 
 - Context: A book's spine may have a handful of items or several hundred, and each is read many times.
 - Decision: `bartap_open` fills a `bartap_spine_item_t` array the caller supplies, with its capacity,
-  in reading order. Each item holds its entry's local header offset, sizes, method and flags (`linear`),
-  so opening a chapter needs no central directory walk. More items than the capacity are dropped with
+  in reading order. Each item holds its archive path's hash and length, local header offset, sizes, CRC, method
+  and flags (`linear`), so opening a chapter needs no central directory walk. More items than the capacity are dropped with
   `BARTAP_WARN_SPINE_TRUNCATED`.
 - Rationale: The book struct stays a fixed size whatever the spine's, and the caller sizes the array
   to its memory and the books it expects.
@@ -212,45 +223,76 @@ this branch's history.
 
 - Context: Title, author, language and the unique identifier are wanted for menus long after opening.
 - Decision: `bartap_open` copies them into `bartap_book_t`, each up to `BARTAP_META_MAX` bytes, cut at a
-  UTF-8 character boundary. The identifier is the one `<package unique-identifier>` names.
+  UTF-8 character boundary. The identifier is the one `<package unique-identifier>` names; when that
+  names none, or is too long to read, the first non-empty `dc:identifier` stands in, with
+  `BARTAP_WARN_MARKUP`, so the book still has an identity.
 - Rationale: Reading them again would mean re-inflating the OPF; 4 x 128 bytes is cheap.
 - Alternatives considered: Re-parsing the OPF on demand.
 - Consequences and trade-offs: Longer values are truncated with `BARTAP_WARN_META_TRUNCATED`.
 
-## D16 — Positions are a spine index and a byte offset
+## D16 — Positions are source cursors, restored by replay
 
-- Context: The previous design located positions as EPUB CFIs, which meant a DOM-indexed path counted
-  in UTF-16 code units and a resolver to walk it.
-- Decision: A position is a `bartap_loc_t`: the spine index and the byte offset of a token in that
-  item's uncompressed XHTML. Seeking forward continues; seeking back re-reads the item from its start.
-  A chapter already inflated in memory (`bartap_text_open_memory`) seeks without inflating.
-- Rationale: Re-inflating a 100 KiB chapter takes tens of milliseconds, well under an e-ink refresh.
-  A byte offset needs no parser, no resolver and no tree.
-- Alternatives considered: EPUB CFI (the previous design); a token count.
-- Consequences and trade-offs: A position is tied to the exact bytes of the book: if the file is
-  replaced by another edition, saved positions may land in a different place. Positions cannot be
-  exchanged with other reading systems. To guard against a replaced file, a position carries an anchor:
-  the raw XHTML bytes at its offset, `BARTAP_ANCHOR_SIZE` (32) of them or fewer at an item's end.
-  `bartap_text_loc` takes them from the tokenizer's lookahead, which it keeps at least that far ahead, so
-  taking a position at the top of a page costs a copy and no extra read. Restoring a position is Bartap's: it compares the bytes at the
-  offset with the anchor; on a mismatch it searches up to two anchor lengths either side and takes the
-  match nearest the offset; with no match it restores the bare offset. The search window only recovers
-  small shifts, such as an errata fix earlier in the chapter; anything larger falls back to the offset,
-  which is no worse than having no anchor. `bartap_text_seek` reports which of the three happened.
-  32 bytes is five or six words of prose: unique within the 160 bytes searched, short enough that an
-  edit rarely lands inside it, and it makes a position 40 bytes. A longer anchor would widen the search
-  but not reach the shifts a different edition brings, which are far larger.
+- Decision: `bartap_loc_t` holds the spine index, the raw XHTML offset of an XML chunk, a small token
+  index within that chunk, and up to 32 raw anchor bytes beginning at that exact offset. One chunk may
+  emit a space, a word and an implicit block start. The index distinguishes these without pretending
+  that decoded character indices are raw byte offsets (entities and encoding fallback change lengths).
+- `bartap_text_loc` prepares one token of lookahead but leaves it available to `bartap_text_next`.
+  It also works at EOF. The renderer saves locations before consuming the next page's first token.
+- Seeking checks the anchor, searches up to 64 bytes either side on a mismatch, and otherwise uses
+  the bare offset. It replays the normal tokenizer to reconstruct formatting. Anchored stream seeking
+  may inflate the prefix twice; memory seeking still parses the prefix but does not inflate it.
+- `bartap_text_context` copies the open block stack before the next token. After seeking, the renderer
+  restores indentation/formatting from that context without adding new-paragraph spacing.
+- `bartap_text_seek_fragment` scans for an exact decoded `id` (`xml:id` also uses the local name),
+  including IDs on otherwise ignored elements. Empty fragment means chapter start; absent IDs return
+  `NOT_FOUND`. TOC fragments are percent-decoded once during href resolution. Legacy `a name` anchors
+  are not supported. There is no ID index or CFI engine.
+- Stream mode takes an optional caller-provided tail buffer: two more parameters to `bartap_text_open`,
+  a buffer and its capacity, NULL and 0 for none. Not yet implemented. Bartap fills it
+  with the chapter's last bytes, from buffer start = size - capacity (or 0 if the chapter fits), as the
+  forward pass delivers them. The first time that pass reaches an XML chunk boundary at or after the
+  buffer start, with nothing pending in the parser, it saves the iterator's formatting state there: the
+  resume point. There is one saved state per open chapter.
+- A seek whose target lies between the resume point and the end of what has been buffered restores that
+  state and replays from the buffer: no card reads and no inflate. Earlier targets are replayed from the
+  chapter start as before. Positions are chapter offsets either way. Without a buffer, seeking is
+  unchanged.
+- The anchor search covers only buffered bytes when its window would begin before the buffer start;
+  matching nothing there, it uses the bare offset, as without a buffer, so a seek lands in the same
+  place with a buffer or without one.
+- Buffered bytes are used before the chapter's CRC-32 has been checked at its end (D22), just as
+  streaming delivers them. The buffer's size is the caller's choice; a buffer at least as large as the
+  chapter holds all of it.
+- Trade-off: Positions are tied to this tokenizer version and the book's bytes. Anchors offer only
+  best-effort recovery after edits; EXACT/MOVED describe matching bytes, not identical tokenization.
+  Old saved locations from the draft implementation must be discarded or versioned by the caller.
+  Callers should serialize fields, not dump structs with ABI-dependent padding.
+  The saved state grows every text iterator, whether or not it is given a buffer, and a seek before the
+  resume point still costs a replay up to it.
 
-## D17 — The text iterator pulls from its own source
+## D17 — A bounded text iterator, with explicit whitespace
 
-- Context: Text can come from a deflated entry or from a chapter already inflated in memory.
-- Decision: `bartap_text_t` reads its bytes itself, from an embedded stream or from memory, and returns
-  one token per call. Whitespace is collapsed outside `<pre>` and kept inside it.
-- Rationale: The caller's loop is one call per token, with no input buffers to feed, and seeking is the
-  iterator's to do.
-- Alternatives considered: A push-fed iterator, given bytes by the caller (the previous design).
-- Consequences and trade-offs: `bartap_text_t` embeds a stream, about 1.3 KiB, even when reading from
-  memory.
+- Decision: Stream and memory modes share one tokenizer. Memory opening takes a book and spine index
+  to copy the chapter directory; after opening, only the XHTML bytes must outlive the iterator.
+- A 32-frame stack tracks recognized blocks and inline styles. Frames remember exact recognized tag
+  identity and previous style. Repeated styles nest correctly. This is not a DOM or HTML tree builder.
+- A matching close unwinds to its frame; mismatched nesting warns. Unmatched recognized closing tags
+  are ignored with a warning. Clean EOF closes emitted blocks; unclosed explicit frames warn. Elements
+  past the stack are ignored with a warning (D6); their text stays in the enclosing block and style.
+  Fatal I/O/corruption errors need not finish the block stream.
+- Table cells, captions and structural containers (`table`, `section`, `article`, `aside`, `header`,
+  `footer`, `nav`, `figure`, lists, `address`, `body`) are not frames, but separate words: they close an
+  implicit paragraph, or leave a pending space. Text or images outside any block open an implicit
+  paragraph.
+- `WORD` means a text fragment. Adjacent WORDs concatenate without implied whitespace, including
+  across inline style changes and long-word splits. Outside `pre`, pending whitespace is emitted only
+  between inline content, including images; block boundaries and `br` clear it. In `pre`, spaces/tabs
+  produce SPACE and CR/LF produce LINE_BREAK, with CRLF treated as one break even across chunks.
+- One token of lookahead keeps loc/seek/context consistent; the only saved parser state is the
+  tail buffer's resume point (D16). Tokens
+  are cleared normally; removing the memset is deferred until a device profile justifies it.
+- Trade-off: The memory-mode iterator still embeds stream state. Keeping one state layout is simpler
+  than introducing a separate tokenizer API or union lifetime rules.
 
 ## D18 — Results: one readable enum
 
@@ -266,7 +308,12 @@ this branch's history.
 - Decision: Bartap has one mode. Packaging faults (mimetype missing, compressed or not first), malformed
   markup and invalid UTF-8 are recovered from and reported as `BARTAP_WARN_*` bits. Invalid UTF-8 is
   read as Windows-1252, whose 0x80-0x9F range holds the curly quotes and dashes legacy books use. The
-  safety rules (offsets, sizes, methods, encryption) are always enforced (D6).
+  safety rules (offsets, sizes, methods, encryption) are always enforced (D6). Wrong mimetype contents
+  also warn; container/OPF parsing determines whether the book is usable.
+- Warnings raised during text/TOC iteration are available through their own getters. Text warnings
+  remain sticky across seeks and reset on opening. Display truncation has a warning for metadata and
+  another for TOC labels. Relevant oversized attributes warn and are unavailable, rather than matching
+  a prefix. Unknown attributes are scanned but not retained; retained attribute storage is bounded.
 - Rationale: Books other readers open should open in Bartap; the warnings let a caller log or refuse.
 - Alternatives considered: A strict mode beside the lenient one (the previous design).
 
@@ -274,7 +321,9 @@ this branch's history.
 
 - Decision: Entry names are compared as raw bytes, case-sensitively, whatever their UTF-8 flag.
 - Consequences and trade-offs: An OPF href and a zip name that are the same text in different Unicode
-  normalization forms do not match. Percent-decoding hrefs before lookup is the book layer's.
+  normalization forms do not match. Percent-decoding hrefs before lookup is the book layer's. An
+  escaped `/` (`%2F`) in an href's path is data, not a separator (RFC 3986 2.2), and no archive name
+  can hold it, so the href is refused as corrupt; in a fragment it decodes, since an id may hold `/`.
 
 ## D21 — Duplicate names
 
@@ -293,7 +342,9 @@ this branch's history.
 - Rationale: A damaged card or a bad copy should not show as silently wrong text. Folding the CRC in as
   bytes pass costs no extra reads and no buffer. A mismatch is `BARTAP_ERR_CORRUPT` rather than a code of
   its own: once the check fails, nothing says the data decoded correctly either. The CRC uses the usual
-  256-entry table (1 KiB of read-only data), one lookup per byte.
+  16-entry nibble table (64 bytes of read-only data), two lookups per byte. A larger table is deferred
+  until profiling demonstrates a useful gain. The stream layer owns size/CRC completion checking;
+  the XML and text layers propagate its errors.
 - Alternatives considered: No check (DEFLATE's own consistency only); checking an entry in full before
   delivering any of it, which needs a second pass or the whole entry in memory.
 - Consequences and trade-offs: Bytes and tokens delivered before an entry's end are unverified until
