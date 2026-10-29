@@ -19,7 +19,7 @@
  * - Read-only. Bartap never writes to the book or anywhere else; what a reader saves (positions,
  *   bookmarks) is the caller's to store.
  * - A reading position is a bartap_loc_t: a spine index, a byte offset in that chapter's uncompressed
- *   XHTML, and an anchor (the bytes at that offset) that lets a position survive small changes to the
+ *   XHTML, a token index within that source chunk, and an anchor (the bytes at that offset) that lets a position survive small changes to the
  *   file it was saved against.
  *
  * Every state struct's layout is here so that the caller can declare one of the right type and Bartap
@@ -48,13 +48,14 @@ typedef enum bartap_err {
 const char *bartap_strerror(bartap_err_t err);
 
 #define BARTAP_WARN_TRAILING_BYTES   (1UL << 0)  // bytes after the ZIP end record
-#define BARTAP_WARN_MIMETYPE         (1UL << 1)  // mimetype entry missing, not first, or compressed
-#define BARTAP_WARN_MARKUP           (1UL << 2)  // container.xml, the OPF or the TOC was not well-formed
+#define BARTAP_WARN_MIMETYPE         (1UL << 1)  // missing, misplaced, compressed, duplicated or wrong mimetype
+#define BARTAP_WARN_MARKUP           (1UL << 2)  // recovered markup, missing/truncated reference, or unmatched tag
 #define BARTAP_WARN_ENCODING         (1UL << 3)  // invalid UTF-8, read as Windows-1252
 #define BARTAP_WARN_SPINE_MISSING    (1UL << 4)  // an itemref with no manifest item or no entry: skipped
 #define BARTAP_WARN_SPINE_TRUNCATED  (1UL << 5)  // more itemrefs than the caller's spine array holds
 #define BARTAP_WARN_META_TRUNCATED   (1UL << 6)  // a metadata field longer than BARTAP_META_MAX
 #define BARTAP_WARN_NO_TOC           (1UL << 7)  // neither a navigation document nor an NCX
+#define BARTAP_WARN_TEXT_TRUNCATED   (1UL << 8)  // a TOC label was shortened
 
 /* ------------------------------------------------------------ limits */
 
@@ -88,6 +89,8 @@ typedef struct {
     uint32_t compressed_size;
     uint32_t size;              // uncompressed
     uint32_t crc32;             // from the central directory
+    uint32_t path_hash;         // bartap_hash of the archive path; of the idref while opening
+    uint16_t path_len;          // bytes in that path (or idref)
     uint16_t method;            // 0 stored, 8 deflate
     uint16_t flags;             // BARTAP_SPINE_*
 } bartap_spine_item_t;
@@ -98,8 +101,9 @@ typedef struct {
  * it as it likes (a bookmark file), and restores it into a book that may since have changed. */
 typedef struct {
     uint16_t spine_index;
+    uint8_t token_index;        // distinguishes tokens emitted from the same source chunk
     uint8_t anchor_len;         // bytes in anchor: fewer than BARTAP_ANCHOR_SIZE near the item's end
-    uint32_t byte_offset;       // in the spine item's uncompressed XHTML
+    uint32_t byte_offset;       // source chunk start in the spine item's uncompressed XHTML
     uint8_t anchor[BARTAP_ANCHOR_SIZE];  // the raw XHTML bytes starting at byte_offset
 } bartap_loc_t;
 
@@ -115,7 +119,7 @@ typedef enum {
     BARTAP_META_TITLE,
     BARTAP_META_AUTHOR,
     BARTAP_META_LANGUAGE,
-    BARTAP_META_IDENTIFIER,     // the one <package unique-identifier> names
+    BARTAP_META_IDENTIFIER,     // the one <package unique-identifier> names, else the first
     BARTAP_META_COUNT_,
 } bartap_meta_t;
 
@@ -129,7 +133,7 @@ typedef struct {
 /* ------------------------------------------------------------ text types */
 
 typedef enum {
-    BARTAP_TOK_WORD,            // text: a run of non-whitespace, at most BARTAP_WORD_MAX bytes
+    BARTAP_TOK_WORD,            // text fragment; adjacent WORDs join without an implied space
     BARTAP_TOK_SPACE,           // collapsed whitespace between words; a literal space inside <pre>
     BARTAP_TOK_LINE_BREAK,      // <br>, or a newline inside <pre>
     BARTAP_TOK_BLOCK_START,     // block: which one
@@ -158,7 +162,7 @@ typedef struct {
     uint8_t level;              // heading level 1-6
     uint8_t style;              // BARTAP_STYLE_* in force, for WORD
     uint16_t len;               // bytes in text
-    uint32_t offset;            // where the token starts in the XHTML: its bartap_loc_t byte_offset
+    uint32_t offset;            // source chunk start; use bartap_text_loc for an exact cursor
     char text[BARTAP_PATH_MAX + 1];
 } bartap_token_t;
 
@@ -177,10 +181,15 @@ typedef struct {
     bool final_block;
     uint16_t copy_length;       // of a match not yet fully written
     uint16_t copy_distance;
+    uint8_t code_lengths[320];  // scratch: code-length alphabet, then literal/distance lengths
+    uint16_t literal_codes;
+    uint16_t distance_codes;
+    uint16_t code_length_codes;
+    uint16_t code_index;
     uint16_t length_count[16];
     uint16_t length_symbol[288];
     uint16_t distance_count[16];
-    uint16_t distance_symbol[30];
+    uint16_t distance_symbol[32];
 #if defined(BARTAP_INFLATE_FAST_LUT)
     uint16_t fast[256];
 #endif
@@ -203,7 +212,7 @@ typedef struct {
 } bartap_entry_t;
 
 #define BARTAP_XML_NAME_MAX  31U
-#define BARTAP_XML_ATTRS_MAX 255U      // bytes of one tag's attributes, kept raw
+#define BARTAP_XML_ATTRS_MAX 1024U     // only attributes used by Bartap are retained
 #define BARTAP_XML_IN_SIZE   256U
 
 /* Where the XML tokenizer pulls its bytes from, so it runs the same over a stream and over memory. */
@@ -216,11 +225,16 @@ typedef struct {
     uint32_t warnings;          // BARTAP_WARN_MARKUP, BARTAP_WARN_ENCODING
     uint16_t in_pos;
     uint16_t in_len;
-    uint8_t in[BARTAP_XML_IN_SIZE];   // kept at least BARTAP_ANCHOR_SIZE bytes ahead of the next token
-                                      // where the document has them, for bartap_text_loc's anchor
+    bool pending_end_tag;       // true when a self-closing <tag/> must emit BARTAP_XML_END_TAG next
+    bool in_cdata;              // true while streaming a <![CDATA[...]]> section across chunks
+    uint32_t pending_offset;    // byte offset of the self-closing tag
+    uint8_t in[BARTAP_XML_IN_SIZE];   // raw lookahead; anchor is saved before decoding the chunk
     char name[BARTAP_XML_NAME_MAX + 1];
-    char attrs[BARTAP_XML_ATTRS_MAX + 1];
+    char attrs[BARTAP_XML_ATTRS_MAX + 1]; // packed selected attribute IDs and terminated raw values
     uint16_t attrs_len;
+    uint32_t attrs_overflow;    // selected attributes whose complete value could not be kept
+    uint8_t anchor[BARTAP_ANCHOR_SIZE]; // raw bytes at the current XML token
+    uint8_t anchor_len;
     char text[BARTAP_WORD_MAX + 1];
 } bartap_xml_t;
 
@@ -260,6 +274,12 @@ typedef struct {
     bartap_xml_t xml;
     char path[BARTAP_PATH_MAX + 1];
     char unique_id[BARTAP_META_MAX + 1];    // <package unique-identifier>, matched against id= in pass 1
+    char cover_id[BARTAP_PATH_MAX + 1];
+    char ncx_id[BARTAP_PATH_MAX + 1];
+    char nav_path[BARTAP_PATH_MAX + 1];
+    char ncx_path[BARTAP_PATH_MAX + 1];
+    char cover_path[BARTAP_PATH_MAX + 1];
+    char cover_meta_path[BARTAP_PATH_MAX + 1];
     uint8_t window[BARTAP_WINDOW_SIZE];
 } bartap_work_t;
 
@@ -268,19 +288,63 @@ typedef struct {
     bartap_stream_t stream;
     bartap_xml_t xml;
     uint8_t depth;
+    bool saw_untyped_nav;       // a <nav> without epub:type, used only if no toc nav exists
+    bool accept_untyped_nav;    // second pass over the document, taking that untyped nav
+    uint32_t warnings;
+    bool label_truncated;
+    char base_dir[BARTAP_PATH_MAX + 1];     // TOC entry's directory, resolved once in bartap_toc_open
 } bartap_toc_t;
+
+#define BARTAP_TEXT_DEPTH_MAX 32U
+#define BARTAP_TEXT_TAGS      32U   // at least the number of formatting tags text.c recognizes
+
+/* Context for a renderer resuming in the middle of a block. */
+typedef struct {
+    bartap_block_t block;
+    uint8_t level;
+} bartap_block_context_t;
+
+/* A recognized formatting element. Tag numbers are private to text.c. */
+typedef struct {
+    uint8_t tag;
+    uint8_t block;              // 0 means inline; otherwise bartap_block_t + 1
+    uint8_t level;
+    uint8_t previous_style;
+} bartap_text_frame_t;
 
 typedef struct {
     uint16_t spine_index;
     bool from_memory;
-    const uint8_t *memory;      // bartap_text_open_memory
+    const uint8_t *memory;
     size_t memory_len;
     size_t memory_pos;
     bartap_stream_t stream;
     bartap_xml_t xml;
-    uint8_t pre_depth;          // inside <pre>: whitespace kept
+    uint16_t text_pos;
+    uint16_t text_len;
     uint8_t style;
+    uint8_t depth;
+    uint8_t close_to;           // pop down to this depth before reading another XML token
+    uint8_t skip_depth;
+    uint8_t pre_depth;
+    bool line_content;
     bool pending_space;
+    bool previous_cr;
+    bool event_ready;
+    bool ended;
+    uint8_t event_type;
+    uint32_t event_offset;
+    uint8_t event_index;
+    uint32_t warnings;          // sticky across seeks
+    bartap_text_frame_t frames[BARTAP_TEXT_DEPTH_MAX];
+    uint16_t ignored[BARTAP_TEXT_TAGS]; // per tag: opened past the depth limit, not yet closed
+    /* One-token lookahead lets loc/seek stop BEFORE a token without copying the parser. */
+    bool ready;
+    bartap_token_t next;
+    bartap_loc_t next_loc;
+    bartap_block_context_t context[BARTAP_TEXT_DEPTH_MAX];
+    uint8_t context_depth;
+    char base_dir[BARTAP_PATH_MAX + 1];
 } bartap_text_t;
 
 /* ------------------------------------------------------------ calls: source and book */
