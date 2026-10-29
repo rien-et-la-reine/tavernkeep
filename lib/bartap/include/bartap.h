@@ -397,26 +397,39 @@ bartap_err_t bartap_toc_next(bartap_toc_t *toc, bartap_toc_entry_t *entry);
 bartap_err_t bartap_text_open(bartap_text_t *text, const bartap_book_t *book, uint16_t spine_index,
     uint8_t *window);
 /* Tokens of one spine item's XHTML already in memory (a chapter inflated once into PSRAM, say). xhtml
- * must outlive text. */
-bartap_err_t bartap_text_open_memory(bartap_text_t *text, uint16_t spine_index, const uint8_t *xhtml,
+ * must outlive text. Opening reads the chapter's name from its local header once, to resolve image paths;
+ * iteration and seeking do not read the archive. book need not outlive the memory iterator. */
+bartap_err_t bartap_text_open_memory(bartap_text_t *text, const bartap_book_t *book,
+    uint16_t spine_index, const uint8_t *xhtml,
     size_t len);
-/* The next token; BARTAP_END at the end of the spine item, once its CRC-32 has matched, or
+/* The next token. Recognized elements nested deeper than the frame stack allows are ignored with
+ * BARTAP_WARN_MARKUP; their text continues in the enclosing block and style. Table cells and other
+ * structural containers separate words. Images and text outside any block open an implicit paragraph.
+ * Adjacent WORD tokens join without implied whitespace. Fatal errors may leave blocks open.
+ * BARTAP_END at the end of the spine item, once its CRC-32 has matched, or
  * BARTAP_ERR_CORRUPT if it did not. Text opened from memory is not checked: it was checked when it was
  * inflated. */
 bartap_err_t bartap_text_next(bartap_text_t *text, bartap_token_t *token);
-/* Where the next token starts, with its anchor: the next BARTAP_ANCHOR_SIZE raw bytes from there, or
- * as many as the item has left. Take it at the top of a page. May refill the iterator's input to have
- * the anchor's bytes in hand, so it can return the stream's errors. */
+/* Cursor before the next token. byte_offset and anchor refer to the same raw XML chunk;
+ * token_index distinguishes tokens produced by that chunk (including synthetic block tokens).
+ * May read ahead one token, but the next call to next still returns that token. At EOF returns OK
+ * with an end cursor. Locations are tied to this tokenizer version, not a stable interchange format. */
 bartap_err_t bartap_text_loc(bartap_text_t *text, bartap_loc_t *loc);
-/* Restore a position in this spine item. With an anchor, the raw bytes at loc->byte_offset are compared
- * with it; on a mismatch the anchor is searched for up to 2 * BARTAP_ANCHOR_SIZE bytes either side and
- * the match nearest the offset is taken; with no match, or no anchor, the bare offset is used. The
- * iterator then continues from the first token starting at or after the position chosen, and *how
- * says which it was. A seek backwards re-reads from the start of the item; forwards, from where the
- * iterator is. Either way every byte of the item still passes through the CRC-32. */
+/* Replay from the start to restore formatting. Match the anchor at the saved offset or the nearest
+ * offset within two anchor lengths; otherwise use the bare offset. Continue at the saved token index
+ * when that source chunk still exists, or the first later token. A stream seek may inflate twice.
+ * how describes anchor matching, not a guarantee that an edited book has identical tokenization. */
 bartap_err_t bartap_text_seek(bartap_text_t *text, const bartap_loc_t *loc, bartap_seek_t *how);
-
-/* Accumulated warnings. Opening resets each iterator's warnings. */
+/* Scan from the chapter start for an exact, decoded id (no leading '#'). Empty means chapter start.
+ * On success the next token is at/after that element. NOT_FOUND leaves the iterator at EOF. */
+bartap_err_t bartap_text_seek_fragment(bartap_text_t *text, const char *fragment);
+/* Open blocks immediately before the next token, outermost first. Call after seek to restore layout.
+ * count is always the required number; insufficient capacity returns ERR_LIMIT without a partial copy.
+ * May read ahead, just like loc. */
+bartap_err_t bartap_text_context(bartap_text_t *text, bartap_block_context_t *blocks,
+    size_t capacity, size_t *count);
+/* Accumulated warnings; text warnings survive seeks. Opening resets each iterator's warnings. */
+uint32_t bartap_text_warnings(const bartap_text_t *text);
 uint32_t bartap_toc_warnings(const bartap_toc_t *toc);
 
 #endif
