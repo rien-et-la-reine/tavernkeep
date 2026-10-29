@@ -54,9 +54,11 @@ bartap_err_t bartap_zip_open(bartap_zip_t *zip, const bartap_source_t *source);
 /* The entry named path (len bytes), compared byte for byte; the first of duplicates. */
 bartap_err_t bartap_zip_find(const bartap_zip_t *zip, const bartap_source_t *source, const char *path,
     size_t len, bartap_entry_t *entry);
-/* The entry whose name hashes to hash and is len bytes long. */
-bartap_err_t bartap_zip_find_hash(const bartap_zip_t *zip, const bartap_source_t *source, uint32_t hash,
-    size_t len, bartap_entry_t *entry);
+/* Walk one directory entry, advancing pos. An overlong name is returned as an empty path. */
+bartap_err_t bartap_zip_next(const bartap_zip_t *zip, const bartap_source_t *source,
+    uint32_t *pos, bartap_entry_t *entry, char path[BARTAP_PATH_MAX + 1], uint16_t *flags);
+bartap_err_t bartap_zip_resolve_local_header(const bartap_zip_t *zip, const bartap_source_t *source,
+    uint16_t cd_flags, bartap_entry_t *entry, uint16_t *lfh_extra_len);
 
 /* ------------------------------------------------------------ inflate.c */
 
