@@ -32,6 +32,14 @@ bool bartap_copy_utf8(char *dst, size_t size, const char *src, size_t len);
 /* Read exactly len bytes at offset; a short source is BARTAP_ERR_CORRUPT. */
 bartap_err_t bartap_source_read(const bartap_source_t *source, uint32_t offset, void *buf, size_t len);
 
+/* Extract the directory prefix of path (including trailing '/', or empty if at root) into dir. */
+void bartap_path_dir(const char *path, char dir[BARTAP_PATH_MAX + 1]);
+
+/* Resolve href (stopping at '#' or '?') relative to base_dir in-place into out, normalizing '.' and '..'
+ * and decoding %XX escapes. Optionally copies the fragment after '#' into frag[0..frag_size-1]. */
+bartap_err_t bartap_resolve_href(const char *base_dir, const char *href,
+    char out[BARTAP_PATH_MAX + 1], char *frag, size_t frag_size);
+
 /* ------------------------------------------------------------ crc.c */
 
 #define BARTAP_CRC32_INIT 0U

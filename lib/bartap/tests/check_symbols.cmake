@@ -8,7 +8,7 @@
 # Violations:
 # - writable data of any kind (nm types B, C, D, G, S, V in either case): global or static mutable state.
 #   Read-only data (R), such as a CRC table, is fine.
-# - an undefined symbol other than memcpy, memset, memcmp and memmove (the <string.h> functions; memmove
+# - an undefined symbol other than memcpy, memset, memcmp, memmove, strlen, strcmp and strchr (the <string.h> functions; memmove
 #   because compilers emit calls to it for some copies), __stack_chk_fail and __stack_chk_guard, which a
 #   compiler's default stack protector adds (and __stack_chk_fail_local, its form in 32-bit x86
 #   position-independent code), and on Arm the __aeabi_* helpers of the run-time ABI (RTABI:
@@ -43,7 +43,7 @@ foreach(object IN LISTS OBJECTS)
 endforeach()
 
 set(allowed_undefined
-    "^(memcpy|memset|memcmp|memmove|__stack_chk_fail|__stack_chk_fail_local|__stack_chk_guard|__aeabi_[A-Za-z0-9_]+|_GLOBAL_OFFSET_TABLE_)$")
+    "^(memcpy|memset|memcmp|memmove|strlen|strcmp|strchr|__stack_chk_fail|__stack_chk_fail_local|__stack_chk_guard|__aeabi_[A-Za-z0-9_]+|_GLOBAL_OFFSET_TABLE_)$")
 set(violations 0)
 set(undefined "")
 string(REPLACE "\n" ";" lines "${output}")
