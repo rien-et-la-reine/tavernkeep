@@ -48,6 +48,12 @@ bartap_err_t bartap_resolve_href(const char *base_dir, const char *href,
  * the result after the last byte is the entry's CRC-32, with nothing more to apply. */
 uint32_t bartap_crc32(uint32_t crc, const void *data, size_t len);
 
+/* ------------------------------------------------------------ epub.c */
+
+/* The directory of the entry whose local header is at header_offset, read from that header's name. */
+bartap_err_t bartap_entry_base_dir(const bartap_source_t *source, uint32_t header_offset,
+    char base_dir[BARTAP_PATH_MAX + 1]);
+
 /* ------------------------------------------------------------ ocf.c */
 
 bartap_err_t bartap_zip_open(bartap_zip_t *zip, const bartap_source_t *source);

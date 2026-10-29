@@ -384,7 +384,8 @@ bartap_err_t bartap_stream_rewind(bartap_stream_t *stream);
 
 /* ------------------------------------------------------------ calls: table of contents */
 
-/* The navigation document's toc nav if there is one, else the NCX. */
+/* The navigation document's toc nav (epub:type="toc") if there is one, else the NCX. A nav document
+ * with no toc nav falls back to its first nav without epub:type. */
 bartap_err_t bartap_toc_open(bartap_toc_t *toc, const bartap_book_t *book, uint8_t *window);
 /* Entries in document order; BARTAP_END after the last. Entries whose target is not in the spine are
  * skipped. */
@@ -414,5 +415,8 @@ bartap_err_t bartap_text_loc(bartap_text_t *text, bartap_loc_t *loc);
  * says which it was. A seek backwards re-reads from the start of the item; forwards, from where the
  * iterator is. Either way every byte of the item still passes through the CRC-32. */
 bartap_err_t bartap_text_seek(bartap_text_t *text, const bartap_loc_t *loc, bartap_seek_t *how);
+
+/* Accumulated warnings. Opening resets each iterator's warnings. */
+uint32_t bartap_toc_warnings(const bartap_toc_t *toc);
 
 #endif
