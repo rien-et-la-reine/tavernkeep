@@ -40,16 +40,29 @@ add_custom_command(
 add_custom_target(bartap_fixtures DEPENDS "${BARTAP_TESTS_GENERATED_DIR}/manifest.json"
     "${BARTAP_TESTS_BOOKS_DIR}/books.json")
 
+add_custom_command(
+    OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/fixture_tables.h"
+    COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/fixture_tables.py"
+        "${BARTAP_TESTS_GENERATED_DIR}/manifest.json" "${CMAKE_CURRENT_BINARY_DIR}/fixture_tables.h"
+        "${BARTAP_TESTS_BOOKS_DIR}/books.json"
+    DEPENDS "${BARTAP_TESTS_GENERATED_DIR}/manifest.json" "${BARTAP_TESTS_BOOKS_DIR}/books.json" fixture_tables.py
+    VERBATIM
+)
+
 set(BARTAP_TESTS_SOURCES
     test_main.c
     test_headers.c
+    test_text.c
+    test_xml.c
+    test_fixtures.c
+    "${CMAKE_CURRENT_BINARY_DIR}/fixture_tables.h"
 )
 
 add_executable(bartap_tests ${BARTAP_TESTS_SOURCES})
 add_dependencies(bartap_tests bartap_fixtures)
 target_link_libraries(bartap_tests PRIVATE bartap)
 # The tests may include the library's internal header as well as its public one
-target_include_directories(bartap_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${BARTAP_PRIVATE_INCLUDE_DIR})
+target_include_directories(bartap_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} ${BARTAP_PRIVATE_INCLUDE_DIR})
 set_target_properties(bartap_tests PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 target_compile_definitions(bartap_tests PRIVATE
     BARTAP_TESTS_FIXTURE_DIR="${BARTAP_TESTS_FIXTURE_DIR}"

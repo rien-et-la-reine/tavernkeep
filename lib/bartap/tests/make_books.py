@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: 2026 Harsh Patel
 # SPDX-License-Identifier: MIT
-"""Generate small EPUB books for Bartap's book-level tests, the CFI oracle and the fuzz seeds.
+"""Generate small EPUB books for Bartap's book-level tests and fuzz seeds.
 
     python3 tests/make_books.py --out DIR
 
@@ -19,6 +19,12 @@ goes in. Deterministic: fixed zip timestamps, no randomness. Uses only the stand
     duplicate.epub      two entries named epub/style.css (the first must win, D21)
     lenient.epub        malformed markup in a chapter and in the OPF: opens, with warnings
     long-attributes.epub  a 2 KiB Calibre-style meta content and a 4 KiB SVG path: both must open
+    boundaries.epub     a 2 KiB prefix before unique-identifier, and a title and TOC label cut at a
+                        UTF-8 boundary
+    untyped-before-toc.epub  an untyped nav ahead of the toc nav: the toc nav wins
+    untyped-only.epub   landmarks and an untyped nav, no toc nav: the untyped nav is the fallback
+    uid-dangling.epub   unique-identifier names no dc:identifier: the first non-empty one stands in
+    uid-late.epub       a long unnamed identifier ahead of the named one: the named one wins, untruncated
 """
 
 import argparse
@@ -208,7 +214,7 @@ def books():
         ("META-INF/container.xml", CONTAINER.format(path="content.opf")),
         ("content.opf", opf3(plain_items, ["c"], title="Plain")),
         ("c.xhtml", END),
-    ], {"title": "Plain", "spine": 1, "toc": 0, "warnings": 1 << 9})
+    ], {"title": "Plain", "spine": 1, "toc": 0, "warnings": 1 << 7})
 
     dangling_items = [("c", "c.xhtml", "application/xhtml+xml", ""),
                       ("gone", "gone.xhtml", "application/xhtml+xml", "")]
@@ -216,7 +222,7 @@ def books():
         ("META-INF/container.xml", CONTAINER.format(path="content.opf")),
         ("content.opf", opf3(dangling_items, ["c", "gone", "nothing"], extra_meta='    <meta name="cover" content="none"/>\n')),
         ("c.xhtml", END),
-    ], {"spine": 3, "toc": 0, "warnings": (1 << 8) | (1 << 9)})
+    ], {"spine": 1, "toc": 0, "warnings": (1 << 4) | (1 << 7)})
 
     dup = epub3_entries()
     dup.append(("epub/style.css", "p { color: red; }\n"))
@@ -238,7 +244,7 @@ trailing junk <after/> the root
         ("META-INF/container.xml", CONTAINER.format(path="content.opf")),
         ("content.opf", lenient_opf),
         ("bad.xhtml", bad_chapter),
-    ], {"title": "Lenient & Sloppy", "spine": 1, "toc": 0, "warnings": (1 << 9) | (1 << 11)})
+    ], {"title": "Lenient & Sloppy", "spine": 1, "toc": 0, "warnings": 1 << 7})
 
     long_meta = '    <meta name="calibre:user_metadata" content="{}"/>\n'.format("{&quot;x&quot;: " + "1" * 2048 + "}")
     svg_path = "M0 0 " + "L1 1 " * 820
@@ -250,7 +256,52 @@ trailing junk <after/> the root
         ("META-INF/container.xml", CONTAINER.format(path="content.opf")),
         ("content.opf", opf3([("s", "s.xhtml", "application/xhtml+xml", "")], ["s"], extra_meta=long_meta)),
         ("s.xhtml", svg_chapter),
-    ], {"spine": 1, "toc": 0, "warnings": 1 << 9})
+    ], {"spine": 1, "toc": 0, "warnings": (1 << 7) | (1 << 2)})
+
+    # A long irrelevant prefix must not hide unique-identifier. Display truncation must stop
+    # before the Euro sign rather than keeping a partial sequence or appending the later z.
+    boundary = []
+    for path, data in epub3_entries():
+        if path.endswith("content.opf"):
+            data = data.replace('unique-identifier="uid"', 'prefix="' + "x" * 2048 + '" unique-identifier="uid"')
+            data = data.replace('<dc:identifier id="uid">', '<dc:identifier id="wrong">wrong</dc:identifier><dc:identifier id="uid">')
+            data = data.replace("A Test Book", "a" * 126 + "€z")
+        elif path.endswith("toc.xhtml"):
+            data = data.replace("Chapter   One", "a" * 126 + "€z")
+        boundary.append((path, data))
+    out["boundaries.epub"] = (boundary, {"title": "a" * 126, "spine": 3, "toc": 6,
+        "identifier": "urn:uuid:00000000-0000-4000-8000-000000000000", "warnings": 1 << 6,
+        "toc_warnings": 1 << 8, "first_label": "a" * 126})
+
+    # EPUB 3.3 requires one nav with epub:type="toc"; an untyped nav is only a fallback when it is absent.
+    nav_items = [("nav", "nav.xhtml", "application/xhtml+xml", "nav"), ("c", "c.xhtml", "application/xhtml+xml", "")]
+    untyped = '<nav><ol><li><a href="c.xhtml">Untyped</a></li></ol></nav>\n'
+    typed = '<nav epub:type="toc"><ol><li><a href="c.xhtml">Typed one</a></li><li><a href="c.xhtml">Typed two</a></li></ol></nav>\n'
+    landmarks = '<nav epub:type="landmarks"><ol><li><a href="c.xhtml">Landmark</a></li></ol></nav>\n'
+    for name, navs, label, count in (("untyped-before-toc.epub", untyped + typed, "Typed one", 2),
+                                     ("untyped-only.epub", landmarks + untyped, "Untyped", 1)):
+        out[name] = ([
+            ("META-INF/container.xml", CONTAINER.format(path="content.opf")),
+            ("content.opf", opf3(nav_items, ["c"])),
+            ("nav.xhtml", XHTML3_HEAD.format(title="Nav") + "<body>\n" + navs + "</body></html>\n"),
+            ("c.xhtml", END),
+        ], {"spine": 1, "toc": count, "first_label": label, "warnings": 0})
+
+    # OPF 3.3: unique-identifier must name a dc:identifier. When it names none, the first non-empty
+    # identifier stands in, with a markup warning. A stand-in cut short that the named one later replaces
+    # must not leave a truncation warning behind.
+    uid = '<dc:identifier id="uid">urn:uuid:00000000-0000-4000-8000-000000000000</dc:identifier>'
+    for name, ids, identifier, warnings in (
+            ("uid-dangling.epub",
+             '<dc:identifier id="blank"></dc:identifier><dc:identifier id="a">first-id</dc:identifier>'
+             '<dc:identifier id="b">second-id</dc:identifier>', "first-id", 1 << 2),
+            ("uid-late.epub", "<dc:identifier>" + "x" * 200 + "</dc:identifier>" + uid,
+             "urn:uuid:00000000-0000-4000-8000-000000000000", 0)):
+        out[name] = ([
+            ("META-INF/container.xml", CONTAINER.format(path="content.opf")),
+            ("content.opf", opf3([("c", "c.xhtml", "application/xhtml+xml", "")], ["c"]).replace(uid, ids)),
+            ("c.xhtml", END),
+        ], {"spine": 1, "toc": 0, "identifier": identifier, "warnings": (1 << 7) | warnings})
     return out
 
 

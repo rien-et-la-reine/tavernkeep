@@ -913,20 +913,21 @@ def damaged_zip_cases(fx, normal, stored, zip64, zip64_marks, entries):
                     "zip/stored.zip with the chapter's compressed size in the central directory one less "
                     "than its uncompressed size: a stored entry's two sizes must agree (D22).", "corrupt",
                     ["entry"], CHAPTER)
-    add_damaged_zip(fx, "container_duplicate",
-                    build_zip(entries + [("META-INF/container.xml", CONTAINER_XML)]),
-                    "normal with a second META-INF/container.xml entry at the end (D21).", "corrupt",
-                    ["open"])
-    add_damaged_zip(fx, "mimetype_duplicate", build_zip(entries + [entries[0]]),
-                    "normal with a second mimetype entry at the end (D21).", "corrupt", ["open"])
+    # D21: duplicate names select the first central-directory entry, including container/mimetype.
+    add_zip(fx, "container_duplicate", build_zip(entries + [("META-INF/container.xml", CONTAINER_XML)]),
+            entries, default_method, "Duplicate container: first match wins.")
+    add_zip(fx, "mimetype_duplicate", build_zip(entries + [entries[0]]),
+            entries, default_method, "Duplicate mimetype: first match wins, with a packaging warning.")
     add_damaged_zip(fx, "container_missing",
                     build_zip([e for e in entries if e[0] != "META-INF/container.xml"]),
-                    "normal without META-INF/container.xml: a zip archive, but not an EPUB (D21).",
-                    "not an epub", ["open"])
-    add_damaged_zip(fx, "mimetype_other_format",
-                    build_zip([("mimetype", b"application/vnd.oasis.opendocument.text")] + entries[1:]),
-                    "normal with a stored mimetype declaring an OpenDocument text document, which uses the "
-                    "same container format (D19).", "not an epub", ["open"])
+                    "Missing essential container.xml.", "not an epub", ["open"])
+    changed = [("mimetype", b"application/vnd.oasis.opendocument.text")] + entries[1:]
+    data = build_zip(changed)
+    records = zip_entry_records(data, changed, default_method)
+    records[0]["contents"] = fx.file("zip-warnings/contents/mimetype_other_format/mimetype", changed[0][1])
+    add_warning_zip(fx, "mimetype_other_format", data, records,
+                    "Wrong mimetype is a warning; container and OPF determine whether the book opens.",
+                    ["mimetype content"])
 
 
 def warning_zip_cases(fx, entries, normal):
@@ -1013,6 +1014,14 @@ def main():
     bitflip_cases(fx)
     invalid_cases(fx)
     zip_cases(fx)
+    for i in range(24):
+        r = rng("differential_%d" % i)
+        data = (prose(r, r.randrange(1, 20000)) if i % 2 else noise(r, r.randrange(1, 4000)))
+        strategy = (zlib.Z_DEFAULT_STRATEGY, zlib.Z_FIXED, zlib.Z_HUFFMAN_ONLY)[i % 3]
+        compressor = zlib.compressobj(i % 10, zlib.DEFLATED, -15, 8, strategy)
+        stream = compressor.compress(data) + compressor.flush()
+        add_stream(fx, "differential_%d" % i, stream, data,
+                   "Deterministic zlib differential input: level and strategy varied.", "zlib")
     fx.write(args.out)
 
     kinds = {}

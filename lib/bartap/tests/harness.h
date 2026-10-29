@@ -58,4 +58,13 @@ typedef struct {
 extern const test_case_t headers_tests[];
 extern const size_t headers_test_count;
 
+extern const test_case_t text_tests[];
+extern const size_t text_test_count;
+
+extern const test_case_t fixtures_tests[];
+extern const size_t fixtures_test_count;
+
+extern const test_case_t xml_tests[];
+extern const size_t xml_test_count;
+
 #endif
