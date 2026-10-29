@@ -20,7 +20,7 @@ target_compile_definitions(bartap_fuzz_lib PUBLIC ${BARTAP_PUBLIC_DEFINITIONS})
 set_target_properties(bartap_fuzz_lib PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED ON C_EXTENSIONS OFF)
 target_compile_options(bartap_fuzz_lib PRIVATE ${BARTAP_FUZZ_OPTIONS} ${BARTAP_WARNING_OPTIONS})
 
-set(BARTAP_FUZZERS inflate xml ocf epub)
+set(BARTAP_FUZZERS inflate xml ocf epub text)
 foreach(name IN LISTS BARTAP_FUZZERS)
     add_executable(fuzz_${name} fuzz_${name}.c)
     target_link_libraries(fuzz_${name} PRIVATE bartap_fuzz_lib)

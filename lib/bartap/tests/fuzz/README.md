@@ -24,12 +24,17 @@ mkdir -p /tmp/fuzz/epub && cp tests/fuzz/corpus/epub/* /tmp/fuzz/epub/
 
 | Harness | Input | Checks |
 |---|---|---|
-| `fuzz_inflate` | A byte for the input piece size, one for the output piece size (1 to 256), then raw DEFLATE | TODO(rewrite): differential against zlib's raw inflate (windowBits -15) |
+| `fuzz_inflate` | A byte for the input piece size, one for the output piece size (1 to 256), then raw DEFLATE | Differential against zlib for output up to 1 MiB, with varied input/output chunks |
 | `fuzz_xml` | A byte for the piece size, then a document | TODO(rewrite): offsets never decrease; every byte consumed once |
 | `fuzz_ocf` | A zip archive | TODO(rewrite): every entry read to its end with small and large buffers, agreeing |
 | `fuzz_epub` | An EPUB | Open, metadata, the TOC and every spine item's text. TODO(rewrite): seek to every token's location and resume at the same token |
 
-The harnesses are skeletons for the rewrite. The seed corpora predate it: the `xml` seeds were written
+`fuzz_text` accepts XHTML directly (up to 16 KiB) and checks raw anchors and exact position
+round trips for the first 16 tokens, then walks the rest. Its direct entry point lets mutations reach
+formatting without first passing archive checks.
+
+The XML/ZIP/EPUB harnesses also exercise parsing under sanitizers; their extra semantic TODOs are not
+claims of completed checks. The seed corpora predate it: the `xml` seeds were written
 for the old harness, whose first bytes were flags, a depth limit and buffer sizes, so their leading bytes
 now act as noise until `make_seeds.py` is updated.
 
