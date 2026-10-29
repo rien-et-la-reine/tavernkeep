@@ -1,0 +1,136 @@
+Tail buffer for stream-mode seeking (D16)
+=========================================
+
+A caller-provided buffer holds the chapter's last bytes as the forward pass inflates them, plus the
+iterator's formatting state at the first safe chunk boundary inside it. A seek into the buffer then
+restores that state and replays from the buffer: no card reads, no inflate. Everything is in text.c and
+bartap.h; xml.c needs nothing new.
+
+Terms: B = buffer start = size - capacity (or 0 if the chapter fits). S = resume point, the first safe
+chunk boundary at or after B. Fill mark = chapter offset of the end of what is buffered.
+
+
+1. Header (include/bartap.h)
+----------------------------
+
+1. Two new parameters on bartap_text_open (bartap.h:397): a buffer pointer and its capacity.
+   - Capacity type: uint32_t matches the chapter offsets; size_t matches bartap_text_open_memory's len.
+   - Reject a NULL buffer with a non-zero capacity, and probably a non-NULL buffer with zero capacity,
+     as ERR_ARG, the way bartap_text_open_memory checks its arguments.
+
+2. A saved-state struct declared in the header (D9: the caller declares bartap_text_t by its real type).
+   It holds what bartap_text_reset_state resets (text.c:34) that is neither derived nor lookahead:
+   - style, depth, skip_depth, pre_depth
+   - line_content, pending_space, previous_cr
+   - frames[] and ignored[]
+   - event_offset and event_index
+   Leave out:
+   - context[]: bartap_text_save_context rebuilds it from the frames at the top of every loop.
+   - next, next_loc, ready: they belong to the lookahead.
+   - warnings: sticky, not state to restore.
+   Save event_offset and event_index even though they look derived: without them the first chunk after
+   S may get a different token_index than an unbuffered replay gives it.
+
+3. New fields in bartap_text_t:
+   - buffer pointer and capacity
+   - B, fill mark, S
+   - flags: state saved, buffer bad (CRC failed), reading from buffer
+   - the saved state
+   About 240 B in total; re-measure on Arm.
+
+
+2. Filling the buffer (text.c:15, bartap_text_fill_stream)
+----------------------------------------------------------
+
+4. The tap. Note bartap_stream_tell before calling bartap_stream_read. After it, copy every byte
+   delivered at a chapter offset >= B and >= the fill mark into the buffer at (offset - B), then advance
+   the fill mark.
+   - Bytes a stream replay delivers again below the fill mark are identical: skip them, don't recopy.
+   - The tap has to sit here, not in the XML layer: the parser reads ahead (BARTAP_XML_IN_SIZE,
+     256 B), so bytes go past before the chunk boundary they belong to is visible.
+
+5. CRC failure. If the stream returns ERR_CORRUPT at the end, set the buffer-bad flag. Seeks then
+   ignore the buffer from that point.
+
+
+3. Saving the state (text.c:320, in bartap_text_generate)
+---------------------------------------------------------
+
+6. Where to save: just before the bartap_xml_next call that fetches a new chunk. There, pending
+   end-of-block pops are done and the current text run is used up. Save when all of these hold:
+   - no state saved yet
+   - not in memory mode, and not already reading from the buffer
+   - xml.offset >= B
+   - !xml.pending_end_tag and !xml.in_cdata
+   Record S = xml.offset. If CDATA or a self-closing tag straddles that point, the next boundary will do.
+
+7. Check in xml.c: resuming a fresh parser in the middle of a long text run assumes the parser keeps no
+   hidden state between XML_TEXT pieces. The only state found so far is in_cdata and pending_end_tag,
+   but confirm the text split never lands inside an entity or a UTF-8 sequence. If it can, that
+   boundary isn't safe either.
+
+
+4. Reading from the buffer
+--------------------------
+
+8. A third fill function, next to the stream and memory ones. It serves bytes from the buffer between
+   the read position and the fill mark. At the fill mark, before the chapter's end, it switches back to
+   the stream:
+   - if bartap_stream_tell equals the fill mark, continue from the stream, with the tap still on;
+   - if the stream is behind (a stream seek rewound it, then a buffered seek came after), read and
+     discard forward to the fill mark first;
+   - the stream can never be ahead: the fill mark is the furthest it has read.
+
+9. Restoring the state: copy the saved state back into the iterator, initialize the XML parser with the
+   buffer fill function, then set xml.offset = S by hand (bartap_xml_init zeroes it, xml.c:289).
+   - Offsets then stay chapter-relative, so positions are the same with or without a buffer.
+   - The byte-order-mark check at offset 0 can't trigger, because S > 0 whenever this is used. If S = 0
+     (the whole chapter fits), the saved state is just the initial state.
+
+10. bartap_text_reset_state and bartap_text_rewind (text.c:34, :59): a rewind leaves buffer-reading
+    mode and goes back to the stream fill function. It must not clear the buffer, the fill mark or the
+    saved state; those survive rewinds, and only opening resets them.
+
+
+5. Seeking (text.c:548, :602)
+-----------------------------
+
+11. bartap_text_match_anchor: if B <= window start and window end <= fill mark, read the window
+    straight from the buffer, with no stream rewind. If the window starts before B, search only from B
+    (D16). Matching nothing falls back to the bare offset.
+    UNSETTLED: a window that runs past the fill mark when the buffer is only partly filled. D16 only
+    covers the start side. Clip at the fill mark the same way (simpler), or stream for that one case.
+
+12. bartap_text_seek: after the anchor step, pick the replay path:
+    - target in [S, fill mark), state saved, buffer not bad: restore the state (step 9) and run the
+      existing prepare loop;
+    - otherwise: rewind and replay from the start, as now. A target in [B, S) has already been spared
+      the first stream pass.
+
+13. bartap_text_seek_fragment: leave it alone. It has no offset to aim for, so it replays from the start.
+
+14. Reaching the end of the chapter from the buffer: return BARTAP_END without a CRC check. A full
+    buffer means the forward pass reached the end and checked the CRC; a failed check set buffer-bad.
+
+
+6. Call sites, tests and docs
+-----------------------------
+
+15. Add NULL, 0 at the existing bartap_text_open calls: tests/test_fixtures.c:185 and :264,
+    tests/test_text.c:42, tests/fuzz/fuzz_epub.c:43. The firmware doesn't call it yet.
+
+16. Tests. Core property: seeking with a buffer gives the same tokens and positions as seeking without
+    one, for every position in every fixture chapter.
+    - Capacities: 1, a few hundred bytes, half the chapter, the whole chapter, larger than the chapter.
+    - No card reads during a seek into the buffer (counting byte source).
+    - A partly filled buffer, including the stream-behind case: forward, seek back before S, seek into
+      the buffer, read past the fill mark.
+    - Deep nesting, pre with CR LF, and CDATA straddling B.
+    - A chapter with a bad CRC.
+    - A buffer-capacity input in fuzz_epub.
+
+17. Docs once it works:
+    - remove "Not yet implemented" from D16
+    - update README.md and VALIDATION.md's "Deliberately deferred" note
+    - re-measure bartap_text_t on Arm
+    - time a seek on the M33
