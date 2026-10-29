@@ -22,7 +22,7 @@
 
 /* ------------------------------------------------------------ byte_source.c */
 
-/* 32-bit FNV-1a over len bytes, for matching paths and tag names without keeping the strings. */
+/* 32-bit FNV-1a over len bytes, for matching paths without keeping the strings. */
 uint32_t bartap_hash(const void *data, size_t len);
 
 /* Copy src (len bytes of UTF-8) into dst as a NUL-terminated string, cut back to a character boundary
@@ -79,7 +79,6 @@ typedef enum {
 
 typedef struct {
     bartap_xml_type_t type;
-    uint32_t name_hash;         // bartap_hash of the local name, lower-cased
     uint32_t offset;            // of the token's first byte in the document
     const char *text;           // TEXT: into the tokenizer's buffer, valid until the next call
     size_t text_len;
@@ -87,8 +86,9 @@ typedef struct {
 
 void bartap_xml_init(bartap_xml_t *xml, bartap_xml_fill_fn fill, void *user);
 bartap_err_t bartap_xml_next(bartap_xml_t *xml, bartap_xml_token_t *token);
-/* The value of the current start tag's attribute name (local name), decoded into buf. */
-bartap_err_t bartap_xml_attr(const bartap_xml_t *xml, const char *name, char *buf, size_t size,
+/* Selected attributes used by Bartap, matched by local name, decoded into buf. Unretained names
+ * return NOT_FOUND. Oversized values return LIMIT and an empty buffer, never a usable prefix. */
+bartap_err_t bartap_xml_attr(bartap_xml_t *xml, const char *name, char *buf, size_t size,
     size_t *len);
 
 #endif
